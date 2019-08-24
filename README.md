@@ -7,3 +7,5 @@
 
 如果需要运行代码 的话需要下载所有的论文，解压到papers文件夹中
 然后依次运行pdf2txt,getFreq,drawLine
+
+视频演示效果https://www.bilibili.com/video/av65078532
