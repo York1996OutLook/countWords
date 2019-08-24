@@ -1,0 +1,1489 @@
+End-to-end Interpretable Neural Motion Planner
+
+Wenyuan Zeng1
+
+,
+
+2 ∗ Wenjie Luo1
+
+,
+
+2∗
+
+Simon Suo1
+
+,
+
+2 Abbas Sadat1 Bin Yang1
+
+2
+
+,
+
+Sergio Casas1
+
+,
+
+2 Raquel Urtasun1
+
+2
+
+,
+
+1Uber Advanced Technologies Group
+
+2University of Toronto
+
+{wenyuan,wenjie,suo,abbas,byang10,sergio.casas,urtasun}@uber.com
+
+Abstract
+
+In this paper, we propose a neural motion planner for
+learning to drive autonomously in complex urban scenar-
+ios that include trafﬁc-light handling, yielding, and interac-
+tions with multiple road-users. Towards this goal, we design
+a holistic model that takes as input raw LIDAR data and a
+HD map and produces interpretable intermediate represen-
+tations in the form of 3D detections and their future trajec-
+tories, as well as a cost volume deﬁning the goodness of
+each position that the self-driving car can take within the
+planning horizon. We then sample a set of diverse physi-
+cally possible trajectories and choose the one with the min-
+imum learned cost. Importantly, our cost volume is able to
+naturally capture multi-modality. We demonstrate the ef-
+fectiveness of our approach in real-world driving data cap-
+tured in several cities in North America. Our experiments
+show that the learned cost volume can generate safer plan-
+ning than all the baselines.
+
+1. Introduction
+
+Self-driving vehicles (SDVs) are going to revolutionize
+the way we live. Building reliable SDVs at scale is, how-
+ever, not a solved problem. As is the case in many appli-
+cation domains, the ﬁeld of autonomous driving has been
+transformed in the past few years by the success of deep
+learning. Existing approaches that leverage this technology
+can be characterized into two main frameworks: end-to-end
+driving and traditional engineering stacks.
+
+End-to-end driving approaches [3, 24] take the output of
+the sensors (e.g., LiDAR, images) and use it as input to a
+neural net that outputs control signals, e.g., steering com-
+mand and acceleration. The main beneﬁt of this framework
+is its simplicity as only a few lines of code can build a model
+and labeled training data can be easily obtained automati-
+cally by recording human driving under a SDV platform. In
+practice, this approach suffers from the compounding error
+
+due to the nature of self-driving control being a sequential
+decision problem, and requires massive amounts of data to
+generalize. Furthermore, interpretability is difﬁcult to ob-
+tain for analyzing the mistakes of the network.
+It is also
+hard to incorporate sophisticated prior knowledge about the
+scene, e.g. that vehicles should not collide.
+
+In contrast, most self-driving car companies, utilize a
+traditional engineering stack, where the problem is divided
+into subtasks: perception, prediction, motion planning and
+control. Perception is in charge of estimating all actors’ po-
+sitions and motions, given the current and past evidences.
+This involves solving tasks such as 3D object detection and
+tracking. Prediction1, on the other hand, tackles the prob-
+lem of estimating the future positions of all actors as well
+as their intentions (e.g., changing lanes, parking). Finally,
+motion planning takes the output from previous stacks and
+generates a safe trajectory for the SDV to execute via a con-
+trol system. This framework has interpretable intermediate
+representations by construction, and prior knowledge can be
+easily exploited, for example in the form of high deﬁnition
+maps (HD maps).
+
+However, solving each of these sub-tasks is not only
+hard, but also may lead to a sub-optimal overall system
+performance. Most self-driving companies have large en-
+gineering teams working on each sub-problem in isolation,
+and they train each sub-system with a task speciﬁc objec-
+tive. As a consequence, an advance in one sub-system does
+not easily translate to an overall system performance im-
+provement. For instance, 3D detection tries to maximize
+AP, where each actor has the same weight. However, in
+a driving scenario, high-precision detections of near-range
+actors who may inﬂuence the SDV motion, e.g. through in-
+teractions (cutting in, sudden stopping), is more critical. In
+addition, uncertainty estimations are difﬁcult to propagate
+and computation is not shared among different sub-systems.
+This leads to longer reaction times of the SDV and make the
+overall system less reliable.
+
+In this paper we bridge the gap between these two frame-
+works. Towards this goal, we propose the ﬁrst end-to-
+
+∗denotes equal contribution.
+
+1We’ll use prediction and motion forecasting interchangeably.
+
+8660
+
+Backbone Network
+
+Trajectory Sampler
+
+Perception
+
+Cost Volume
+
+Trajectory Samples
+
++
+
++
+
+Argmin Trajectory
+
+Figure 1. Our end-to-end interpretable neural motion planner. Backbone network takes LiDAR data and maps as inputs, and outputs
+bounding boxes of other actors for future timesteps (perception), as well as a cost volume for planning with T ﬁlters. Next, for each
+trajectory proposal from the sampler, its cost is indexed from different ﬁlters of the cost volume and summed together. The trajectory with
+the minimal cost will be our ﬁnal planning.
+
+end learnable and interpretable motion planner. Our model
+takes as input LiDAR point clouds and a HD map, and pro-
+duces interpretable intermediate representations in the form
+of 3D detections and their future trajectories. Our ﬁnal out-
+put representation is a space-time cost volume that repre-
+sents the “goodness” of each location that the SDV can take
+within a planning horizon. Our planner then samples a set
+of diverse and feasible trajectories, and selects the one with
+the minimum learned cost for execution. Importantly, the
+non-parametric cost volume is able to capture the uncer-
+tainty and multi-modality in possible SDV trajectories, e.g
+changing lane v.s keeping lane.
+
+We demonstrate the effectiveness of our approach in
+real world driving data captured in several cities in North
+America. Our experiments show that our model provides
+good interpretable representations, and shows better perfor-
+mance. Speciﬁcally for detection and motion forecasting,
+our model outperforms recent neural architectures specif-
+ically designed on these tasks. For motion planning, our
+model generates safer planning compared to the baselines.
+
+2. Related Work
+
+Imitation Learning: Imitation learning (IL) uses expert
+demonstrations to directly learn a policy that maps states to
+actions. IL for self-driving vehicles was introduced in the
+pioneering work of [24] where a direct mapping from the
+sensor data to steering angle and acceleration is learned. [3]
+follows the similar philosophy. In contrast, with the help of
+a high-end driving simulator [9], Codevilla et al. [8] exploit
+conditional models with additional high-level commands
+
+such as continue, turn-left, turn-right. Muller et al. [21]
+incorporate road segmentation as intermediate representa-
+tions, which are then converted into steering commands. In
+practice, IL approaches suffer from the compounding error
+due to the nature of self-driving control being a sequential
+decision problem. Furthermore, these approaches require
+massive amount of data, and generalize poorly, e.g., to situ-
+ations drifting out of lane.
+
+RL & IRL: Reinforcement learning (RL) is a natural
+ﬁt for sequential decision problems as it considers the in-
+teractions between the environment and the agent (a self-
+driving car in this case). Following the success of Alpha
+GO [29], RL has been applied to self-driving in [15, 23].
+On the other hand, the inverse reinforcement learning (IRL)
+looks at learning the reward function for a given task.
+[31, 35] develop IRL algorithms to learn drivable region
+for self-driving cars.
+[25] further infers possible trajec-
+tories with a symmetrical cross-entropy loss. However,
+all these approaches have only been tested on simulated
+datasets or small real-world datasets, and it is unclear if RL
+and IRL can scale to more realistic settings. Furthermore,
+these methods do not produce interpretable representations,
+which are desirable in safety critical applications.
+
+Optimization Based Planners: Motion planning has
+long been treated as an independent task that uses the out-
+puts of perception and prediction modules to formulate an
+optimization problem, usually by manually engineering a
+cost function [4, 10, 20, 36]. The preferred trajectory is then
+generated by minimizing this cost function.
+In practice,
+to simplify the optimization problem, many approaches as-
+
+8661
+
+Step1: Clothoid
+
+Step2: Velocity Profile
+
+Step3: Trajectory
+
+Figure 2. Trajectory Representation. We ﬁrst sample a set of pa-
+rameters of a Clothoid to determine the shape of a trajectory. We
+then sample a velocity proﬁle to determine how fast the SDV go
+along this trajectory. Combining these two, we can get a space-
+time trajectory.
+
+sume the objective to be quadratic [7], decompose lateral
+and longitudinal planning as two tasks [1, 10] or represent
+the search space into speed and path [11, 14]. In [1] A* is
+used to search the space of possible motion. Similarly, the
+Baidu motion planner [10] uses dynamic programming to
+ﬁnd an approximate path and speed proﬁle. In [36], the tra-
+jectory planning problem is formulated as continuous op-
+timization and used in practice to demonstrate 100km of
+autonomous driving. In sampling-based approaches, a set
+of trajectories is generated and evaluated against a prede-
+ﬁned cost, among which, the one with minimum cost is
+chosen [27, 30]. Such approaches are attractive since they
+are highly parallelizable [19]. The drawback of all these
+hand-engineered approaches is that they are not robust to
+real-world driving scenarios, thus requires tremendous en-
+gineering efforts to ﬁne-tune it.
+
+Planning under uncertainty: Planning methods for ro-
+bust and safe driving in the presence of uncertainty have
+also been explored [2, 12, 33]. Uncertainty in the intention
+of other actors is the main focus of [2, 33]. In [12], possible
+future actions of other vehicles and collision probability are
+used to account for the uncertainty in obstacles positions.
+Compared to these approaches, our planner naturally han-
+dles uncertainty by learning a non-parametric cost function.
+
+Holistic Models: These models provide interpretabil-
+ity. Chen et al. [6] propose to learn a mapping from the
+sensor data to affordances, such as distance to left bound-
+ary/leading vehicle. This is then fed into a controller that
+generates steering command and acceleration. Sauer et al.
+[26] further propose a variant conditioned on direction com-
+mand. On the other hand, Luo et al. [18] propose a joint
+model for perception and prediction from raw LiDAR data
+and [5] extends it to predict each vehicle’s intention. All
+the methods above are trained for tasks that provide inter-
+pretable perception/prediction outputs to be used in motion
+planning. However, no feed-back is back-propagated from
+the motion planning module.
+
+In this work, we take a holistic model approach and take
+it one step further by designing a single neural network
+that takes raw sensors and dynamic map data as input and
+predicts the cost map for planning. Compared with imita-
+tion learning approaches [3, 8, 24] that directly regress a
+steer angle (from the raw data), our approach provides in-
+terpretability and handles multimodality naturally. When
+compared with traditional planners which use manually de-
+signed cost functions built on top of perception and predic-
+tion systems, our model has the advantage of being jointly
+trained and thus learns representations that are optimal for
+the end-task. Furthermore, our model can handle uncer-
+tainty naturally (as this is represented in the cost) and does
+not require costly parameter tuning.
+
+3. Deep Structured Interpretable Planner
+
+We propose an end-to-end learnable motion planner that
+generates accurate space-time trajectories over a planning
+horizon of a few seconds. Importantly, our model takes as
+input LiDAR point clouds and a high deﬁnition map and
+produces interpretable intermediate representations in the
+form of 3D detections and their future motion forecasted
+over the planning horizon. Our ﬁnal output representation
+is a space-time cost volume that represents the “goodness”
+of each possible location that the SDV can take within the
+planning horizon. Our planner then scores a series of trajec-
+tory proposals using the learned cost volume and chooses
+the one with the minimum cost.
+
+We train our model end-to-end with a multi-task objec-
+tive. Our planning loss encourages the minimum cost plan
+to be similar to the trajectory performed by human demon-
+strators. Note that this loss is sparse as a ground-truth tra-
+jectory only occupies small portion of the space. As a con-
+sequence, learning with this loss alone is slow and difﬁcult.
+To mitigate this problem, we introduce an another percep-
+tion loss that encourages the intermediate representations
+to produce accurate 3D detections and motion forecasting.
+This ensures the interpretability of the intermediate repre-
+sentations and enables much faster learning.
+
+3.1. Deep Structured Planning
+
+More formally, let s = {s0, s1, · · · , sT −1} be a trajec-
+tory spanning over T timesteps into the future, with st the
+location in bird’s eye view (BEV) at the timestep t. We
+formulate the planning problem as a deep structured mini-
+mization problem as follows
+
+s∗ = arg min
+
+s Xt
+
+ct(st)
+
+(1)
+
+where ct is our learned cost volume indexed at the timestep
+t, which is a 2D tensor with the same size as our region of
+interest. This minimization is approximated by sampling
+
+8662
+
+a set of physically valid trajectories s, and picking the one
+with minimum cost. Our model employs a convolutional
+network backbone to compute this cost volume. It ﬁrst ex-
+tracts features from both LiDAR and maps, and then feeds
+this feature map into two branches of convolution layers that
+output 3D detection and motion forecasting as well as the
+planning cost volume respectively. In this section we de-
+scribe our input representation and network in details.
+
+Input representation: Our approach takes raw point
+clouds as inputs, captured by a LiDAR mounted on top of
+the SDV. We employ T ′ = 10 consecutive sweeps as ob-
+servations, in order to infer the motion of all actors. For
+those sweeps, we correct for ego-motion and bring the point
+clouds from the past 10 frames to the same coordinate sys-
+tem centered at SDV’s current location. To make the in-
+put data amenable to standard convolutions, we follow [5]
+and rasterize the space into a 3D occupancy grid, where
+each voxel has a binary value indicating whether it con-
+tains a LiDAR point. This results in a 3D tensor of size
+HxW x(ZT ′), where Z, H, W represents the height and x-y
+spatial dimensions respectively. Note that we have concate-
+nated timesteps along the Z dimension, thus avoiding 3D
+convolutions which are memory and computation intensive.
+Access to a map is also a key for accurate motion plan-
+ning, as we need to drive according to trafﬁc rules (e.g., stop
+at a red light, follow the lane, change lanes only when al-
+lowed). Towards this goal, we exploit HD maps that contain
+information about the semantics of the scene such as the
+location of lanes, their boundary type (e.g., solid, dashed)
+and the location of stop signs. Similar to [5], we rasterize
+the map to form an M channels tensor, where each channel
+represents a different map element, including road, inter-
+sections, lanes, lane boundaries, trafﬁc lights, etc. Our ﬁnal
+input tensor is thus of size HxW x(ZT ′ + M ).
+
+Backbone: Our backbone is adapted from the detection
+network of [32] and consists of ﬁve blocks. Each block has
+{2, 2, 3, 6, 5} Conv2D layers with ﬁlter number {32, 64,
+128. 256, 256}, ﬁlter size 3x3 and stride 1. There are Max-
+Pool layers after each of the ﬁrst 3 blocks. A multi-scale
+feature map is generated after the ﬁrst 4 blocks as follows.
+We resize the feature maps from each of the ﬁrst 4 blocks to
+1/4 of the input size and concatenate them together similar
+to [34], in order to increase the effective receptive ﬁeld [17].
+These multi-scale features are then fed into the 5-th block.
+The whole backbone has a downsampling rate of 4.
+
+Perception Header: The perception header has two com-
+ponents formed of convolution layers, one for classiﬁcation
+and one for regression. To reduce the variance of regression
+targets, we follow SSD [16] and employ multiple prede-
+ﬁned anchor boxes ak
+i,j at each feature map location, where
+subscript i, j denotes the location on the feature map and k
+indexes over the anchors. In total, there are 12 anchors at
+
+each location, with different sizes, aspect ratios and orienta-
+tions. The classiﬁcation branch outputs a score pk
+i,j for each
+anchor indicating the probability of a vehicle at each an-
+chor’s location. The regression branch also outputs regres-
+sion targets for each anchor ak
+i,j at different time-steps. This
+x, lt
+includes localization offset lt
+h and heading
+angle at
+cos. The superscript t stands for time frame,
+ranging from 0 (present) to T − 1 into the future. Regres-
+sion is performed at every timesteps, thus producing motion
+forecasting for each vehicle.
+
+y, size st
+
+sin, at
+
+w, st
+
+Cost Volume Head: The cost volume head consists of
+several convolution and deconvolution layers. To produce a
+cost volume c at the same resolution as our bird-eye-view
+(BEV) input, we apply two deconvolution layers on the
+backbone’s output with ﬁlter number {128, 64}, ﬁlter size
+3x3 and stride 2. Each deconvolution layer is also followed
+by a convolution layer with ﬁlter number {128, 64}, ﬁlter
+size 3x3 and stride 1. We then apply a ﬁnal convolution
+layer with ﬁlter number T , which is our planning horizon.
+Each ﬁlter generates a cost volume ct for a future timestep
+t. This allows us to evaluate the cost of any trajectory s
+by simply indexing in the cost volume c.
+In our experi-
+ments, we also clip the cost volume value between -1000
+to +1000 after the network. Applying such bounds prevents
+the cost value shifting arbitrarily, and makes tuning hyper-
+parameters easier. We next describe our output trajectory
+parameterization.
+
+3.2. Efﬁcient Inference
+
+Given the input LiDAR sweeps and the HD map, we can
+compute the corresponding cost volume c by feedforward
+convolutional operations as describe above. The ﬁnal tra-
+jectory can then be computed by minimizing Eq. (1). Note,
+however, that this optimization is NP hard2. We thus rely on
+sampling to obtain a low cost trajectory. Towards this goal,
+we sample a wide variety of trajectories that can be exe-
+cuted by the SDV and produce as ﬁnal output the one with
+minimal cost according to our learned cost volume. In this
+section we describe how we efﬁciently sample physically
+possible trajectories during inference. Since the cost of a
+trajectory is computed by indexing from the cost volume,
+our planner is fast enough for real-time inference.
+
+Output Parameterization: A trajectory can be deﬁned
+by the combination of the spatial path (a curve in the 2D
+plane) and the velocity proﬁle (how fast we go along this
+path). Sampling a trajectory as a set of points in (x, y) ∈ ℜ2
+space is not a good idea, as a vehicle cannot execute all pos-
+sible set of points in the cartesian space. This is due for
+example to the physical limits in speed, acceleration and
+
+2We expect the output trajectory of our planner is physically feasible.
+This introduces constraints on the solution set. Under these physical con-
+straints, the optimization is NP hard.
+
+8663
+
+turning angle. To consider these real-world constraints, we
+impose that the vehicle should follow a dynamical model.
+In this paper, we employ the bicycle model [22], which is
+widely used for planning in self-driving cars. This model
+implies that the curvature κ of the vehicle’s path is approx-
+imately proportional to the steering angle φ (angle between
+the front wheel and the vehicle): κ = 2tan(φ)/L ≈ 2φ/L,
+where L is the distance between the front and rear axles of
+the SDV. This is a good approximation as φ is usually small.
+We then utilize a Clothoid curve, also known as Euler
+spiral or Cornu spiral, to represent the 2D path of the SDV
+[28]. We refer the reader to Fig. 2 for an illustration. The
+curvature κ of a point on this curve is proportional to its
+distance ξ alone the curve from the reference point, i.e.,
+κ(ξ) = πξ. Considering the bicycle model, this linear cur-
+vature characteristic corresponds to steering the front wheel
+angle with constant angular velocity. The canonical form of
+a Clothoid can be deﬁned as
+
+a(cid:19) N0(cid:21)
+
+s(ξ) = s0 + a(cid:20)C(cid:18) ξ
+S(ξ) =Z ξ
+C(ξ) =Z ξ
+
+a(cid:19) T0 + S(cid:18) ξ
+sin(cid:18) πu2
+2 (cid:19) du
+cos(cid:18) πu2
+2 (cid:19) du
+
+0
+
+0
+
+(2)
+
+(3)
+
+(4)
+
+Here, s(ξ) deﬁnes a Clothoid curve on a 2D plane, indexed
+by the distance ξ to reference point s0, a is a scaling factor,
+T0 and N0 are the tangent and normal vector of this curve
+at point s0. S(ξ) and C(ξ) are called the Fresnel integral,
+and can be efﬁciently computed. In order to fully deﬁne a
+trajectory, we also need a longitudinal velocity ˙ξ (velocity
+proﬁle) that speciﬁes the SDV motion along the path s(ξ):
+˙ξ(t) = ¨ξt + ˙ξ0, where ˙ξ0 is the initial velocity of the SDV
+and ¨ξ is a constant forward acceleration. Combining this
+and (2), we can obtain the trajectory points s in Eq. (1).
+
+Sampling: Since we utilize Clothoid curves, sampling a
+path corresponds to sampling the scaling factor a in Eq. (2).
+Considering the city driving speed limit of 15m/s, we sam-
+ple a uniformly from the range of 6 to 80m. Once a is sam-
+pled, the shape of the curve is ﬁxed.3 We then use the ini-
+tial SDV’s steering angle (curvature) to ﬁnd the correspond-
+ing position on the curve. Note that Clothoid curves can-
+not handle circle and straight line trajectories well, thus we
+sample them separately. The probability of using straight-
+line, circle and Clothoid curves are 0.5, 0.25, 0.25 respec-
+tively. Also, we only use a single Clothoid segment to
+specify the path of SDV which we think is enough for
+
+3We also sample a binary random variable indicating it’s a canonical
+Clothoid or a vertically ﬂipped mirror. They correspond with turning left
+or right respectively.
+
+In addition, we sample con-
+the short planning horizon.
+stant accelerations ¨ξ ranging from −5m/s2 to 5m/s2 which
+speciﬁes the SDV’s velocity proﬁle. Combining sampled
+curves and velocity proﬁles, we can project the trajecto-
+ries to discrete timesteps and obtain the corresponding way-
+points (See Fig 2) for which to evaluate the learned cost.
+
+3.3. End to End Learning
+
+Our ultimate goal is to plan a safe trajectory while fol-
+lowing the rules of trafﬁc. We want the model to understand
+where obstacles are and where they will be in the future in
+order to avoid collisions. Therefore, we use a multi-task
+training with supervision from detection, motion forecast-
+ing as well as human driven trajectories for the ego-car.
+Note that we do not have supervision for cost volume. We
+thus adopt max-margin loss to push the network to learn to
+discriminate between good and bad trajectories. The overall
+loss function is then:
+
+L = Lperception + βLplanning.
+
+(5)
+
+This multi-task loss not only directs the network to extract
+useful features, but also make the network output inter-
+pretable results. This is crucial for self-driving as it helps
+understand failure cases and improves the system. In the
+following, we describe each loss in more details.
+
+Perception Loss: Our perception loss includes classiﬁca-
+tion loss, for distinguishing a vehicle from the background,
+and regression loss, for generating precise object bounding
+boxes. For each predeﬁned anchor box, the network out-
+puts a classiﬁcation score as well as several regression tar-
+gets. This classiﬁcation score pk
+i,j indicates the probability
+of existence of a vehicle at this anchor. We employ a cross-
+entropy loss for the classiﬁcation deﬁned as
+
+Lcla = Xi,j,k(cid:0)qk
+
+i,j log pk
+
+i,j + (1 − qk
+
+i,j) log(1 − pk
+
+(6)
+
+i,j)(cid:1) ,
+
+i,j is the class label for this anchor (i.e., qk
+
+where qk
+i,j = 1
+for vehicle and 0 for background). The regression outputs
+include information of position, shape and heading angle at
+each time frame t, namely
+
+lx =
+
+xa − xl
+
+wl
+
+ly =
+
+ya − yl
+
+hl
+
+,
+
+sw = log
+
+wa
+wl
+
+sh = log
+
+ha
+hl ,
+
+asin = sin(θa − θl) acos = cos(θa − θl),
+
+where superscript a means anchor and l means label. We
+use a weighted smooth L1 loss over all these outputs. The
+overall perception loss is
+
+Lperception =X Lcla + α
+
+T
+
+Xt=0
+
+Lt
+
+reg! .
+
+(7)
+
+8664
+
+Method
+
+Ego-motin
+
+IL
+Acc
+
+Manual Cost
+
+Ours(3s)
+
+L2 (m)
+
+2.0s
+0.900
+0.839
+1.335
+1.432
+1.087
+
+1.0s
+0.281
+0.231
+0.403
+0.402
+0.314
+
+Collision Rate (%)
+
+3.0s
+2.025
+1.923
+2.797
+2.990
+2.353
+
+0.5s
+0.00
+0.00
+0.05
+0.00
+0.00
+
+1.0s
+0.01
+0.01
+0.12
+0.02
+0.01
+
+1.5s
+0.20
+0.19
+0.27
+0.09
+0.04
+
+2.0s
+0.54
+0.55
+0.53
+0.22
+0.09
+
+2.5s
+1.04
+1.04
+1.18
+0.79
+0.33
+
+3.0s
+1.81
+1.72
+2.39
+2.21
+0.78
+
+Lane Violation (%)
+3.0s
+1.0s
+6.73
+0.51
+5.38
+0.44
+0.64
+0.24
+0.39
+5.02
+2.99
+0.35
+
+2.0s
+2.72
+2.63
+0.46
+2.73
+0.77
+
+Table 1. Planning Metrics
+
+Note that the regression loss is summed over all vehicle cor-
+related anchors, from the current time frame to our predic-
+tion horizon T . Thus it teaches the model to predict the
+position of vehicles at every time frame.
+
+To ﬁnd the training label for each anchor, we associate
+it to its neighboring ground-truth bounding box, similar
+to [16, 18].
+In particular, for each anchor, we ﬁnd all
+the ground-truth boxes with intersection over union (IoU)
+higher than 0.4. We associate the highest one among them
+to this anchor, and compute the class label and regression
+targets accordingly. We also associate any non-assigned
+ground-truth boxes with their nearest neighbor. The remain-
+ing anchors are treated as background, and are not consid-
+ered in the regression loss. Note that one ground-truth box
+may associate to multiple anchors, but one anchor can at
+most be associated with one ground-truth box. During train-
+ing, we also apply hard negative mining to overcome imbal-
+ance between positive and negative samples.
+
+Planning Loss: Learning a reasonable cost volume is
+challenging as we do not have ground-truth. To overcome
+this difﬁculty, we minimize the max-margin loss where we
+use the ground-truth trajectory as a positive example, and
+randomly sampled trajectories as negative examples. The
+intuition behind is to encourage the ground-truth trajectory
+to have the minimal cost, and others to have higher costs.
+More speciﬁcally, assume we have a ground-truth trajec-
+tory {(xt, yt)} for the next T time steps, where (xt, yt) is
+the position of our vehicle at the t time step. Deﬁne the cost
+volume value at this point (xt, yt) as ˆct. Then, we sample
+N negative trajectories, the ith among which is {(xt
+i )}
+and the cost volume value at these points are ct
+i. The sam-
+pling procedure for negative trajectories is similar as we de-
+scribed in Section. 3.2, except there is 0.8 probability that
+the negative sample doesn’t obey SDV’s initial states, e.g.
+we randomly sample a velocity to replace SDV’s initial ve-
+locity. This will provide easier negative examples for the
+model to start with. The overall max-margin loss is deﬁned
+as
+
+i, yt
+
+Lplanning = X{(xt,yt)}  max
+
+1≤i≤N  T
+
+Xt=1(cid:2)ˆct − ct
+
+i + dt
+
+i + γt
+
+i(cid:3)+!!
+
+(8)
+The inner-most summation denotes the discrepancy be-
+tween the ground-truth trajectory and one negative trajec-
+
+i, yt
+
+tory sample, which is a sum of per-timestep loss. []+ rep-
+resents a ReLU function. This is designed to be inside the
+summation rather than outside, as it can prevent the cost
+volume at one time-step from dominating the whole loss. dt
+i
+is the distance between negative trajectory and ground-truth
+trajectory ||(xt, yt)−(xt
+i )||2, which is used to encourage
+negative trajectories far from the ground-truth trajectory to
+have much higher cost. γt
+i is the trafﬁc rule violation cost,
+which is a constant if and only if the negative trajectory t vi-
+olates trafﬁc rules at time t, e.g. moving before red-lights,
+colliding with other vehicles etc. This is used to determined
+how ‘bad’ the negative samples are, as a result, it will penal-
+ize those rule violated trajectories more severely and thus
+avoid dangerous behaviors. After computing the discrep-
+ancy between the ground-truth trajectory and each negative
+sample, we only optimize the worst case by the max opera-
+tion. This encourages the model to learn a cost volume that
+discriminates good trajectories from bad ones.
+
+4. Experiments
+
+In this section, we evaluate our approach on a large scale
+real-world driving dataset. The dataset was collected over
+multiple cities across North America. It consists of 6,500
+scenarios with about 1.4 million frames, the training set
+consists of 5,000 scenarios, while validation and test have
+500 and 1,000 scenarios respectively. Our dataset has anno-
+tated 3D bounding boxes of vehicles for every 100ms. For
+all experiments, we utilize the same spatial region, which
+is centered at the SDV, with 70.4 meters both in front and
+back, 40 meters to the left and right, and height from -2 me-
+ters to 3.4 meters. This corresponds to a 704x400x27 tensor.
+Our input sequence is 10 frames at 10Hz, while the output
+is 7 frames at 2Hz, thus resulting in a planning horizon of 3
+seconds.
+
+In the following, we ﬁrst show quantitative analysis on
+planning on a wide variety of metrics measuring collision,
+similarity to human trajectory and trafﬁc rule violation.
+Next we demonstrate the interpretability of our approach,
+through quantitative analysis of detection and motion fore-
+casting, as well as visualization of the learned cost volume.
+Last, we provide an ablation study to show the effects of dif-
+ferent loss functions and different temporal history lengths.
+
+8665
+
+Method
+
+FaF[18]
+
+IntentNet[5]
+
+Ours
+
+L2 along trajectory (m)
+0s
+3s
+1.52
+0.29
+1.27
+0.23
+0.21
+1.15
+
+1s
+0.49
+0.42
+0.37
+
+2s
+0.87
+0.79
+0.69
+
+L2 across trajectory (m)
+0s
+3s
+0.58
+0.16
+0.48
+0.16
+0.12
+0.37
+
+1s
+0.23
+0.21
+0.16
+
+2s
+0.39
+0.32
+0.25
+
+L1 (m)
+
+L2 (m)
+
+0s
+0.45
+0.39
+0.34
+
+1s
+0.72
+0.61
+0.54
+
+2s
+1.31
+1.09
+0.94
+
+3s
+2.14
+1.79
+1.52
+
+0s
+0.37
+0.32
+0.28
+
+1s
+0.60
+0.51
+0.45
+
+2s
+1.11
+0.93
+0.80
+
+3s
+1.82
+1.52
+1.31
+
+Table 2. Motion Forecasting Metric
+
+Input
+5
+
+10
+X
+
+Penalty mAP@IoU
+0.7
+81.3
+
+0.5
+94.1
+
+Prediction L2 (m)
+3s
+1s
+0.48
+1.34
+
+2s
+0.84
+
+Collision Rate (%)
+3s
+1s
+-
+-
+
+2s
+-
+
+Trafﬁc Violation (%)
+1s
+-
+
+3s
+-
+
+2s
+-
+
+X
+
+X
+
+X
+
+X
+
+X
+
+X
+
+-
+
+93.6
+94.2
+94.2
+
+-
+
+80.1
+81.1
+81.1
+
+-
+
+0.46
+0.45
+0.45
+
+-
+
+0.83
+0.80
+0.80
+
+-
+
+1.35
+1.30
+1.31
+
+0.01
+0.01
+0.01
+0.01
+
+0.23
+0.15
+0.29
+0.09
+
+1.42
+0.93
+1.40
+0.78
+
+0.37
+0.36
+0.36
+0.35
+
+1.06
+0.86
+1.02
+0.77
+
+3.85
+3.09
+3.26
+2.99
+
+ID
+
+Loss
+
+Det
+X
+
+X
+
+X
+
+X
+
+Plan
+
+X
+
+X
+
+X
+
+X
+
+1
+2
+3
+4
+5
+
+Table 3. Ablation Study. We compare effects of different supervisions, different input horizons and different training losses. ID denotes
+model id which we use for clarity and brevity.
+
+4.1. Planning Results
+
+We evaluate a wide variety of planning metrics. L2 Dis-
+tance to Real Trajectory: This evaluates how far away the
+planned trajectory is from the real executed trajectory. Note
+that the real trajectory is just one of the many possible tra-
+jectories that a human could do, and thus this metric is not
+perfect. Future Potential Collision Rate: This is used to
+see if the planned trajectory will overlap with other vehicles
+in the future. For a given timestep t, we compute the per-
+centage of occurrence of collisions up to time t, thus lower
+number is preferred. Lane Violation: this metric counts the
+percentage of planned trajectories crossing a solid yellow
+line. Note that lower is better, and here crossing is deﬁned
+if the SDV touches the line.
+
+We implement many baselines for comparison includ-
+ing: Ego-motion forecasting (Ego-motion): Ego-motion
+provides a strong cue of how the SDV would move in the
+future. This baselines takes only SDV’s past position as
+input and uses a 4-layer MLP to predict the future loca-
+tions. Imitation Learning (IL): We follow the imitation
+learning framework [3, 8, 24], and utilize a deep network to
+extract features from raw LiDAR data and rasterized map.
+For fair comparison, we use the same backbone described
+(Sec. 3.1) and same input parameterization (Sec. 3.1) than
+our approach. In addition, the same MLP from Ego-motion
+forecasting baseline is used to extract features from ego-
+motion. These two features are then concatenated and fed
+into a 3 layer MLP to compute the ﬁnal prediction. Adap-
+tive Cruise Control (ACC): This baseline implements the
+simple behavior of following the leading vehicle. The vehi-
+cle follows the lane center-line, while adaptively adjusting
+its speed to maintain a safe distance from the vehicle ahead.
+When there is no lead vehicle, a safe speed limit is followed.
+Trafﬁc controls (trafﬁc lights, stop signs) are observed as a
+stationary obstacle, similar to a stopped lead vehicle. Plan
+w/ Manual Cost (Manual): This baselines uses the same
+trajectory parameterization and sampling procedure as our
+
+approach. However it utilizes a manually designed cost us-
+ing perception and motion forecasting outputs. In detail, we
+rasterize all possible roads the SDV can take going forward
+and set it to a low cost of 0; all detected objects’s bound-
+ing box deﬁnes area of a high cost set to 255; cost of any
+other area is set to a default value 100. This baseline is de-
+signed to show the effectiveness of our learned cost volume
+as it utilize the same sampling procedure as our approach
+but just a different cost volume.
+
+As shown in Tab. 1, our approach has lower future colli-
+sion rate at all timesteps by a large margin. Note that Ego-
+motion and IL baselines give lower L2 numbers as they op-
+timize directly for this metric, however they are not good
+from planning perspective as they have difﬁculty reasoning
+about other actors and collide frequently with them. Com-
+paring to the manual cost baseline and ACC, we achieve
+both better regression numbers and better collision rates,
+showing the advantage of our learned cost volume over
+manual a designed cost. For lane violation, ACC is de-
+signed to follow the lane, thus it has about 0 violation by
+deﬁnition. Comparing to other baselines, we achieve much
+smaller violation number, showing our model is able to rea-
+son and learn from the map.
+
+4.2. Interpretability
+
+Interpretability is crucial for self-driving as it can help
+understand failure cases. We showcase the interpretability
+of our approach by showing quantitative results on 3D de-
+tection and motion forecasting and visualization our learned
+cost-map for all timesteps into the future.
+
+Detection: We compare against several state-of-the-art
+real-time detectors, validating that our holistic model under-
+stand the environment. Our baselines include a MobileNet
+adapted from [13], FaF[18], IntentNet[5] and Pixor[32],
+which are speciﬁcally designed for LiDAR-based 3D ob-
+ject detection. The metric is mAP with different IoU thresh-
+olds, and vehicles without LiDAR points are not considered.
+
+8666
+
+Figure 3. Cost Volume across Time We shown planned trajectory in red and ground-truth in blue. We overlay lower cost region for
+different timesteps in the same ﬁgure, using different colors (indicated by legend). Detection and corresponding prediction results are in
+cyan. (best view in color)
+
+Method
+
+MobileNet[13]
+
+FaF[18]
+
+IntentNet[5]
+
+Pixor[32]
+
+Ours
+
+Detection mAP @ IoU (pts ≥ 1)
+0.9
+0.5
+1.1
+86.1
+2.5
+89.8
+94.4
+3.9
+7.6
+93.4
+94.2
+7.1
+
+0.8
+27.5
+35.8
+43.5
+52.2
+53.7
+
+0.6
+78.3
+82.5
+89.4
+89.4
+90.8
+
+0.7
+60.4
+68.1
+75.4
+78.8
+81.1
+
+Table 4. Detection mAP Result
+
+As shown in Tab. 4, our model archives best results on 0.7
+IoU threshold, which is the metric of choice for self-driving.
+Qualitative results can also be found in Fig. 3.
+
+Motion Forecasting: Tab. 2 shows quantitative motion
+forecasting results, including L1 and L2 distance to ground-
+truth locations. We also provides the L2 distance from our
+predictions to the ground-truth position along and perpen-
+dicular to the ground-truth trajectory. These help explain
+if the error is due to wrong velocity or direction estima-
+tion. We use baselines from [5, 18], which are designed for
+motion forecasting with raw LiDAR data. Our model per-
+forms better in all metric and all time steps. Note that In-
+tentNet uses high-level intentions as additional information
+for training. Qualitative results are shown in Fig.3.
+
+Cost Map Visualization:
+In Fig. 3, we visualize a few
+different driving scenarios. Each ﬁgure gives a top-down
+view of the scene, showing the map, LiDAR point clouds,
+detection, motion forecasting and planning results includ-
+ing learned cost map. Each ﬁgure represents one example,
+where we overlay the cost map from different timesteps. We
+use different color to represent the lower cost region for dif-
+ferent timesteps (indicated by color legend). As we can see,
+
+our model learns to produce a time-dependent cost map.
+In particular, the ﬁrst column demonstrates multi-modality,
+second column shows lane-following in heavy trafﬁc and
+the last column shows collision avoidance.
+
+4.3. Ablation Study
+
+We conduct ablation studies and report the results in Ta-
+ble 3. Our best model is Model 5, comparing to Model 1
+which is optimized only for detection and motion forecast-
+ing, it achieves similar performance in terms of detection
+and motion forecasting. Model 2 trains directly with plan-
+ning loss only, without the supervision of object bounding
+boxes and performs worse. Model 3 exploits different in-
+put length, where longer input sequence gives better results.
+Model 4 is trained without the trafﬁc rule penalty γ in Eq. 8.
+It performs worse on planning, as it has no prior knowledge
+to avoid collision.
+
+5. Conclusion
+
+We have proposed a neural motion planner that learns to
+drive safely while following trafﬁc rules. We have designed
+a holistic model that takes LiDAR data and an HD map and
+produces interpretable intermediate representations in the
+form of 3D detections and their future trajectories, as well
+as a cost map deﬁning the goodness of each position that
+the self-driving car can take within the planning horizon.
+Our planer then sample a set of physically possible trajec-
+tories and chooses the one with the minimum learned cost.
+We have demonstrated the effectiveness of our approach in
+very complex real-world scenarios in several cities of North
+America and show how we can learn to drive accurately.
+
+8667
+
+References
+
+[1] Zlatan Ajanovic, Bakir Lacevic, Barys Shyrokau, Michael
+Search-based optimal mo-
+arXiv preprint
+
+Stolz, and Martin Horn.
+tion planning for automated driving.
+arXiv:1803.04868, 2018. 3
+
+[2] Tirthankar Bandyopadhyay, Kok Sung Won, Emilio Fraz-
+zoli, David Hsu, Wee Sun Lee, and Daniela Rus. Intention-
+aware motion planning.
+In Algorithmic foundations of
+robotics X, pages 475–491. Springer, 2013. 3
+
+[3] Mariusz Bojarski, Davide Del Testa, Daniel Dworakowski,
+Bernhard Firner, Beat Flepp, Prasoon Goyal, Lawrence D
+Jackel, Mathew Monfort, Urs Muller, Jiakai Zhang, et al.
+End to end learning for self-driving cars. arXiv preprint
+arXiv:1604.07316, 2016. 1, 2, 3, 7
+
+[4] Martin Buehler, Karl Iagnemma, and Sanjiv Singh. The
+DARPA urban challenge: autonomous vehicles in city trafﬁc,
+volume 56. springer, 2009. 2
+
+[5] Sergio Casas, Wenjie Luo, and Raquel Urtasun. Intentnet:
+Learning to predict intention from raw sensor data. In Aude
+Billard, Anca Dragan, Jan Peters, and Jun Morimoto, edi-
+tors, Proceedings of The 2nd Conference on Robot Learning,
+volume 87 of Proceedings of Machine Learning Research,
+pages 947–956. PMLR, 29–31 Oct 2018. 3, 4, 7, 8
+
+[6] Chenyi Chen, Ari Seff, Alain Kornhauser, and Jianxiong
+Xiao. Deepdriving: Learning affordance for direct percep-
+tion in autonomous driving.
+In 2015 IEEE International
+Conference on Computer Vision (ICCV), pages 2722–2730.
+IEEE, 2015. 3
+
+[7] J. Chen, W. Zhan, and M. Tomizuka. Constrained itera-
+tive lqr for on-road autonomous driving motion planning.
+In 2017 IEEE 20th International Conference on Intelligent
+Transportation Systems (ITSC), pages 1–7, Oct 2017. 3
+
+[8] Felipe Codevilla, Matthias Miiller, Antonio L´opez, Vladlen
+Koltun, and Alexey Dosovitskiy. End-to-end driving via
+conditional imitation learning. In 2018 IEEE International
+Conference on Robotics and Automation (ICRA), pages 1–9.
+IEEE, 2018. 2, 3, 7
+
+[9] Alexey Dosovitskiy, German Ros, Felipe Codevilla, Antonio
+Lopez, and Vladlen Koltun. Carla: An open urban driving
+simulator. arXiv preprint arXiv:1711.03938, 2017. 2
+
+[10] Haoyang Fan, Fan Zhu, Changchun Liu, Liangliang Zhang,
+Li Zhuang, Dong Li, Weicheng Zhu, Jiangtao Hu, Hongye
+Li, and Qi Kong. Baidu apollo em motion planner. arXiv
+preprint arXiv:1807.08048, 2018. 2, 3
+
+[11] Thierry Fraichard and Christian Laugier. Path-velocity de-
+composition revisited and applied to dynamic trajectory
+planning. In Robotics and Automation, 1993. Proceedings.,
+1993 IEEE International Conference on, pages 40–45. IEEE,
+1993. 3
+
+[12] Jason Hardy and Mark Campbell. Contingency planning
+over probabilistic obstacle predictions for autonomous road
+vehicles.
+IEEE Transactions on Robotics, 29(4):913–929,
+2013. 3
+
+[13] Andrew G Howard, Menglong Zhu, Bo Chen, Dmitry
+Kalenichenko, Weijun Wang, Tobias Weyand, Marco An-
+dreetto, and Hartwig Adam. Mobilenets: Efﬁcient convolu-
+
+tional neural networks for mobile vision applications. arXiv
+preprint arXiv:1704.04861, 2017. 7, 8
+
+[14] Kamal Kant and Steven W Zucker. Toward efﬁcient trajec-
+tory planning: The path-velocity decomposition. The inter-
+national journal of robotics research, 5(3):72–89, 1986. 3
+
+[15] Alex Kendall, Jeffrey Hawke, David Janz, Przemyslaw
+Mazur, Daniele Reda, John-Mark Allen, Vinh-Dieu Lam,
+Alex Bewley, and Amar Shah. Learning to drive in a day.
+arXiv preprint arXiv:1807.00412, 2018. 2
+
+[16] Wei Liu, Dragomir Anguelov, Dumitru Erhan, Christian
+Szegedy, Scott Reed, Cheng-Yang Fu, and Alexander C
+Berg. Ssd: Single shot multibox detector. In European con-
+ference on computer vision, pages 21–37. Springer, 2016. 4,
+6
+
+[17] Wenjie Luo, Yujia Li, Raquel Urtasun, and Richard Zemel.
+Understanding the effective receptive ﬁeld in deep convolu-
+tional neural networks. In Advances in neural information
+processing systems, pages 4898–4906, 2016. 4
+
+[18] Wenjie Luo, Bin Yang, and Raquel Urtasun. Fast and furi-
+ous: Real time end-to-end 3d detection, tracking and motion
+forecasting with a single convolutional net. 3, 6, 7, 8
+
+[19] Matthew McNaughton. Parallel algorithms for real-time mo-
+
+tion planning. 2011. 3
+
+[20] Michael Montemerlo, Jan Becker, Suhrid Bhat, Hendrik
+Dahlkamp, Dmitri Dolgov, Scott Ettinger, Dirk Haehnel,
+Tim Hilden, Gabe Hoffmann, Burkhard Huhnke, et al. Ju-
+nior: The stanford entry in the urban challenge. Journal of
+ﬁeld Robotics, 25(9):569–597, 2008. 2
+
+[21] Matthias M¨uller, Alexey Dosovitskiy, Bernard Ghanem, and
+Vladen Koltun. Driving policy transfer via modularity and
+abstraction. arXiv preprint arXiv:1804.09364, 2018. 2
+
+[22] Brian Paden, Michal ˇC´ap, Sze Zheng Yong, Dmitry Yershov,
+and Emilio Frazzoli. A survey of motion planning and con-
+trol techniques for self-driving urban vehicles. IEEE Trans-
+actions on intelligent vehicles, 1(1):33–55, 2016. 5
+
+[23] Xinlei Pan, Yurong You, Ziyan Wang, and Cewu Lu. Virtual
+to real reinforcement learning for autonomous driving. arXiv
+preprint arXiv:1704.03952, 2017. 2
+
+[24] Dean A Pomerleau. Alvinn: An autonomous land vehicle
+in a neural network. In Advances in neural information pro-
+cessing systems, pages 305–313, 1989. 1, 2, 3, 7
+
+[25] Nicholas Rhinehart, Kris M Kitani, and Paul Vernaza. R2p2:
+A reparameterized pushforward policy for diverse, precise
+generative path forecasting.
+In European Conference on
+Computer Vision, pages 794–811. Springer, Cham, 2018. 2
+
+[26] Axel Sauer, Nikolay Savinov, and Andreas Geiger. Condi-
+tional affordance learning for driving in urban environments.
+arXiv preprint arXiv:1806.06498, 2018. 3
+
+[27] J. Schlechtriemen, K. P. Wabersich, and K. Kuhnert. Wig-
+gling through complex trafﬁc: Planning trajectories con-
+strained by predictions.
+In 2016 IEEE Intelligent Vehicles
+Symposium (IV), pages 1293–1300, June 2016. 3
+
+[28] Dong Hun Shin, Sanjiv Singh, and W Whittaker. Path gener-
+ation for a robot vehicle using composite clothoid segments.
+IFAC Proceedings Volumes, 25(6):443–448, 1992. 5
+
+[29] David Silver, Julian Schrittwieser, Karen Simonyan, Ioan-
+nis Antonoglou, Aja Huang, Arthur Guez, Thomas Hubert,
+
+8668
+
+Lucas Baker, Matthew Lai, Adrian Bolton, et al. Master-
+ing the game of go without human knowledge. Nature,
+550(7676):354, 2017. 2
+
+[30] Moritz Werling, Julius Ziegler, S¨oren Kammel, and Sebas-
+tian Thrun. Optimal trajectory generation for dynamic street
+scenarios in a frenet frame.
+In Robotics and Automation
+(ICRA), 2010 IEEE International Conference on, pages 987–
+993. IEEE, 2010. 3
+
+[31] Markus Wulfmeier, Peter Ondruska, and Ingmar Posner.
+learning.
+
+Maximum entropy deep inverse reinforcement
+arXiv preprint arXiv:1507.04888, 2015. 2
+
+[32] Bin Yang, Wenjie Luo, and Raquel Urtasun. Pixor: Real-
+
+time 3d object detection from point clouds. 4, 7, 8
+
+[33] Wei Zhan, Changliu Liu, Ching-Yao Chan, and Masayoshi
+Tomizuka. A non-conservatively defensive strategy for urban
+autonomous driving. In Intelligent Transportation Systems
+(ITSC), 2016 IEEE 19th International Conference on, pages
+459–464. IEEE, 2016. 3
+
+[34] H Zhao, J Shi, X Qi, X Wang, and J Jia. Pyramid scene
+
+parsing network. corrabs/1612.01105, 2016. 4
+
+[35] Brian D Ziebart, Andrew L Maas, J Andrew Bagnell, and
+Anind K Dey. Maximum entropy inverse reinforcement
+learning.
+In AAAI, volume 8, pages 1433–1438. Chicago,
+IL, USA, 2008. 2
+
+[36] Julius Ziegler, Philipp Bender, Thao Dang, and Christoph
+Stiller. Trajectory planning for bertha—a local, continu-
+ous method. In Intelligent Vehicles Symposium Proceedings,
+2014 IEEE, pages 450–457. IEEE, 2014. 2, 3
+
+8669
+
+

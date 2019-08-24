@@ -1,0 +1,1660 @@
+Centripetal SGD for Pruning Very Deep Convolutional Networks with
+
+Complicated Structure ∗
+
+Xiaohan Ding 1 Guiguang Ding 1 Yuchen Guo 1
+
+Jungong Han 2
+
+1 Tsinghua University
+
+2 Lancaster University
+
+dxh17@mails.tsinghua.edu.cn dinggg@tsinghua.edu.cn {yuchen.w.guo,jungonghan77}@gmail.com
+
+Abstract
+
+The redundancy is widely recognized in Convolutional
+Neural Networks (CNNs), which enables to remove unim-
+portant ﬁlters from convolutional layers so as to slim the
+network with acceptable performance drop. Inspired by the
+linearity of convolution, we seek to make some ﬁlters in-
+creasingly close and eventually identical for network slim-
+ming. To this end, we propose Centripetal 1 SGD (C-SGD),
+a novel optimization method, which can train several ﬁl-
+ters to collapse into a single point in the parameter hyper-
+space. When the training is completed, the removal of the
+identical ﬁlters can trim the network with NO performance
+loss, thus no ﬁnetuning is needed. By doing so, we have
+partly solved an open problem of constrained ﬁlter prun-
+ing on CNNs with complicated structure, where some lay-
+ers must be pruned following others. Our experimental re-
+sults on CIFAR-10 and ImageNet have justiﬁed the effec-
+tiveness of C-SGD-based ﬁlter pruning. Moreover, we have
+provided empirical evidences for the assumption that the re-
+dundancy in deep neural networks helps the convergence of
+training by showing that a redundant CNN trained using C-
+SGD outperforms a normally trained counterpart with the
+equivalent width.
+
+1. Introduction
+
+Convolutional Neural Network (CNN) has become an
+important tool for machine learning and many related ﬁelds
+[10, 36, 37, 38]. However, due to their nature of com-
+putational
+intensity, as CNNs grow wider and deeper,
+their memory footprint, power consumption and required
+ﬂoating-point operations (FLOPs) have increased dramat-
+
+∗This work is supported by the National Key R&D Program of China
+(No. 2018YFC0807500), National Natural Science Foundation of China
+(No. 61571269), National Postdoctoral Program for Innovative Talents
+(No. BX20180172), and the China Postdoctoral Science Foundation (No.
+2018M640131). Corresponding author: Guiguang Ding.
+
+1Here “centripetal” means “several objects moving towards a center”,
+
+not “an object rotating around a center by the centripetal force”.
+
+ically, thus making them difﬁcult to be deployed on plat-
+forms without rich computational resource, like embedded
+systems. In this context, CNN compression and accelera-
+tion methods have been intensively studied, including ten-
+sor low rank expansion [31], connection pruning [20], ﬁlter
+pruning [40], quantization [19], knowledge distillation [27],
+fast convolution [48], feature map compacting [61], etc.
+
+We focus on ﬁlter pruning, a.k.a. channel pruning [26]
+or network slimming [44], for three reasons. Firstly, ﬁlter
+pruning is a universal technique which is able to handle any
+kinds of CNNs, making no assumptions on the application
+ﬁeld, the network architecture or the deployment platform.
+Secondly, ﬁlter pruning effectively reduces the FLOPs of
+the network, which serve as the main criterion of computa-
+tional burdens. Lastly, as an important advantage in prac-
+tice, ﬁlter pruning produces a thinner network with no cus-
+tomized structure or extra operation, which is orthogonal to
+the other model compression and acceleration techniques.
+
+Motivated by the universality and signiﬁcance, consid-
+erable efforts have been devoted to ﬁlter pruning tech-
+niques. Due to the widely observed redundancy in CNNs
+[8, 9, 13, 19, 66, 69], numerous excellent works have shown
+that, if a CNN is pruned appropriately with acceptable struc-
+tural damage, a follow-up ﬁnetuning procedure can restore
+the performance to a certain degree. 1) Some prior works
+[2, 5, 28, 40, 49, 50, 66] sort the ﬁlters by their importance,
+directly remove the unimportant ones and re-construct the
+network with the remaining ﬁlters. As the important ﬁlters
+are preserved, a comparable level of performance can be
+reached by ﬁnetuning. However, some recent powerful net-
+works have complicated structures, like identity mapping
+[23] and dense connection [29], where some layers must be
+pruned in the same pattern as others, raising an open prob-
+lem of constrained ﬁlter pruning. This further challenges
+such pruning techniques, as one cannot assume the impor-
+tant ﬁlters at different layers reside on the same positions.
+2) Obviously, the model is more likely to recover if the de-
+structive impact of pruning is reduced. Taking this into con-
+sideration, another family of methods [3, 15, 43, 60, 63]
+seeks to zero out some ﬁlters in advance, where group-
+
+4943
+
+Figure 1: Zeroing-out v.s. centripetal constraint. This ﬁgure shows a CNN with 4 and 6 ﬁlters at the 1st and 2nd convolutional
+layer, respectively, which takes a 2-channel input. Left: the 3rd ﬁlter at conv1 is zeroed out, thus the 3rd feature map is close
+to zero, implying that the 3rd input channels of the 6 ﬁlters at conv2 are useless. During pruning, the 3rd ﬁlters at conv1
+along with the 3rd input channels of the 6 ﬁlters at conv2 are removed. Right: the 3rd and 4th ﬁlters at conv1 are forced to
+grow close by centripetal constraint until the 3rd and 4th feature maps become identical. But the 3rd and 4th input channels
+of the 6 ﬁlters at conv2 can still grow without constraints, making the encoded information still in full use. When pruned, the
+4th ﬁlter at conv1 is removed, and the 4th input channel of every ﬁlter at conv2 is added to the 3rd channel.
+
+Lasso Regularization [53] is frequently used. Essentially,
+zeroing ﬁlters out can be regarded as producing a desired
+redundancy pattern in CNNs. After reducing the magni-
+tude of parameters of some whole ﬁlters, pruning these ﬁl-
+ters causes less accuracy drop, hence it becomes easier to
+restore the performance by ﬁnetuning.
+
+In this paper, we also aim to produce some redundancy
+patterns in CNNs for ﬁlter pruning. However, instead of ze-
+roing out ﬁlters, which ends up with a pattern where some
+whole ﬁlters are close to zero, we intend to merge multiple
+ﬁlters into one, leading to a redundancy pattern where some
+ﬁlters are identical. The intuition motivating the proposed
+method is an observation of information ﬂow in CNNs (Fig.
+1). 1) If two or more ﬁlters are trained to become identical,
+due to the linearity of convolution, we can simply discard
+all but leave one ﬁlter, and add up the parameters along the
+corresponding input channels of the next layer. Doing so
+will cause ZERO performance loss, and there is no need for
+a time-consuming ﬁnetuning process. It is noted that such
+a ﬁnetuning process is essential for the zeroing-out meth-
+ods [3, 43, 63], as the discarded ﬁlters are merely small in
+magnitude, but still encode a certain quantity of informa-
+tion. Therefore, removing such ﬁlters unavoidably degrades
+the performance of the network. 2) When multiple ﬁlters
+are constrained to grow closer in the parameter hyperspace,
+which we refer to as the centripetal constraint, though they
+start to produce increasingly similar information, the infor-
+mation conveyed from the corresponding input channels of
+the next layer is still in full use, thus the model’s representa-
+tional capacity is stronger than a counterpart with the ﬁlters
+being zeroed out.
+
+We summarize our contributions as follows.
+• We propose to produce redundancy patterns in CNNs
+by training some ﬁlters to become identical. Compared
+to the importance-based ﬁlter pruning methods, doing
+so requires no heuristic knowledge about the impor-
+tance of ﬁlter. Compared to the zeroing-out methods,
+
+no ﬁnetuning is needed, and more representational ca-
+pacity of the network is preserved.
+
+• We propose Centripetal SGD (C-SGD), an innovative
+SGD optimization method. As the name suggests, we
+make multiple ﬁlters move towards a center in the hy-
+perspace of the ﬁlter parameters. In the meantime, su-
+pervised by the model’s original objective function, the
+performance is maintained as much as possible.
+
+• By C-SGD, we have partly solved constrained ﬁlter
+pruning, an open problem of slimming modern very
+deep CNNs with complicated structure, where some
+layers must be pruned in the same pattern as others.
+
+• We have presented both theoretical and empirical
+analysis of the effectiveness of C-SGD. We have
+shown empirical evidences supporting our motivation
+(Fig.
+1) and the assumption that the redundancy
+helps the convergence of neural networks [14, 27].
+The codes are available at https://github.com/
+ShawnDing1994/Centripetal-SGD.
+
+2. Related Work
+
+Filter Pruning. Numerous inspiring works [7, 17, 20,
+22, 39, 58, 67] have shown that it is feasible to remove a
+large portion of connections or neurons from a neural net-
+work without a signiﬁcant performance drop. However, as
+the connection pruning methods make the parameter ten-
+sors no smaller but just sparser, little or no acceleration
+can be observed without the support from specialized hard-
+ware. Then it is natural for researchers to go further on
+CNNs: by removing ﬁlters instead of sporadic connections,
+we transform the wide convolutional layers into narrower
+ones, hence the FLOPs, memory footprint and power con-
+sumption are signiﬁcantly reduced. One kind of methods
+deﬁnes the importance of ﬁlters by some means, then selects
+and prunes the unimportant ﬁlters carefully to minimize the
+performance loss. Some prior works measure a ﬁlter’s im-
+portance by the accuracy reduction (CAR) [2], the channel
+
+4944
+
+conv2conv1conv2conv1add tocontribution variance [50], the Taylor-expansion-based cri-
+terion [49], the magnitude of convolution kernels [40] and
+the average percentage of zero activations (APoZ) [28], re-
+spectively; Luo et al. [47] select ﬁlters based on the infor-
+mation derived from the next layer; Yu et al. [66] take into
+consideration the effect of error propagation; He et al. [26]
+select ﬁlters by solving the Lasso regression; He and Han
+[24] pick up ﬁlters with aid of reinforcement learning. An-
+other category seeks to train the network under certain con-
+straints in order to zero out some ﬁlters, where group-Lasso
+regularization is frequently used [3, 43, 63]. It is notewor-
+thy that since removing some whole ﬁlters can degrade the
+network a lot, the CNNs are usually pruned in a layer-by-
+layer [3, 24, 26, 28, 47, 50] or ﬁlter-by-ﬁlter [2, 49] manner,
+and require one or more ﬁnetuning processes to restore the
+accuracy [2, 3, 5, 24, 26, 28, 40, 44, 47, 49, 50, 63, 66].
+
+Other Methods. Apart from ﬁlter pruning, some excel-
+lent works seek to compress and accelerate CNNs in other
+ways. Considerable works [4, 14, 31, 32, 54, 56, 65, 68]
+decompose or approximate the parameter tensors; quanti-
+zation and binarization techniques [11, 18, 19, 51, 64] ap-
+proximate a model using fewer bits per parameter; knowl-
+edge distillation methods [6, 27, 52] transfer knowledge
+from a big network to a smaller one; some researchers seek
+to speed up convolution with the help of perforation [16],
+FFT [48, 59] or DCT [62]; Wang et al. [61] compact fea-
+ture maps by extracting information via Circulant matrices.
+Of note is that since ﬁlter pruning simply shrinks a wide
+CNN into a narrower one with no special structures or extra
+operations, it is orthogonal to the other methods.
+
+3. Slimming CNNs via Centripetal SGD
+
+3.1. Formulation
+
+In modern CNNs, batch normalization [30] and scaling
+transformation are commonly used to enhance the repre-
+sentational capacity of convolutional layers. For simplic-
+ity and generality, we regard the possible subsequent batch
+normalization and scaling layer as part of the convolutional
+layer. Let i be the layer index, M (i) ∈ Rhi×wi×ci be an
+hi × wi feature map with ci channels and M (i,j) = M (i)
+:,:,j
+be the j-th channel. The convolutional layer i with ker-
+nel size ui × vi has one 4th-order tensor and four vectors
+as parameters at most, namely, K (i) ∈ Rui×vi×ci−1×ci
+and µ(i), σ(i), γ(i), β(i) ∈ Rci , where K (i) is the con-
+volution kernel, µ(i) and σ(i) are the mean and standard
+deviation of batch normalization, γ(i) and β(i) are the
+parameters of the scaling transformation. Then we use
+P (i) = (K (i), µ(i), σ(i), γ(i), β(i)) to denote the param-
+eters of layer i. In this paper, the ﬁlter j at layer i refers
+to the ﬁve-tuple comprising all the parameter slices related
+to the j-th output channel of layer i, formally, F (j) =
+(K (i)
+j ). During forward propagation,
+
+:,:,:,j, µ(i)
+
+j , σ(i)
+
+, β(i)
+
+, γ(i)
+
+j
+
+j
+
+this layer takes M (i−1) ∈ Rhi−1×wi−1×ci−1 as input and
+outputs M (i). Let ∗ be the 2-D convolution operator, the
+j-th output channel is given by
+
+M (i,j) = Pci−1
+
+σ(i)
+
+j
+
+k=1 M (i−1,k) ∗ K (i)
+
+:,:,k,j − µ(i)
+
+j
+
+γ(i)
+j + β(i)
+
+j
+
+.
+
+(1)
+The importance-based ﬁlter pruning methods [2, 28, 40,
+49, 50, 66] deﬁne the importance of ﬁlters by some means,
+prune the unimportant part and reconstruct the network us-
+ing the remaining parameters. Let Ii be the ﬁlter index set
+of layer i (e.g., I2 = {1, 2, 3, 4} if the second layer has
+four ﬁlters), T be the ﬁlter importance evaluation function
+and θi be the threshold. The remaining set, i.e., the index
+set of the ﬁlters which survive the pruning, is Ri = {j ∈
+Ii | T (F (j)) > θi}. Then we reconstruct the network by
+assembling the parameters sliced from the original tensor
+or vectors of layer i into the new parameters. That is,
+
+ˆP (i) = (K (i)
+
+:,:,:,Ri , µ(i)
+
+Ri , σ(i)
+
+Ri , γ(i)
+
+Ri , β(i)
+
+Ri ) .
+
+(2)
+
+The input channels of the next layer corresponding to the
+pruned ﬁlters should also be discarded,
+
+ˆP (i+1) = (K (i+1)
+
+:,:,Ri,:, µ(i+1), σ(i+1), γ(i+1), β(i+1)) . (3)
+
+3.2. Update Rule
+
+For each convolutional layer, we ﬁrst divide the ﬁlters
+into clusters. The number of clusters equals the desired
+number of ﬁlters, as we preserve only one ﬁlter for each
+cluster. We use Ci and H to denote the set of all ﬁlter clus-
+ters of layer i and a single cluster in the form of a ﬁlter in-
+dex set, respectively. We generate the clusters evenly or by
+k-means [21], between which our experiments demonstrate
+only minor difference (Table. 1).
+
+• K-means clustering. We aim to generate clusters with
+low intra-cluster distance in the parameter hyperspace,
+such that collapsing them into a single point less im-
+pacts the model, which is natural. To this end, we sim-
+ply ﬂatten the ﬁlter’s kernel and use it as the feature
+vector for k-means clustering.
+
+• Even clustering. We can generate clusters with no
+consideration of the ﬁlters’ inherent properties. Let
+ci and ri be the number of original ﬁlters and de-
+sired clusters, respectively, then each cluster will have
+⌈ci/ri⌉ ﬁlters at most. For example, if the second
+layer has six ﬁlters and we wish to slim it to four
+ﬁlters, we will have C2 = {H1, H2, H3, H4}, where
+H1 = {1, 2}, H2 = {3, 4}, H3 = {5}, H4 = {6}.
+
+We use H(j) to denote the cluster containing ﬁlter j, so
+in the above example we have H(3) = H2 and H(6) = H4.
+Let F (j) be the kernel or a vector parameter of ﬁlter j, at
+
+4945
+
+each training iteration, the update rule of C-SGD is
+
+F (j) ←F (j) + τ ∆F (j) ,
+∂L
+
+∆F (j) = − Pk∈H(j)
+
+|H(j)|
+
+∂F (k)
+
+− ηF (j)
+
+(4)
+
++ ǫ(Pk∈H(j) F (k)
+
+|H(j)|
+
+− F (j)) ,
+
+where L is the original objective function, τ is the learning
+rate, η is the model’s original weight decay factor, and ǫ
+is the only introduced hyper-parameter, which is called the
+centripetal strength.
+
+Let L be the layer index set, we use the sum of squared
+kernel deviation χ to measure the intra-cluster similarity,
+i.e., how close ﬁlters are in each cluster,
+
+χ =Xi∈L Xj∈Ii
+
+||K (i)
+
+:,:,:,j − Pk∈H(j) K (i)
+
+|H(j)|
+
+:,:,:,k
+
+||2
+2 .
+
+(5)
+
+It is easy to derive from Eq. 4 that if the ﬂoating-point op-
+eration errors are ignored, χ is lowered monotonically and
+exponentially with a proper learning rate τ .
+
+The intuition behind Eq. 4 is quite simple: for the ﬁlters
+in the same cluster, the increments derived by the objective
+function are averaged (the ﬁrst term), the normal weight de-
+cay is applied as well (the second term), and the difference
+in the initial values is gradually eliminated (the last term), so
+the ﬁlters will move towards their center in the hyperspace.
+In practice, we ﬁx η and reduce τ with time just as we do
+in normal SGD training, and set ǫ casually. Intuitively, C-
+SGD training with a large ǫ prefers “rapid change” to “sta-
+ble transition”, and vice versa. If ǫ is too large, e.g., 10,
+the ﬁlters are merged in an instant such that the whole pro-
+cess becomes equivalent to training a destroyed model from
+scratch. If ǫ is extremely small, like 1 × 10−10, the differ-
+ence between C-SGD training and normal SGD is almost
+invisible during a long time. However, since the difference
+among ﬁlters in each cluster is reduced monotonically and
+exponentially, even an extremely small ǫ can make the ﬁl-
+ters close enough, sooner or later. As shown in the Ap-
+pendix, C-SGD is insensitive to ǫ.
+
+−−→
+AQ0, we have
+
+A simple analogy to weight decay (i.e., ℓ-2 regulariza-
+tion) may help understand Centripetal SGD. Fig. 2a shows
+a 3-D loss surface, where a certain point A corresponds to a
+2-D parameter a = (a1, a2). Suppose the steepest descent
+∂a , where L is the
+direction is
+objective function. Weight decay is commonly applied to
+−−→
+AQ1 = −ηa, where η is
+reduce overﬁtting [35], that is,
+the model’s weight decay factor, e.g., 1 × 10−4 for ResNets
+[23]. The actual gradient descent direction then becomes
+∆a =
+
+−−→
+AQ0 = − ∂L
+
+−−→
+AQ1 = − ∂L
+
+−−→
+AQ2 =
+
+−−→
+AQ0 +
+
+∂a − ηa.
+
+Formally, with t denoting the number of training itera-
+tions, we seek to make point A and B grow increasingly
+
+(a) Normal weight decay.
+
+(b) Centripetal constraint.
+
+Figure 2: Gradient descent direction on the loss surface
+of normal weight decay and centripetal constraint without
+merging the original gradients.
+
+close and eventually the same by satisfying
+
+lim
+t→∞
+
+||a(t) − b(t)|| = 0 .
+
+(6)
+
+Given the fact that a(t+1) = a(t) + τ ∆a(t) and b(t+1) =
+b(t) + τ ∆b(t), where τ is the learning rate, Eq. 6 implies
+
+lim
+t→∞
+
+||(a(t) − b(t)) + τ (∆a(t) − ∆b(t))|| = 0 .
+
+(7)
+
+as well as lim
+t→∞
+
+We seek to achieve this with lim
+t→∞
+
+(∆a(t) − ∆b(t)) = 0
+(a(t) − b(t)) = 0. Namely, as two points
+are growing closer, their gradients should become closer ac-
+cordingly in order for the training to converge.
+
+If we just wish to make A and B closer to each other
+than they used to be, a natural idea is to push both A and B
+to their midpoint M ( a+b
+2 ), as shown in Fig. 2b. Therefore,
+the gradient descent direction of point A becomes
+
+∆a =
+
+−−→
+AQ2 +
+
+−−→
+AQ3 = −
+
+∂L
+∂a
+
+− ηa + ǫ(
+
+a + b
+
+2
+
+− a) , (8)
+
+where ǫ is a hyper-parameter controlling the intensity or
+speed of pushing A and B close. We have
+
+∆b = −
+
+∂L
+∂b
+
+− ηb + ǫ(
+
+a + b
+
+2
+
+− b) ,
+
+(9)
+
+∆a − ∆b = (
+
+∂L
+∂b
+
+−
+
+∂L
+∂a
+
+) + (η + ǫ)(b − a) .
+
+(10)
+
+∂L
+
+( ∂L
+∂b(t) −
+Here we see the problem: we cannot ensure lim
+t→∞
+∂a = ∂L
+∂a(t) ) = 0. Actually, even a = b does not imply ∂L
+∂b ,
+because they participate in different computation ﬂows. As
+(∆a(t) − ∆b(t)) = 0
+a consequence, we cannot ensure lim
+t→∞
+
+with Eq. 8 and Eq. 9.
+
+We solve this problem by merging the gradients derived
+from the original objective function. For simplicity and
+symmetry, by replacing both ∂L
+∂b in Eq.
+
+∂a in Eq. 8 and ∂L
+
+4946
+
+loss 0 1 2 1 2 A x y Q0 Q1 Q2 loss 0 1 2 1 2 A B x y Q0 Q1 Q2 Q3 Q4 M 2 ( ∂L
+
+∂a + ∂L
+
+9 with 1
+∂b ), we have ∆a − ∆b = (η + ǫ)(b − a).
+In this way, the supervision information encoded in the
+objective-function-related gradients is preserved to main-
+tain the model’s performance, and Eq. 6 is satisﬁed, which
+can be easily veriﬁed. Intuitively, we deviate a from the
+steepest descent direction according to some information of
+b and deviate b vice versa, just like the ℓ-2 regularization
+deviates both a and b towards the origin of coordinates.
+
+3.3. Efﬁcient Implementation of C SGD
+
+The efﬁciency of modern CNN training and deployment
+platforms, e.g., Tensorﬂow [1], is based on large-scale ten-
+sor operations. We therefore seek to implement C-SGD
+by efﬁcient matrix multiplication which introduces minimal
+computational burdens. Concretely, given a convolutional
+layer i, the kernel K ∈ Rui×vi×ci−1×ci and the gradient
+∂K to ∂L
+∂K , we reshape K to W ∈ Ruivici−1×ci and ∂L
+∂L
+∂W
+accordingly. We construct the averaging matrix Γ ∈ Rci×ci
+and decaying matrix Λ ∈ Rci×ci as Eq. 12 and Eq. 13
+such that Eq. 11 is equivalent to Eq. 4, which can be eas-
+ily veriﬁed. Obviously, when the number of clusters equals
+that of the ﬁlters, Eq. 11 degrades into normal SGD with
+Γ = diag(1), Λ = diag(η). The other trainable param-
+eters (i.e., γ and β) are reshaped into W ∈ R1×ci and
+handled in the same way. In practice, we observe almost no
+difference in the speed between normal SGD and C-SGD
+using Tensorﬂow on Nvidia GeForce GTX 1080Ti GPUs
+with CUDA9.0 and cuDNN7.0.
+
+W ← W − τ (
+
+∂L
+∂W
+
+Γ + W Λ) .
+
+(11)
+
+Γm,n =(1/|H(m)|
+
+0
+
+if H(m) = H(n) ,
+
+elsewise .
+
+(12)
+
+Λm,n =(η + (1 − 1/|H(m)|)ǫ
+
+0
+
+if H(m) = H(n) ,
+elsewise .
+
+(13)
+
+3.4. Filter Trimming after C SGD
+
+After C-SGD training, since the ﬁlters in each cluster
+have become identical, as will be shown in Sect. 4.3, pick-
+ing up which one makes no difference. We simply pick up
+the ﬁrst ﬁlter (i.e., the ﬁlter with the smallest index) in each
+cluster to form the remaining set for each layer, which is
+
+Ri = {min(H) | ∀H ∈ Ci}.
+
+For the next layer, we add the to-be-deleted input chan-
+
+nels to the corresponding remaining one,
+
+K(i+1)
+
+:,:,k,: ←X K (i+1)
+
+:,:,H(k),: ∀k ∈ Ri ,
+
+then we delete the redundant ﬁlters as well as the input
+channels of the next layer following Eq. 2, 3. Due to the
+
+linearity of convolution (Eq. 1), no damage is caused, hence
+no ﬁnetuning is needed.
+
+3.5. C SGD for Constrained Filter Pruning
+
+Recently, accompanied by the advancement of CNN de-
+sign philosophy, several efﬁcient and compact CNN ar-
+chitectures [23, 29] have emerged and become favored in
+the real-world applications. Altough some excellent works
+[28, 32, 49, 66, 69] have shown that the classical plain
+CNNs, e.g., AlexNet [34] and VGG [55], are highly redun-
+dant and can be pruned signiﬁcantly, the pruned versions are
+usually still inferior to the more up-to-date and complicated
+CNNs in terms of both accuracy and efﬁciency.
+
+We consider ﬁlter pruning for very deep and complicated
+CNNs challenging for three reasons. 1) Firstly, these net-
+works are designed in consideration of computational ef-
+ﬁciency, which makes them inherently compact and efﬁ-
+cient. 2) Secondly, these networks are signiﬁcantly deeper
+than the classical ones, thus the layer-by-layer pruning tech-
+niques become inefﬁcient, and the errors can increase dra-
+matically when propagated through multiple layers, mak-
+ing the estimation of ﬁlter importance less accurate [66]. 3)
+Lastly and most importantly, some innovative structures are
+heavily used in these networks, e.g., cross-layer connections
+[23] and dense connections [29], raising an open problem of
+constrained ﬁlter pruning.
+
+I.e., in each stage of ResNets, every residual block is ex-
+pected to add the learned residuals to the stem feature maps
+produced by the ﬁrst or the projection layer (referred to as
+pacesetter), thus the last layer of every residual block (re-
+ferred to as follower) must be pruned in the same pattern
+as the pacesetter, i.e., the remaining set R of all the fol-
+lowers and the pacesetter must be identical, or the network
+will be damaged so badly that ﬁnetuning cannot restore its
+accuracy. For example, Li et al. [40] once tried violently
+pruning ResNets but resulted in low accuracy. In some suc-
+cessful explorations, Li et al. [40] sidestep this problem by
+only pruning the internal layers on ResNet-56, i.e., the ﬁrst
+layers in each residual block. Liu et al. [44] and He et al.
+[26] skip pruning these troublesome layers and insert an ex-
+tra sampler layer before the ﬁrst layer in each residual block
+during inference time to reduce the input channels. Though
+these methods are able to prune the networks to some ex-
+tent, from a holistic perspective the networks are not liter-
+ally “slimmed” but actually “clipped”, as shown in Fig. 3.
+
+We have partly solved this open problem by C-SGD,
+where the key is to force different layers to learn the same
+redundancy pattern. For example, if the layer p and q have
+to be pruned in the same pattern, we only generate clusters
+for the layer p by some means and assign the resulting clus-
+ter set to the layer q, namely, Cq ← Cp. Then during C-SGD
+training, the same redundancy patterns among ﬁlters in both
+layer p and q are produced. I.e., if the j-th and k-th ﬁlters
+
+4947
+
+(a) Original.
+
+(b) Clipped.
+
+(c) Sampled.
+
+(d) Slimmed.
+
+Figure 3: Compared to prior workings which only clip the
+internal layers [40] or insert sampler layers [26, 44] on
+ResNets, C-SGD is literally “slimming” the network.
+
+at layer p become identical, we ensure the sameness of the
+j-th and k-th ﬁlters at layer q as well, thus the troublesome
+layers can be pruned along with the others. Some sketches
+are presented in the Appendix for more intuitions.
+
+4. Experiments
+
+4.1. Slimming Very Deep and Complicated CNNs
+
+We experiment on CIFAR-10 [33] and ImageNet-1K
+[12] to evaluate our method. For each trial we start from
+a well-trained base model and apply C-SGD training on all
+the target layers simultaneously. The comparisons between
+C-SGD and other ﬁlter pruning methods are presented in
+Table. 1 and Table. 2 in terms of both absolute and relative
+error increase, which are commonly adopted as the metrics
+to fairly compare the change of accuracy on different base
+models. E.g., the Top-1 accuracy of our ResNet-50 base
+model and C-SGD-70 is 75.33% and 75.27%, thus the ab-
+solute and relative error increase is 75.33% − 75.27% =
+0.06% and
+
+100−75.33 = 0.24%, respectively.
+
+0.06
+
+CIFAR-10. The base models are trained from scratch
+for 600 epochs to ensure the convergence, which is much
+longer than the usually adopted benchmarks (160 [23] or
+300 [29] epochs), such that the improved accuracy of the
+pruned model cannot be simply attributed to the extra train-
+ing epochs on a base model which has not fully converged.
+We use the data augmentation techniques adopted by [23],
+i.e., padding to 40 × 40, random cropping and ﬂipping. The
+hyper-parameter ǫ is casually set to 3 × 10−3. We perform
+C-SGD training with batch size 64 and a learning rate ini-
+tialized to 3 × 10−2 then decayed by 0.1 when the loss stops
+decreasing. For each network we perform two experiments
+independently, where the only difference is the way we gen-
+erate ﬁlter clusters, namely, even dividing or k-means clus-
+tering. We seek to reduce the FLOPs of every model by
+around 60%, so we prune 3/8 of every convolutional layer
+of ResNets, thus the parameters and FLOPs are reduced by
+
+around 1 − (5/8)2 = 61%. Aggressive as it is, no obvious
+accuracy drop is observed. For DenseNet-40, the pruned
+model has 5, 8 and 10 incremental convolutional layers in
+the three stages, respectively, so that the FLOPs is reduced
+by 60.05%, and a signiﬁcantly increased accuracy is ob-
+served, which is consistent with but better than that of [44].
+ImageNet. We perform experiments using ResNet-50
+[23] on ImageNet to validate the effectiveness of C-SGD
+on the real-world applications. We apply k-means cluster-
+ing on the ﬁlter kernels to generate the clusters, then use
+the ILSVRC2015 training set which contains 1.28M high-
+quality images for training. We adopt the standard data aug-
+mentation techniques including b-box distortion and color
+shift. At test time, we use a single central crop. For C-SGD-
+7/10, C-SGD-6/10 and C-SGD-5/10, all the ﬁrst and second
+layers in each residual block are shrunk to 70%, 60% and
+50% of the original width, respectively.
+
+Discussions. Our pruned networks exhibit fewer FLOPs,
+simpler structures and higher or comparable accuracy. Note
+that we apply the same pruning ratio globally for ResNets,
+and better results are promising to be achieved if more
+layer sensitivity analyzing experiments [26, 40, 66] are con-
+ducted, and the resulting network structures are tuned ac-
+cordingly. Interestingly, even arbitrarily generated clusters
+can produce reasonable results (Table. 1).
+
+4.2. Redundant Training vs. Normal Training
+
+The comparisons between C-SGD and other pruning-
+and-ﬁnetuning methods [26, 40, 47, 66] indicate that it
+may be better to train a redundant network and equivalently
+transform it to a narrower one than to ﬁnetune it after prun-
+ing. This observation is consistent with [14] and [27], where
+the authors believe that the redundancy in neural networks
+is necessary to overcome a highly non-convex optimization.
+We verify this assumption by training a narrow CNN
+with normal SGD and comparing it with another model
+trained using C-SGD with the equivalent width, which
+means that some redundant ﬁlters are produced during train-
+ing and trimmed afterwards, resulting in the same network
+structure as the normally trained model. For example, if a
+network has 2× number of ﬁlters as the normal counterpart
+but every two ﬁlters are identical, they will end up with the
+same structure. If the redundant one outperforms the normal
+one, we can conclude that C-SGD does yield more powerful
+networks by exploiting the redundant ﬁlters.
+
+On DenseNet-40, we evenly divide the 12 ﬁlters at each
+incremental layer into 3 clusters, use C-SGD to train the
+network from scratch, then trim it to obtain a DenseNet-40
+with 3 ﬁlters per incremental layer. I.e., during training, ev-
+ery 4 ﬁlters are growing centripetally. As contrast, we train
+a DenseNet-40 with originally 3 ﬁlters per layer by normal
+SGD. Another group of experiments where each layer ends
+up with 6 ﬁlters are carried out similarly. After that, ex-
+
+4948
+
+3×3 64…3×3 643×3 64…3×3 643×3 643×3 64…3×3 643×3 64…3×3 403×3 453×3 64…3×3 64sampler3×3 64sampler…3×3 403×3 45……3×3 403×3 403×3 403×3 403×3 40Table 1: Pruning Results on CIFAR-10. For C-SGD, the left is achieved by even clustering, and the right uses k-means.
+
+K-means Top1 error
+
+FLOPs
+
+Model
+
+Result
+
+Base Top1
+
+ResNet-56
+ResNet-56
+ResNet-56
+ResNet-56
+ResNet-56
+
+Li et al. [40]
+NISP-56 [66]
+Channel Pruning [26]
+ADC [24]
+C-SGD-5/8
+
+ResNet-110
+ResNet-110
+ResNet-110
+
+Li et al. [40]
+NISP-110 [66]
+C-SGD-5/8
+
+ResNet-164
+ResNet-164
+
+Network Slimming [44]
+C-SGD-5/8
+
+DenseNet-40
+DenseNet-40 C-SGD-5-8-10
+
+Network Slimming [44]
+
+93.04
+
+-
+
+92.8
+92.8
+93.39
+
+93.53
+
+-
+
+94.38
+
+94.58
+94.83
+
+93.89
+93.81
+
+Pruned Top1
+even / k-means
+
+93.06
+
+-
+
+91.8
+91.9
+
+Abs/Rel ↑%
+
+-0.02 / -0.28
+
+0.03 / -
+
+1.0 / 13.88
+0.9 / 12.5
+
+93.31 / 93.44
+
+-0.05 / -0.75
+
+93.30
+
+-
+
+94.44 / 94.27
+
+94.73
+
+94.75 / 94.75
+
+94.35
+
+94.31 / 94.44
+
+0.23 / 3.55
+
+0.18 / -
+
+0.11 / 1.95
+
+-0.15 / -2.76
+0.08 / 1.54
+
+-0.46 / -7.52
+-0.63 / -10.17
+
+↓%
+
+27.60
+43.61
+
+50
+50
+
+60.85
+
+38.60
+43.78
+60.89
+
+44.90
+60.91
+
+55.00
+60.05
+
+Architecture
+
+only internals pruned
+
+-
+
+sampler layer
+sampler layer
+
+10-20-40
+
+only internals pruned
+
+-
+
+10-20-40
+
+sampler layer
+
+10-20-40
+
+-
+
+5-8-10
+
+Table 2: Pruning ResNet-50 on ImageNet using k-means clustering.
+
+Result
+
+Base Top1
+
+Base Top5
+
+Pruned Top1
+
+Pruned Top5
+
+C-SGD-70
+ThiNet-70 [47]
+SFP [25]
+NISP [66]
+C-SGD-60
+CFP [57]
+Channel Pruning [26]
+Autopruner [46]
+GDP [42]
+SSR-L2 [41]
+DCP [70]
+ThiNet-50 [47]
+C-SGD-50
+
+75.33
+72.88
+76.15
+
+-
+
+75.33
+75.3
+
+-
+
+76.15
+75.13
+75.12
+76.01
+72.88
+75.33
+
+92.56
+91.14
+92.87
+
+-
+
+92.56
+92.2
+92.2
+92.87
+92.30
+92.30
+92.93
+91.14
+92.56
+
+75.27
+72.04
+74.61
+
+-
+
+74.93
+73.4
+
+-
+
+74.76
+71.89
+71.47
+74.95
+71.01
+74.54
+
+92.46
+90.67
+92.06
+
+-
+
+92.27
+91.4
+90.8
+92.15
+90.71
+90.19
+92.32
+90.02
+92.09
+
+Top1 Error
+Abs/Rel ↑%
+
+Top5 error
+Abs/Rel ↑%
+
+FLOPs
+
+↓%
+
+0.06 / 0.24
+0.84 / 3.09
+1.54 / 6.45
+
+0.89 / -
+
+0.40 / 1.62
+1.9 / 7.69
+
+- / -
+
+1.39 / 5.82
+3.24 / 13.02
+3.65 / 14.67
+1.06 / 4.41
+1.87 / 6.89
+0.79 / 3.20
+
+0.10 / 1.34
+0.47 / 5.30
+0.81 / 11.36
+
+- / -
+
+0.29 / 3.89
+0.8 / 10.25
+1.4 / 17.94
+0.72 / 10.09
+1.59 / 20.64
+2.11 / 27.40
+0.61 / 8.62
+1.12 / 12.64
+0.47 / 6.31
+
+36.75
+36.75
+41.8
+43.82
+46.24
+49.6
+50
+
+51.21
+51.30
+55.76
+55.76
+55.76
+55.76
+
+periments on VGG [55] are also carried out, where we slim
+each layer to 1/4 and 1/2 of the original width, respectively.
+It can be concluded from Table. 3 that the redundant ﬁlters
+do help, compared to a normally trained counterpart with
+the equivalent width. This observation supports our intu-
+ition that the centripetally growing ﬁlters can maintain the
+model’s representational capacity to some extent because
+though these ﬁlters are constrained, their corresponding in-
+put channels are still in full use and can grow without con-
+straints (Fig. 1).
+
+Table 3: Validation accuracy of scratch-trained DenseNet-
+40 and VGG using C-SGD or normal SGD on CIFAR-10.
+
+Model
+
+Normal SGD C-SGD
+
+DenseNet-3
+DenseNet-6
+VGG-1/4
+VGG-1/2
+
+88.60
+89.96
+90.16
+92.49
+
+89.96
+90.89
+90.64
+93.22
+
+4.3. Making Filters Identical vs. Zeroing Out
+
+As making ﬁlters identical and zeroing ﬁlters out [3, 15,
+43, 60, 63] are two means of producing redundancy pat-
+terns for ﬁlter pruning, we perform controlled experiments
+
+on ResNet-56 to investigate the difference. For fair compar-
+ison, we aim to produce the same number of redundant ﬁl-
+ters in both the model trained with C-SGD and the one with
+group-Lasso Regularization [53]. For C-SGD, the number
+of clusters in each layer is 5/8 of the number of ﬁlters. For
+
+4949
+
+(a) Values of χ or φ.
+
+(b) Validation accuracy.
+
+Figure 4: Training process with C-SGD or group-Lasso on
+ResNet-56. Note the logarithmic scale of the left ﬁgure.
+
+Lasso, 3/8 of the original ﬁlters in the pacesetters and inter-
+nal layers are regularized by group-Lasso, and the followers
+are handled in the same pattern. We use the aforementioned
+sum of squared kernel deviation χ and the sum of squared
+kernel residuals φ as follows to measure the redundancy,
+respectively. Let L be the layer index set and Pi be the to-
+be-pruned ﬁlter set of layer i, i.e., the set of the 3/8 ﬁlters
+with group-Lasso regularization,
+
+φ =Xi∈L Xj∈Pi
+
+||K (i)
+
+:,:,:,j||2
+2 .
+
+We present in Fig. 4 the curves of χ, φ as well as the vali-
+dation accuracy both before and after pruning. The learning
+rate τ is initially set to 3×10−2 and decayed by 0.1 at epoch
+100 and 200, respectively. It can be observed that: 1) Group
+Lasso cannot literally zero out ﬁlters, but can decrease their
+magnitude to some extent, as φ plateaus when the gradients
+derived from the regularization term become close to those
+derived from the original objective function. We empiri-
+cally ﬁnd out that even when φ reaches around 4 × 10−4,
+which is nearly 2 × 106 times smaller than the initial value,
+pruning still causes obvious damage (around 10% accuracy
+drop). When the learning rate is decayed and φ is reduced at
+epoch 200, we observe no improvement in the pruned accu-
+racy, therefore no more experiments with smaller learning
+rate or stronger group-Lasso regularization are conducted.
+We reckon this is due to the error propagation and ampliﬁ-
+cation in very deep CNNs [66]. 2) By C-SGD, χ is reduced
+monotonically and perfectly exponentially, which leads to
+faster convergence. I.e., the ﬁlters in each cluster can be-
+come inﬁnitely close to each other at a constant rate with
+a constant learning rate. For C-SGD, pruning causes ab-
+solutely no performance loss after around 90 epochs. 3)
+Training with group-Lasso is 2× slower than C-SGD as it
+requires costly square root operations.
+
+4.4. C SGD vs. Other Filter Pruning Methods
+
+We compare C-SGD with other methods by controlled
+experiments on DenseNet-40 [29]. We slim every incre-
+mental layer of a well-trained DenseNet-40 to 3 and 6 ﬁl-
+ters, respectively. The experiments are repeated 3 times,
+
+(a) Three ﬁlters per layer.
+
+(b) Six ﬁlters per layer.
+
+Figure 5: Controlled pruning experiments on DenseNet-40.
+
+and all the results are presented in Fig. 5. The train-
+ing setting is kept the same for every model: learning rate
+τ = 3 × 10−3, 3 × 10−4, 3 × 10−5, 3 × 10−6 for 200, 200,
+100 and 100 epochs, respectively, to ensure the convergence
+of every model. For our method, the models are trained with
+C-SGD and trimmed. For Magnitude- [40], APoZ- [28] and
+Taylor-expansion-based [49], the models are pruned by dif-
+ferent criteria and ﬁnetuned. The models labeled as Lasso
+are trained with group-Lasso Regularization for 600 epochs
+in advance, pruned, then ﬁnetuned for another 600 epochs
+with the same learning rate schedule, so that the compari-
+son is actually biased towards the Lasso method. The mod-
+els are tested on the validation set every 10,000 iterations
+(12.8 epochs). The results reveal the superiority of C-SGD
+in terms of higher accuracy and also the better stability.
+Though group-Lasso Regularization can indeed reduce the
+performance drop caused by pruning, it is outperformed by
+C-SGD by a large margin. It is interesting that the violently
+pruned networks are unstable and easily trapped in the local
+minimum, e.g., the accuracy curves increase steeply in the
+beginning but slightly decline afterwards. This observation
+is consistent with that of Liu et al. [45].
+
+5. Conclusion
+
+We have proposed to produce identical ﬁlters in CNNs
+for network slimming. The intuition is that making ﬁl-
+ters identical can not only eliminate the need for ﬁnetuning
+but also preserve more representational capacity of the net-
+work, compared to the zeroing-out fashion (Fig. 1). We
+have partly solved an open problem of constrained ﬁlter
+pruning on very deep and complicated CNNs and achieved
+state-of-the-art results on several common benchmarks. By
+training networks with redundant ﬁlters using C-SGD, we
+have demonstrated empirical evidences for the assumption
+that redundancy can help the convergence of neural network
+training, which may encourage future studies. Apart from
+pruning, we consider C-SGD promising to be applied as a
+means of regularization or training technique.
+
+4950
+
+050100150200epochs864202log10 or log10C-SGDLasso050100150200epochs0.20.40.60.8top-1 accuracyC-SGD before pruningLasso before pruningC-SGD after pruningLasso after pruning0100200300400500600epochs0.7500.7750.8000.8250.8500.8750.9000.925val accuracyAPoZLassoMagnitudeC-SGDTaylor0100200300400500600epochs0.870.880.890.900.910.920.93val accuracyAPoZLassoMagnitudeC-SGDTaylorReferences
+
+[1] M. Abadi, A. Agarwal, P. Barham, E. Brevdo, Z. Chen,
+C. Citro, G. S. Corrado, A. Davis, J. Dean, M. Devin, et al.
+Tensorﬂow: Large-scale machine learning on heterogeneous
+distributed systems. arXiv preprint arXiv:1603.04467, 2016.
+
+[2] R. Abbasi-Asl and B. Yu. Structural compression of convolu-
+tional neural networks based on greedy ﬁlter pruning. arXiv
+preprint arXiv:1705.07356, 2017.
+
+[3] J. M. Alvarez and M. Salzmann. Learning the number of
+neurons in deep networks. In Advances in Neural Informa-
+tion Processing Systems, pages 2270–2278, 2016.
+
+[4] J. M. Alvarez and M. Salzmann. Compression-aware train-
+In Advances in Neural Information
+
+ing of deep networks.
+Processing Systems, pages 856–867, 2017.
+
+[5] S. Anwar, K. Hwang, and W. Sung.
+
+Structured prun-
+ing of deep convolutional neural networks. ACM Journal
+on Emerging Technologies in Computing Systems (JETC),
+13(3):32, 2017.
+
+[6] J. Ba and R. Caruana. Do deep nets really need to be deep?
+In Advances in neural information processing systems, pages
+2654–2662, 2014.
+
+[7] G. Castellano, A. M. Fanelli, and M. Pelillo. An iterative
+IEEE
+
+pruning algorithm for feedforward neural networks.
+transactions on Neural networks, 8(3):519–531, 1997.
+
+[8] Y. Cheng, F. X. Yu, R. S. Feris, S. Kumar, A. Choudhary,
+and S.-F. Chang. An exploration of parameter redundancy
+in deep networks with circulant projections. In Proceedings
+of the IEEE International Conference on Computer Vision,
+pages 2857–2865, 2015.
+
+[9] M. D. Collins and P. Kohli. Memory bounded deep convolu-
+
+tional networks. arXiv preprint arXiv:1412.1442, 2014.
+
+[10] R. Collobert and J. Weston. A uniﬁed architecture for natural
+language processing: Deep neural networks with multitask
+learning. In Proceedings of the 25th international conference
+on Machine learning, pages 160–167. ACM, 2008.
+
+[11] M. Courbariaux, I. Hubara, D. Soudry, R. El-Yaniv, and
+Y. Bengio. Binarized neural networks: Training deep neu-
+ral networks with weights and activations constrained to+ 1
+or-1. arXiv preprint arXiv:1602.02830, 2016.
+
+[12] J. Deng, W. Dong, R. Socher, L.-J. Li, K. Li, and L. Fei-
+Fei.
+Imagenet: A large-scale hierarchical image database.
+In Computer Vision and Pattern Recognition, 2009. CVPR
+2009. IEEE Conference on, pages 248–255. IEEE, 2009.
+
+[13] M. Denil, B. Shakibi, L. Dinh, N. De Freitas, et al. Pre-
+dicting parameters in deep learning. In Advances in neural
+information processing systems, pages 2148–2156, 2013.
+
+[14] E. L. Denton, W. Zaremba, J. Bruna, Y. LeCun, and R. Fer-
+gus. Exploiting linear structure within convolutional net-
+works for efﬁcient evaluation. In Advances in neural infor-
+mation processing systems, pages 1269–1277, 2014.
+
+[15] X. Ding, G. Ding, J. Han, and S. Tang. Auto-balanced ﬁl-
+ter pruning for efﬁcient convolutional neural networks.
+In
+Thirty-Second AAAI Conference on Artiﬁcial Intelligence,
+2018.
+
+[16] M. Figurnov, A. Ibraimova, D. P. Vetrov, and P. Kohli. Per-
+foratedcnns: Acceleration through elimination of redundant
+
+convolutions. In Advances in Neural Information Processing
+Systems, pages 947–955, 2016.
+
+[17] Y. Guo, A. Yao, and Y. Chen. Dynamic network surgery for
+efﬁcient dnns. In Advances In Neural Information Process-
+ing Systems, pages 1379–1387, 2016.
+
+[18] S. Gupta, A. Agrawal, K. Gopalakrishnan, and P. Narayanan.
+Deep learning with limited numerical precision. In Interna-
+tional Conference on Machine Learning, pages 1737–1746,
+2015.
+
+[19] S. Han, H. Mao, and W. J. Dally.
+
+Deep compres-
+sion: Compressing deep neural networks with pruning,
+trained quantization and huffman coding. arXiv preprint
+arXiv:1510.00149, 2015.
+
+[20] S. Han, J. Pool, J. Tran, and W. Dally. Learning both weights
+and connections for efﬁcient neural network. In Advances in
+Neural Information Processing Systems, pages 1135–1143,
+2015.
+
+[21] J. A. Hartigan and M. A. Wong. Algorithm as 136: A k-
+means clustering algorithm. Journal of the Royal Statistical
+Society. Series C (Applied Statistics), 28(1):100–108, 1979.
+[22] B. Hassibi and D. G. Stork. Second order derivatives for net-
+work pruning: Optimal brain surgeon. In Advances in neural
+information processing systems, pages 164–171, 1993.
+
+[23] K. He, X. Zhang, S. Ren, and J. Sun. Deep residual learn-
+ing for image recognition. In Proceedings of the IEEE con-
+ference on computer vision and pattern recognition, pages
+770–778, 2016.
+
+[24] Y. He and S. Han. Adc: Automated deep compression and
+arXiv preprint
+
+acceleration with reinforcement learning.
+arXiv:1802.03494, 2018.
+
+[25] Y. He, G. Kang, X. Dong, Y. Fu, and Y. Yang. Soft ﬁlter
+pruning for accelerating deep convolutional neural networks.
+arXiv preprint arXiv:1808.06866, 2018.
+
+[26] Y. He, X. Zhang, and J. Sun. Channel pruning for accelerat-
+ing very deep neural networks. In International Conference
+on Computer Vision (ICCV), volume 2, page 6, 2017.
+
+[27] G. Hinton, O. Vinyals, and J. Dean. Distilling the knowledge
+in a neural network. arXiv preprint arXiv:1503.02531, 2015.
+[28] H. Hu, R. Peng, Y.-W. Tai, and C.-K. Tang. Network trim-
+ming: A data-driven neuron pruning approach towards efﬁ-
+cient deep architectures. arXiv preprint arXiv:1607.03250,
+2016.
+
+[29] G. Huang, Z. Liu, K. Q. Weinberger, and L. van der Maaten.
+Densely connected convolutional networks.
+In Proceed-
+ings of the IEEE conference on computer vision and pattern
+recognition, volume 1, page 3, 2017.
+
+[30] S. Ioffe and C. Szegedy. Batch normalization: Accelerating
+deep network training by reducing internal covariate shift. In
+International Conference on Machine Learning, pages 448–
+456, 2015.
+
+[31] M. Jaderberg, A. Vedaldi, and A. Zisserman. Speeding up
+convolutional neural networks with low rank expansions.
+arXiv preprint arXiv:1405.3866, 2014.
+
+[32] Y.-D. Kim, E. Park, S. Yoo, T. Choi, L. Yang, and D. Shin.
+Compression of deep convolutional neural networks for
+fast and low power mobile applications.
+arXiv preprint
+arXiv:1511.06530, 2015.
+
+4951
+
+[33] A. Krizhevsky and G. Hinton. Learning multiple layers of
+
+[50] A. Polyak and L. Wolf. Channel-level acceleration of deep
+
+features from tiny images. 2009.
+
+[34] A. Krizhevsky, I. Sutskever, and G. E. Hinton.
+
+Imagenet
+classiﬁcation with deep convolutional neural networks.
+In
+Advances in neural information processing systems, pages
+1097–1105, 2012.
+
+[35] A. Krogh and J. A. Hertz. A simple weight decay can im-
+prove generalization. In Advances in neural information pro-
+cessing systems, pages 950–957, 1992.
+
+[36] S. Lawrence, C. L. Giles, A. C. Tsoi, and A. D. Back.
+Face recognition: A convolutional neural-network approach.
+IEEE transactions on neural networks, 8(1):98–113, 1997.
+
+[37] Y. LeCun, Y. Bengio, et al. Convolutional networks for im-
+ages, speech, and time series. The handbook of brain theory
+and neural networks, 3361(10):1995, 1995.
+
+[38] Y. LeCun, B. E. Boser, J. S. Denker, D. Henderson, R. E.
+Howard, W. E. Hubbard, and L. D. Jackel. Handwritten digit
+recognition with a back-propagation network. In Advances
+in neural information processing systems, pages 396–404,
+1990.
+
+[39] Y. LeCun, J. S. Denker, and S. A. Solla. Optimal brain dam-
+age. In Advances in neural information processing systems,
+pages 598–605, 1990.
+
+[40] H. Li, A. Kadav, I. Durdanovic, H. Samet, and H. P.
+Graf. Pruning ﬁlters for efﬁcient convnets. arXiv preprint
+arXiv:1608.08710, 2016.
+
+[41] S. Lin, R. Ji, Y. Li, C. Deng, and X. Li. Towards com-
+pact convnets via structure-sparsity regularized ﬁlter prun-
+ing. arXiv preprint arXiv:1901.07827, 2019.
+
+[42] S. Lin, R. Ji, Y. Li, Y. Wu, F. Huang, and B. Zhang. Accel-
+erating convolutional networks via global & dynamic ﬁlter
+pruning. In IJCAI, pages 2425–2432, 2018.
+
+[43] B. Liu, M. Wang, H. Foroosh, M. Tappen, and M. Pensky.
+Sparse convolutional neural networks. In Proceedings of the
+IEEE Conference on Computer Vision and Pattern Recogni-
+tion, pages 806–814, 2015.
+
+[44] Z. Liu, J. Li, Z. Shen, G. Huang, S. Yan, and C. Zhang.
+Learning efﬁcient convolutional networks through network
+slimming. In 2017 IEEE International Conference on Com-
+puter Vision (ICCV), pages 2755–2763. IEEE, 2017.
+
+[45] Z. Liu, M. Sun, T. Zhou, G. Huang, and T. Darrell. Re-
+arXiv preprint
+
+thinking the value of network pruning.
+arXiv:1810.05270, 2018.
+
+[46] J.-H. Luo and J. Wu. Autopruner: An end-to-end train-
+able ﬁlter pruning method for efﬁcient deep model inference.
+arXiv preprint arXiv:1805.08941, 2018.
+
+[47] J.-H. Luo, J. Wu, and W. Lin. Thinet: A ﬁlter level prun-
+ing method for deep neural network compression.
+In Pro-
+ceedings of the IEEE international conference on computer
+vision, pages 5058–5066, 2017.
+
+[48] M. Mathieu, M. Henaff, and Y. LeCun.
+
+of convolutional networks through ffts.
+arXiv:1312.5851, 2013.
+
+Fast training
+arXiv preprint
+
+face representations. IEEE Access, 3:2163–2175, 2015.
+
+[51] M. Rastegari, V. Ordonez, J. Redmon, and A. Farhadi. Xnor-
+net: Imagenet classiﬁcation using binary convolutional neu-
+ral networks. In European Conference on Computer Vision,
+pages 525–542. Springer, 2016.
+
+[52] A. Romero, N. Ballas, S. E. Kahou, A. Chassang, C. Gatta,
+and Y. Bengio. Fitnets: Hints for thin deep nets. arXiv
+preprint arXiv:1412.6550, 2014.
+
+[53] V. Roth and B. Fischer. The group-lasso for generalized lin-
+ear models: uniqueness of solutions and efﬁcient algorithms.
+In Proceedings of the 25th international conference on Ma-
+chine learning, pages 848–855. ACM, 2008.
+
+[54] T. N. Sainath, B. Kingsbury, V. Sindhwani, E. Arisoy, and
+B. Ramabhadran. Low-rank matrix factorization for deep
+neural network training with high-dimensional output tar-
+gets. In Acoustics, Speech and Signal Processing (ICASSP),
+2013 IEEE International Conference on, pages 6655–6659.
+IEEE, 2013.
+
+[55] K. Simonyan and A. Zisserman. Very deep convolutional
+networks for large-scale image recognition. arXiv preprint
+arXiv:1409.1556, 2014.
+
+[56] V. Sindhwani, T. Sainath, and S. Kumar. Structured trans-
+In Advances in
+forms for small-footprint deep learning.
+Neural Information Processing Systems, pages 3088–3096,
+2015.
+
+[57] P. Singh, V. K. Verma, P. Rai, and V. P. Namboodiri. Lever-
+aging ﬁlter correlations for deep model compression. arXiv
+preprint arXiv:1811.10559, 2018.
+
+[58] S. W. Stepniewski and A. J. Keane. Pruning backpropaga-
+tion neural networks using modern stochastic optimisation
+techniques. Neural Computing & Applications, 5(2):76–98,
+1997.
+
+[59] N. Vasilache, J. Johnson, M. Mathieu, S. Chintala, S. Pi-
+Fast convolutional nets with
+arXiv preprint
+
+antino, and Y. LeCun.
+fbfft: A gpu performance evaluation.
+arXiv:1412.7580, 2014.
+
+[60] H. Wang, Q. Zhang, Y. Wang, and H. Hu. Structured pruning
+for efﬁcient convnets via incremental regularization. arXiv
+preprint arXiv:1811.08390, 2018.
+
+[61] Y. Wang, C. Xu, C. Xu, and D. Tao. Beyond ﬁlters: Com-
+pact feature map for portable deep model. In International
+Conference on Machine Learning, pages 3703–3711, 2017.
+[62] Y. Wang, C. Xu, S. You, D. Tao, and C. Xu. Cnnpack: Pack-
+ing convolutional neural networks in the frequency domain.
+In Advances in neural information processing systems, pages
+253–261, 2016.
+
+[63] W. Wen, C. Wu, Y. Wang, Y. Chen, and H. Li. Learning
+structured sparsity in deep neural networks. In Advances in
+Neural Information Processing Systems, pages 2074–2082,
+2016.
+
+[64] J. Wu, C. Leng, Y. Wang, Q. Hu, and J. Cheng. Quantized
+convolutional neural networks for mobile devices.
+In Pro-
+ceedings of the IEEE Conference on Computer Vision and
+Pattern Recognition, pages 4820–4828, 2016.
+
+[49] P. Molchanov, S. Tyree, T. Karras, T. Aila, and J. Kautz.
+Pruning convolutional neural networks for resource efﬁcient
+inference. 2016.
+
+[65] J. Xue, J. Li, and Y. Gong. Restructuring of deep neural
+network acoustic models with singular value decomposition.
+In Interspeech, pages 2365–2369, 2013.
+
+4952
+
+[66] R. Yu, A. Li, C.-F. Chen, J.-H. Lai, V. I. Morariu, X. Han,
+M. Gao, C.-Y. Lin, and L. S. Davis. Nisp: Pruning net-
+works using neuron importance score propagation. In Pro-
+ceedings of the IEEE Conference on Computer Vision and
+Pattern Recognition, pages 9194–9203, 2018.
+
+[67] T. Zhang, S. Ye, K. Zhang, J. Tang, W. Wen, M. Fardad, and
+Y. Wang. A systematic dnn weight pruning framework using
+alternating direction method of multipliers. In Proceedings
+of the European Conference on Computer Vision (ECCV),
+pages 184–199, 2018.
+
+[68] X. Zhang, J. Zou, K. He, and J. Sun. Accelerating very
+deep convolutional networks for classiﬁcation and detection.
+IEEE transactions on pattern analysis and machine intelli-
+gence, 38(10):1943–1955, 2016.
+
+[69] H. Zhou, J. M. Alvarez, and F. Porikli. Less is more: Towards
+compact cnns. In European Conference on Computer Vision,
+pages 662–677. Springer, 2016.
+
+[70] Z. Zhuang, M. Tan, B. Zhuang, J. Liu, Y. Guo, Q. Wu,
+J. Huang, and J. Zhu. Discrimination-aware channel pruning
+for deep neural networks. In Advances in Neural Information
+Processing Systems, pages 883–894, 2018.
+
+4953
+
+

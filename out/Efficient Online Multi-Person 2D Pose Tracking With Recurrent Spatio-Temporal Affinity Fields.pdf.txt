@@ -1,0 +1,1479 @@
+Efﬁcient Online Multi-Person 2D Pose Tracking with
+
+Recurrent Spatio-Temporal Afﬁnity Fields
+
+Yaadhav Raaj
+
+Haroon Idrees
+
+Gines Hidalgo
+
+Yaser Sheikh
+
+The Robotics Institute, Carnegie Mellon University
+
+{raaj@cmu.edu, hidrees@cs.cmu.edu, gines@cmu.edu, yaser@cs.cmu.edu}
+
+Abstract
+
+We present an online approach to efﬁciently and simul-
+taneously detect and track 2D poses of multiple people in
+a video sequence. We build upon Part Afﬁnity Fields (PAF)
+representation designed for static images, and propose an
+architecture that can encode and predict Spatio-Temporal
+Afﬁnity Fields (STAF) across a video sequence.
+In par-
+ticular, we propose a novel temporal topology cross-linked
+across limbs which can consistently handle body motions
+of a wide range of magnitudes. Additionally, we make the
+overall approach recurrent in nature, where the network in-
+gests STAF heatmaps from previous frames and estimates
+those for the current frame. Our approach uses only online
+inference and tracking, and is currently the fastest and the
+most accurate bottom-up approach that is runtime-invariant
+to the number of people in the scene and accuracy-invariant
+to input frame rate of camera. Running at ∼30 fps on a
+single GPU at single scale, it achieves highly competitive
+results on the PoseTrack benchmarks. 1
+
+s
+F
+A
+T
+
+ 
+t
+n
+i
+o
+p
+y
+e
+K
+
+s
+F
+A
+T
+b
+m
+L
+
+i
+
+ 
+
+t
+t+1
+
+t
+t+1
+
+t
+t+1
+
+t
+t+1
+
+Large Motion
+
+Negligible Motion
+
+Figure 1: We solve multi-person human pose tracking by
+encoding change in position and orientation of keypoints
+or limbs across time as Temporal Afﬁnity Fields (TAFs) in
+a recurrent fashion. Top: Modeling TAFs (blue arrows)
+through keypoints works when motion occurs but fails dur-
+ing limited motion making temporal association difﬁcult.
+Bottom: Cross-linked TAFs across limbs perform consis-
+tently for all kinds of motions providing redundancy and
+smoother encoding for further reﬁnement and prediction.
+
+1. Introduction
+
+Multi-person human pose estimation has received con-
+siderable attention in the past few years assisted by deep
+convolutional learning as well as COCO [21] and MPII [3]
+datasets. The recently introduced PoseTrack dataset [17]
+has provided the community with a large scale corpus of
+video data with multiple people in the scenes. In this paper,
+our aim is to utilize these towards building a truly online
+and real-time multi-person 2D pose estimator and tracker
+that is deployable and scalable while achieving high perfor-
+mance and requiring minimal post-processing. The poten-
+tial uses include real-time and closed-loop applications with
+low latency where the execution is in sync with frame rate
+of camera such as self-driving cars and augmented reality.
+
+The real-time and online nature of such an approach in-
+i) scenes with multiple peo-
+
+troduces several challenges:
+
+1Project Page
+
+ple demand handling of occlusion, proximity and contact
+as well as limb articulation, and ii) it should be runtime-
+invariant to the number of people in the scene. Further-
+more, iii) it must be capable of handling challenges in-
+duced from video data, such as large camera motion and
+motion blur across frames. We build upon the Part Afﬁn-
+ity Fields (PAFs) [6] to overcome these challenges, which
+represent connections across body keypoints in static im-
+ages as normalized 2D vector ﬁelds with position and ori-
+entation.
+In this work, we propose Temporal Afﬁnity
+Fields (TAFs) which encode connections between keypoints
+across frames, including a unique cross-linked limb topol-
+ogy as seen in bottom row of Figure 1. In the absence of mo-
+tion or when there is not enough data from previous frames,
+TAFs constructed between same keypoints, e.g., wrist-wrist
+or elbow-elbow across frames lose all associative properties
+(see top row of Fig. 1). In this case, the nulliﬁcation of mag-
+nitude and orientation provides no useful information to dis-
+
+14620
+
+cern between the case where a new person appears or where
+an existing person stops moving. This effect is compounded
+if these two cases occur in proximity together. However,
+the longer limb TAF connections allow information preser-
+vation even in the absence of motion or appearance of new
+people by preventing corruption of valid information with
+noise as the magnitude of motion becomes small.
+In the
+limiting case of zero motion, the TAF effectively collapses
+to a PAF. From the perspective of a network, TAF between
+keypoints destroys spatial information about keypoints as
+motion ceases, whereas TAF across keypoints simply learns
+to propagate the PAF, which is a much simpler task.
+
+Furthermore, we work on videos in a recurrent manner
+to make the approach real-time, where computation of each
+frame leverages information from previous frames thereby
+reducing overall computation. Where the single-image pose
+estimation methods use multiple stages to reﬁne heatmaps
+[6, 24], we exploit the redundant information in the video
+frames and divert the resources towards efﬁcient computa-
+tion of both poses and tracks across multiple frames. Thus,
+the multi-stage computation over images is divided over
+multiple frames in a video. Overall, we call this Recur-
+rent Spatio-Temporal Afﬁnity Fields (STAF) and it achieves
+highly competitive results on the PoseTrack benchmarks:
+[64.6% mAP, 58.4% MOTA] on single scale at ∼30 FPS,
+and [71.5% mAP, 61.3% MOTA] on multiple scales at ∼7
+FPS on the PoseTrack 2017 validation set using one GTX
+1080 Ti. As of writing, our approach currently ranks second
+for accuracy and at third place for tracking on the 2017 chal-
+lenge [1]. Note that, our tracking approach is truly online
+on a per-frame basis with no post processing.
+
+The rest of the paper is organized as follows. In Sec. 2,
+we discuss related work and situate the paper in the litera-
+ture. In Sec. 3, we present details of our approach, training
+procedure as well as tracking and inference algorithm. Fi-
+nally, we present results and ablation experiments in Sec. 4
+and conclude the paper in Sec. 5.
+
+2. Related Work
+
+Early methods for human pose estimation localized key-
+points or body parts of individuals but did not consider mul-
+tiple people simultaneously [4, 28, 36, 20, 33]. Hence, these
+methods were not adept at localizing keypoints of highly
+articulated or interacting people. Person detection was typ-
+ically used which followed single-person keypoint detec-
+tion [29, 11, 32, 16]. With deep learning, human detec-
+tion methods such as Mask-RCNN [10, 14] were employed
+to directly predict multiple human bounding boxes through
+ROI-pooling followed by pose estimation per person [12].
+However, these methods suffered when people were in close
+proximity as bounding boxes got grouped together. Further-
+more, these top-down methods required more computation
+as the number of people increased in the image, making
+
+them inadequate for real-time pose estimation and tracking.
+
+The bottom-up Part Afﬁnity Fields (PAF) method [6]
+produced a spatial encoding of pair-wise body part connec-
+tions in the image space, followed by greedy bipartite graph
+matching for inference permitting consistent computation
+speed irrespective of the number of people. Person Lab [25]
+built upon these ideas to incorporate redundant connections
+on people with a less greedy inference approach getting
+highly competitive results on the COCO [22] and MPII [3]
+datasets. These methods work on single images and do not
+incorporate any keypoint tracking or past information.
+
+Many ofﬂine methods have been proposed to enforce
+temporal consistency of poses in videos [15, 17, 34]. These
+require solving spatio-temporal graphs or incorporating
+data from future frames making them inadequate for on-
+line operation. Alternatively, Song et al. and Pﬁster et al.
+[27, 31] demonstrate how optical ﬂow ﬁelds could be pre-
+dicted per keypoint by formulating the input to be multi-
+framed. LSTM Pose Machines [23] built upon previous
+work demonstrating use of single stage per frame for video
+sequences. However, these networks did not model spatial
+relationship between keypoints and were evaluated on the
+single person Penn Action [37] and JHMDB [18] datasets.
+
+A different line of works explored maintaining tempo-
+ral graphs in neural networks for handling multiple peo-
+ple [9, 8]. Rohit et al. demonstrated that a 3D extension
+of Mask-RCNN, called person tubes, can connect people
+across time. However, this required applying grouped con-
+volutions over a stack of frames reducing speed, and did not
+achieve better results for tracking than the Hungarian Algo-
+rithm baseline. Joint Flow [8] used the concept of Temporal
+Flow Field which connected keypoints across two frames.
+However, it did not use a recurrent structure and explicitly
+required a pair of images as input increasing run-time sig-
+niﬁcantly. The ﬂow representation also suffered from am-
+biguity when subjects moved slowly or were stationary and
+required special handling of such cases during tracking.
+
+Top-down pose and tracking methods [34, 33, 7, 26, 14]
+have dominated the detection and tracking tasks [34] [35]
+in PoseTrack but their speed suffered due to explicit human
+detection and follow-up keypoint detection for each per-
+son. Moreover, modeling long-term spatio-temporal graphs
+for tracking in an ofﬂine manner hurts real-time applica-
+tions. None of these methods are able to report any signif-
+icant runtime-to-performance measures as they cannot run
+in real time. In this work, we demonstrate this problem can
+be solved in a simple elegant single-stage network that in-
+corporates recurrence by using the previous pose heatmaps
+to predict both keypoints and their spatio-temporal asso-
+ciations. We call this Recurrent Spatio-Temporal Afﬁnity
+Fields (STAF) which not only represents the prediction of
+Spatial (PAF) and Temporal (TAF) Afﬁnity Fields but also
+how they are reﬁned through past information.
+
+24621
+
+Figure 2: Left: Training architecture for one of our models which ingests video sequences in a recurrent manner across time
+while generating keypoints and connections across keypoints in each frame as Part Afﬁnity Fields (PAFs), and connections
+between keypoints across frames as Temporal Afﬁnity Fields (TAFs). Together, we call this Recurrent Spatio-Temporal
+Afﬁnity Fields (STAF). Each module ingests outputs from other modules in both previous and current frames (shown with
+arrows) and reﬁnes it. Center: During inference, our network operates on a single video frame at each time step using
+past information. Right: During inference, we use the predicted heatmaps to detect and track people. Keypoints (red) are
+extracted ﬁrst, then associated into poses and tracklets using PAFs (green), TAFs (blue), and tracklets from previous frames.
+
+3. Proposed Approach
+
+ground truth between pairs of keypoints for each person:
+
+Our approach aims to solve the problems of keypoint es-
+timation and tracking simultaneously in videos. We em-
+ploy Recurrent Convolutional Neural Networks which we
+construct from four essential building blocks. Let Pt rep-
+resent the pose of a person in a particular frame or time
+t, consisting of keypoints K = {K1, K2, . . . KK}. The
+Part Afﬁnity Fields (PAFs) L = {L1, L2, . . . LL} are syn-
+thesized from keypoints in each frame. For tracking key-
+points across frames a video, we propose Temporal Afﬁnity
+Fields (TAFs) given by R = {R1, R2, . . . RR} which cap-
+ture the recurrence and connect the keypoints across frames.
+Together, they are referred to as Spatio-Temporal Afﬁnity
+Fields (STAF). These blocks are visualized in Fig. 2 where
+each block is shown with a different color:
+the raw con-
+volutional feature from VGG backbone [30] are shown in
+amber, PAFs in green, keypoints in red and TAFs in blue.
+
+Thus, the output of VGG backbone, PAFs, keypoints and
+TAFs are given by V, L, K and R, respectively, and com-
+puted through CNNs by ψV, ψL, ψK and ψR, respectively.
+The keypoint heatmaps are constructed from ground truth
+by placing a Gaussian kernel at the location of the annotated
+keypoint, whereas the PAFs and TAFs are constructed from
+
+k, eKt
+
+k′(cid:1), eRt
+
+k→k′ := Ω(cid:0)eKt
+eLt
+where ∼ denotes the ground truth and the function Ω(·)
+places a directional unit vector at every pixel within a pre-
+deﬁned radius of the line connecting the two keypoints.
+
+k→k′ := Ω(cid:0)eKt−1
+
+, eKt
+
+k′(cid:1),
+
+(1)
+
+k
+
+3.1. Video Models for Pose Estimation and Tracking
+
+Next, we present the three models comprising the four
+blocks capable of estimating keypoints and STAF. The in-
+put to each network consists of a set of consecutive frames
+of a video. Each block in each network consists of ﬁve 7 × 7
+and two 1 × 1 convolution layers. Each 7 × 7 layer is re-
+placeable with the concatenation of three 3 × 3 convolution
+layers providing the same receptive ﬁeld. The ﬁrst stage has
+a unique set of weights from subsequent frames as it cannot
+incorporate any previous data and also has a lower depth
+which was found to improve results (see Sec. 4). The VGG
+features are computed for each frame. For frame It at time
+t of the video, they are computed as Vt = ψV(It).
+
+Model I: Given Vt−1 and Vt, the the following equations
+
+34622
+
+Pt-1PtLtKP -ψKPAF-ψLTAF -ψRInferenceLt-1VtVGG -ψVLtKt-1KtVt-1Rt-1RtPt-1Pt(Lt,Kt,Rt)KP -ψKVGG -ψVPAF-ψLKP -ψKVGG -ψVPAF-ψLKP -ψKVGG -ψVPAF-ψLTAF -ψRTAF -ψRTAF -ψRInferenceInferenceInferenceI0I1I2Itdescribe the ﬁrst model:
+
+Lt = ψL(cid:0)Vt, ψq−1
+Kt = ψK(cid:0)Vt, ψq
+Rt = ψR(cid:0)Vt−1, Vt, Lt−1, Lt, Rt−1(cid:1),
+
+L (·)(cid:1),
+L(·), ψq−1
+
+K (·)(cid:1),
+
+(2)
+
+where ψq means q recursive applications of ψ. In our ex-
+periments, we found that performance plateaus at q = 5. In
+Model I, PAFs are obtained by recursive application of ψL
+on concatenated input from VGG features and PAFs from
+previous stage. Similarly, keypoints depend on VGG fea-
+tures, keypoints from the previous stage and PAFs from the
+current stage. Finally, TAFs are dependent on VGG fea-
+tures and PAFs from both the previous and current frames,
+as well as TAFs from previous frame. This model produces
+good results but is the slowest due to recursive stages.
+
+Model II: Unlike Model I with multiple applications of
+CNNs for PAFs and keypoints, Model II computes the PAFs
+and keypoints in a single pass as visualized in Fig. 2:
+
+Lt = ψL(cid:0)Vt, Lt−1(cid:1),
+Kt = ψK(cid:0)Vt, Lt, Kt−1(cid:1),
+Rt = ψR(cid:0)Vt−1, Vt, Lt−1, Lt, Rt−1(cid:1).
+
+(3)
+
+Replacing ﬁve stages with a single stage is expected to
+drop performance. Therefore, the multi-stage computation
+of PAFs and keypoints in Model II is supplanted with out-
+put of PAFs and keypoints from the previous frames. This
+boosts up the speed signiﬁcantly without major loss in per-
+formance as it takes advantage of the redundant information
+in videos, i.e., the PAFs and keypoints from previous frame
+are a reliable guide to the location of PAFs and keypoints in
+the current frame.
+
+Model III: Finally, the third model attempts to estimate Part
+and Temporal Afﬁnity Fields through a single CNN:
+
+[L, R]t = ψ[L,R](cid:0)Vt−1, Vt, [L, R]t−1(cid:1),
+
+Kt = ψK(cid:0)Vt, Lt, Kt−1(cid:1),
+
+(4)
+
+where [L, R] implies simultaneous computation of Part
+and Temporal Afﬁnity Fields through a single CNN. For
+Model III, the channels corresponding to PAFs are then
+passed for keypoint estimation along with VGG features
+from current frame and keypoints from previous frame. As
+Model III consists of only three blocks, it has the fastest in-
+ference, however it proved to be the most difﬁcult to train.
+
+3.2. Topology of Spatio Temporal Afﬁnity Fields
+
+For our body model, we deﬁne K = 21 body parts or
+keypoints which is the union of body parts in COCO and
+MPII pose datasets. They include ears, nose and eyes from
+COCO; and head and neck from MPII. Next, there are sev-
+eral possible ways to associate and track the keypoints and
+
+(a)                      (b)                     (c)
+
+Figure 3: This ﬁgure illustrates the three possible topology
+variations for Spatio-Temporal Afﬁnity Fields including the
+new cross-linked limb topology (b). Keypoints, PAFs and
+TAFs are represented by solid circles, straight lines and ar-
+rows, respectively.
+
+STAF across frames as illustrated in Figure 3. In this ﬁgure,
+solid circles represent keypoints while straight lines and ar-
+rows stand for PAFs and TAFs, respectively. Figure 3(a)
+consists of TAFs between same keypoints as well as PAFs.
+For this topology, the number of TAFs and PAFs is 21 and
+48, respectively. The TAFs capture temporal connections
+directly across keypoints similar to [8].
+
+On the other hand, Figure 3(b) consists of TAFs between
+different limbs in a cross-linked manner across frames. The
+number of PAFs and TAFs is 48 and 96, respectively. We
+also tested the topology in Figure 3(c) which consists of 69
+keypoints and limb TAFs only. This does not model any
+spatial links within frames across keypoints.
+
+3.3. Model Training
+
+During training, we unroll each model to handle multi-
+ple frames at once. Each model is ﬁrst pre-trained in Im-
+age Mode where we present a single image or frame at
+each time instant to the model. This implies multiple appli-
+cations of PAF and keypoint stages to the same frame. We
+train with COCO, MPII and PoseTrack datasets with a batch
+distribution of 0.7, 0.2 and 0.1, respectively, which corre-
+sponds to dataset sizes where each batch consists of images
+or frames from one dataset exclusively. For masking out
+un-annotated keypoints, we use the head bounding boxes
+available in MPII and PoseTrack datasets, and location of
+annotated keypoints for batches from COCO dataset. The
+net takes in 368 × 368 images and has scaling, rotation and
+translation augmentations. Heatmaps are computed with an
+ℓ2 loss with a stride of 8 resulting in 46 × 46 dimensional
+heatmaps. We initialize the limb TAFs with PAFs in topol-
+ogy 3(b,c), and keypoint TAFs with zeros in topology 3(a,c).
+We train the net for a maximum of 400k iterations.
+
+44623
+
+Next, we proceed training in the Video Mode where
+we expose the network to video sequences. For static im-
+age datasets including COCO and MPII, we augment data
+with video sequences that have length equal to number of
+times the network is unrolled by synthesizing motion with
+scaling, rotation and translation. We train COCO, MPII
+and PoseTrack in Video Mode with a batch distribution of
+of 0.4, 0.1 and 0.5, respectively. Moreover, we also use
+skip-frame augmentation for video-based PoseTrack dataset
+where some of the randomly selected sequences skip up to
+3 frames. We lock the weights of VGG module in Video
+Mode. For Model I, we only train the TAF module when
+training on videos. For Model II, we train keypoint, PAF
+and TAF modules for 5000 epochs, then lock all modules
+except TAF. In Model III, both STAF and keypoints remain
+unlocked throughout the 300k iterations.
+
+3.4. Inference and Tracking
+
+The method described till now predicts heatmaps of key-
+points and STAF at every frame. Next, we present the
+framework to perform pose inference and tracking across
+frames given the predicted heatmaps. Let the inferred poses
+at time t be given by {Pt,1, Pt,2, . . . , Pt,N } where the
+second superscript indexes over people at frame t. Each
+pose at a particular time consists of up to K keypoints
+that become part of a pose post inference, i.e., Pt,n =
+{K
+
+t,n
+1 , K
+The detection and tracking procedure begins with local-
+
+t,n
+2 , . . . , K
+
+t,n
+K }.
+
+ization of keypoints at time t. The inferred keypoints K
+are
+obtained by rescaling the heatmaps to original image resolu-
+tion followed by non-maximal suppression. Then, we infer
+
+t
+
+t
+
+t
+
+, and those for TAF, R
+
+PAF weights, L
+, between all pairs
+of keypoints in each frame deﬁned by the given topology,
+i.e.,
+
+t
+
+k→k′ = ω(cid:0)K
+
+t
+k, K
+
+t
+
+k′(cid:1), R
+
+t
+
+k→k′ = ω(cid:0)K
+
+t−1
+k
+
+L
+
+t
+
+k′(cid:1),
+
+, K
+
+(5)
+
+where the function ω(·) samples points between the two
+keypoints, computes the dot product between the the mean
+vector of the sampled points and the directional vector from
+the ﬁrst to the second keypoint.
+
+Both the inferred PAFs and TAFs are sorted by their
+scores before inferring the complete poses and associating
+them across frames with unique ids. We perform this in a
+bottom-up style where we utilize poses and inferred PAFs
+from the previous frame to determine the update, addition or
+deletion of tracklets. Going through each PAF in the sorted
+list, (i) we initialize a new pose if both keypoints in the PAF
+are unassigned, (ii) add to existing pose if one of the key-
+points is assigned, (iii) update score of PAF in pose if both
+are assigned to the same pose, and (iv) merge two poses if
+keypoints belong to different poses with opposing keypoints
+unassigned. Finally, we assign id to each pose in the current
+
+F
+
+H
+
+G
+
+E
+
+A
+
+B
+
+C
+
+D
+
+(a)
+
+(b)
+
+(c)
+
+(d)
+
+Figure 4: (a) Ambiguity when selecting between two wrist
+locations B and E is resolved by reweighing PAFs through
+TAFs. (b)-(d): With transitivity, incorrect PAFs containing
+ankles (c) are resolved with past pose (b) resulting in (d).
+Assume we are constructing a person, starting at Node A. We are confused about 
+moving either to B or E, since their scores were sorted closely in PAF. 
+
+We first select E, and select the best TAF linking it, going to F. We know F 
+belongs to person A, so we go to G. Then we sample the TAF between G and A, 
+since transitivity only exists between those limbs. We see the score is lower
+
+We then select B, and select the best TAF linking it, going to C. We know C 
+belongs to person B, so we go to D. Then we sample TAF between D and A. We 
+see the score is higher.
+
+frame with the most frequent id of keypoints from the pre-
+vious frame. For cases where we have ambiguous PAFs,
+i.e., multiple equally likely possibilities as seen in Figure 4,
+we use transitivity that reweighs PAFs with TAFs to disam-
+biguate between them, using α as a biasing weight. In this
+ﬁgure, keypoint {A} - an elbow - is under consideration
+with wrists {B} and {E} as two possibilities. We select the
+strongest TAF where {A, B, C, D, A} has a higher weight
+than {A, E, F, G, A}, computed as:
+
+Hence, we select B to be our next point in the graph.
+
+L
+
+t,n
+k→k′ = (1 − α) ∗ ω(K
+
+t−1,n
+k
+
+, K
+
+t,n
+k′ ) + α ∗ ω(K
+
+t,n
+k , K
+
+t,n
+k′ ).
+
+4. Experiments
+
+In this section, we present results of our experiments. In-
+put images to networks are resized at W×368 maintaining
+aspect ratio for single scale (SS); and W×736, W×368 and
+W×184 for multiple scales (MS). The heatmaps for multi-
+ple scales are re-sized back to W×736 and merged through
+averaging. This is followed by inference and tracking.
+
+4.1. Ablation Study
+
+We conducted a series of ablation studies to determine
+
+the construction of our network architecture:
+
+Filter Sizes: As discussed in Sec. 3, each block either con-
+sists of ﬁve 7 × 7 layers followed by two 1 × 1 layers [6],
+or each 7 × 7 layer is replaced with three 3 × 3 layers simi-
+lar to [5] in the alternate experiment. The results are shown
+in Table 1. We run single frame inference on Model I and
+ﬁnd the 3 × 3 ﬁlter size to be 2% more accurate than 7 × 7,
+with signiﬁcant boosts in average precision of knee and an-
+It is also 40% faster while requiring 40%
+kle keypoints.
+more memory.
+
+Video Mode / Depth of First Stage: Next, we report results
+when training in Image Mode (Im) using single images, and
+when we continue training beyond images while exposing
+the network to videos and augmenting with synthetic mo-
+tion in the Video Mode (Vid). During testing, the network
+is run recurrently on video sequences with one frame per
+
+54624
+
+Method
+Model I - 3x3 75.7 73.9 67.8 56.3 66.8 62.3 56.9
+Model I - 7x7 76.0 73.3 66.4 54.0 63.4 59.2 52.2
+
+Hea Sho Elb Wri Hip Kne Ank mAP fps
+14
+10
+
+66.3
+64.3
+
+Table 1: This table shows results for experiments with the
+two ﬁlter sizes on PoseTrack 2017 validation set.
+
+y
+c
+a
+r
+u
+c
+c
+A
+
+88
+86
+84
+82
+80
+78
+76
+74
+
+(a) Validation Subset
+
+(b) Validation Set
+
+65
+
+y
+c
+a
+r
+u
+c
+c
+A
+
+60
+
+55
+
+50
+
+45
+
+6Hz
+
+12Hz 
+
+Frame Rate
+
+24Hz
+
+*Model II: 1 s  / 35 fps
+*Model II: 2 s / 26 fps
+*Model II: 3 s / 20 fps
+*Model II: 4 s / 17  fps
+
+6Hz
+
+12Hz 
+
+24Hz
+
+Frame Rate
+Model II: 1 s   / 35 fps 
+Model II: 2 s  / 26 fps 
+Model  I: 5 s  /  14 fps
+
+Figure 5: Improvement in quality of heatmaps before (a,c)
+and after (b,d) the network is exposed to videos and syn-
+thetic motion augmentation. We observe better peaks and
+less noise across both PAF and keypoint heatmaps.
+
+stage. Model II is deployed for these experiments. We ﬁnd
+that by exposing the network to video sequences for 5000
+iterations, we were able to boost the mAP as seen in Table 2
+and Fig. 5. We also ﬁnd that if we use the same depth,
+i.e., number of channels for the ﬁrst frame as the other
+frames (128-128), the network was not able to generalize
+well to recurrent execution (56.6 mAP) when trained with
+Image Mode. When reducing the depth for the ﬁrst frame
+to one-half, i.e. (64-128), we found that the generalization
+to videos was better (62.6 mAP). When trained with Video
+Mode, mAP increased further to 64.1. We reason that the
+64-depth modules produced relatively vague outputs which
+gave sufﬁcient room for the subsequent modules in the fol-
+lowing frames to process and reﬁne the heatmaps yielding
+a boost in performance. Furthermore, this also highlights
+the importance of incorporating shot change detection and
+running the ﬁrst stage at each shot change.
+
+Method
+Hea Sho Elb Wri Hip Kne Ank mAP fps
+Im - 7x7 - 128-128 74.6 69.6 55.5 40.2 56.4 47.2 44.0 56.6 27
+Vid - 7x7 - 128-128 76.2 71.6 64.5 51.9 62.6 59.3 52.5 63.6 27
+73.5 72.2 63.8 52.1 62.7 57.3 51.1 62.6 27
+Im - 7x7 - 64-128
+75.8 73.4 65.5 53.8 64.2 58.4 51.4 64.1 27
+Vid - 7x7 - 64-128
+73.5 72.5 65.0 52.7 63.7 57.7 53.2 63.4 35
+Im - 3x3 - 64-128
+Vid - 3x3 - 64-128
+75.4 73.2 67.4 55.0 63.9 58.4 53.5 64.6 35
+
+Table 2: This table shows single-scale performance using
+Model II before and after training with videos, ﬁlter sizes,
+as well as different depths for ﬁrst stage.
+
+Effect of Camera Frame Rate on mAP: For these exper-
+iments, we studied how the frame rate of the camera and
+number of stages affect the accuracy of pose estimation.
+With a high frame rate, the apparent motion between frames
+is smooth, which becomes relatively abrupt at low frame-
+rates. Therefore, the heatmaps from previous frames would
+
+Figure 6: These graphs show mAP curves as a function
+of frame rates of camera, i.e., the rate at which an origi-
+nal 24Hz video is input to the method. The ﬂat black line
+shows the performance of ﬁve-stage Model I, while ‘*’ in
+the legend indicates training using Image Mode only.
+
+not be as useful at low frame-rates. We tested this hypoth-
+esis with Model I (ﬁve stages of the same modules without
+ingesting previous frame heatmaps), and Model II (different
+number of stages with each ingesting heatmaps from previ-
+ous frame). We also evaluate the inﬂuence of training with
+Image and Video modes in Figure 6.
+
+Fig. 6(a) shows results on a subset of ten sequences
+where the human subjects comprised at least 30% of the
+frame height in the PoseTrack 2017 validation set. Fig. 6(b)
+presents results on the entire validation set. The original
+videos were assumed to run at the ﬁlm-standard 24 Hz,
+hence we ran experiments by varying frame rates at 24, 12
+and 6 Hz through sub-sampling. The ground truth has been
+annotated at 6 Hz. As expected, accuracy is proportional to
+video frame rate and number of stages. When the Model II
+was trained in Image Mode, we observed small increments
+in accuracy until at four stages, it peaks at the same level as
+Model I. Upon training with Video Mode, it surpasses this
+accuracy peaking earlier at two stages.
+
+When considering the entire validation set, the approach
+is still able to reap the beneﬁts of more stages and train-
+ing in Video Mode as can be seen in Fig. 6(b). However,
+it was barely able to reach the accuracy of the much slower
+Model I. For the validation set, the accuracy reduced when
+including sequences with smaller apparent size of humans.
+These sequences usually were more crowded as well, and
+passing in the previous heatmaps seemed to hurt the perfor-
+mance. The body parts of small-sized humans only occu-
+pied a few pixels in the heatmaps and the normalized direc-
+tion vectors were inconsistent and random across frames.
+
+Inﬂuence of Topology / Model Type in Tracking: Next,
+we report experiments on different combinations of topol-
+ogy deﬁned in Fig. 3 with the three models presented in
+Sec. 3.1, both for pose estimation and tracking evaluated
+
+64625
+
+(a)(b)(c)(d)using mean Average Precision (mAP) and Multiple Object
+Tracking Accuracy (MOTA) metrics in Table 3. We found
+an improvement in tracking using limb TAFs in Topology
+B versus keypoint TAFs in Topology A. As highlighted
+in Fig. 1, Topology A lacks associative properties when a
+keypoint has minimal motion or when a new person ap-
+pears. Although we enforced spatial constraint that joint lo-
+cations should be close in consecutive frames, and adjusted
+it according to scale (similar to [8]), this still resulted in
+false positives since it is difﬁcult to disambiguate between
+a newly detected person and some nearby stationary per-
+son. Furthermore, where motion of a person tended to be
+small, Topology A resulted in jittery and noisy vectors caus-
+ing more reliance on pixel distances. This was further exac-
+erbated by recurrence where accumulation of noisy vectors
+from previous frame heatmaps deteriorated associative abil-
+ity of Temporal Afﬁnity Fields. Table 3 also shows results
+for Topology C which signiﬁcantly under-performed com-
+pared to Topology B. Since it exclusively consists of limb
+and joint TAFs without any spatial components, this makes
+keypoint localization and association rather difﬁcult.
+
+Topology B solves all of these problems elegantly. The
+longer cross-linked limb TAF connections preserve infor-
+mation even in the absence of motion or appearance of
+new people since the TAF effectively collapses to a PAF
+in such cases. This allows us to avoid association heuristics
+and makes the problem of new person identiﬁcation trivial.
+With this representation, recurrence was observably bene-
+ﬁcial due to true and consistent representation irrespective
+of magnitude of motion. As a side-advantage, this also al-
+lowed us to warm-start the TAF input with PAF providing
+more reliable initialization for tracking in the ﬁrst frame.
+
+For Model III, training beyond 5000 iterations gradually
+begins to harm the accuracy of the pose estimation resulting
+in reduced tracking performance as well. This is primarily
+due to the disparity in the amount of diverse data between
+COCO / MPII and PoseTrack datasets. For Model II, if we
+train on keypoints and PAFs modules and lock their weights
+afterwards, then follow with training only the TAF, this re-
+sults in better performance with a signiﬁcant boost in speed
+as well. Although Model I outperformed the other models
+with ﬁve stages for keypoints and PAFs; and a single recur-
+rent stage for TAFs, however this comes at the expense of
+speed. Furthermore, we observe that an increase in mAP
+ends up sub-linearly increasing the MOTA as well.
+
+Effect of Video Rate and Number of People on Tracking:
+Finally, we performed a study on how the frame rate of the
+camera affects tracking accuracy, since a lower frame rate
+would require longer associations in pixel space.
+
+We ran Lukas Kanade (LK) as a baseline tracker by re-
+placing the TAF Module in Model I with LK (21 × 21
+window size; 3 pyramid levels). Initially, we observe that
+there is roughly 2.0% improvement in MOTA as seen in
+
+Method
+Model I-A
+Model I-B
+Model II-A
+Model II-B
+Model III-B
+Model III-C
+
+Wrist-AP Ankles-AP mAP MOTA fps
+14
+13
+28
+27
+30
+36
+
+56.2
+56.3
+54.9
+55.0
+51.9
+42.5
+
+56.4
+56.9
+53.0
+53.5
+49.5
+40.5
+
+66.0
+66.3
+64.4
+64.6
+61.6
+55.2
+
+58.5
+59.4
+57.4
+58.4
+57.8
+49.9
+
+Table 3: This table shows pose estimation and tracking per-
+formance for combinations of model types and topologies.
+
+A
+T
+O
+M
+
+57
+56
+55
+54
+53
+52
+51
+50
+
+(a)
+
+Model I: TAFs
+Model I: LK
+
+6Hz
+
+   12Hz
+
+24Hz
+
+Camera Frame Rate
+
+(b)
+
+30
+
+28
+
+26
+
+24
+
+22
+
+d
+n
+o
+c
+e
+S
+ 
+r
+e
+p
+ 
+s
+e
+m
+a
+r
+F
+
+20
+0
+
+20
+
+10
+30
+# people tracked
+
+40
+
+Figure 7: (a) This graph shows MOTA as a function of video
+frame rate for Temporal Afﬁnity Fields (TAFs) and Lukas-
+Kanade (LK) tracker. The performance of TAFs is virtu-
+ally invariant to frame rate or alternatively to the amount
+of motion between frames. (b) Our approach is effectively
+runtime-invariant to the number of people in the scene.
+
+Fig. 7(a). However, we note that around 20% of the se-
+quences have signiﬁcant articulation and camera movement,
+where TAFs outperformed LK as the latter was not able to
+match keypoints across large displacements whereas TAFs
+found matches due to stronger descriptive power. TAFs
+were able to maintain tracking accuracy even with low
+frame-rate cameras, but with LK the MOTA drops off sig-
+niﬁcantly (see Fig. 7(a)). Furthermore, Fig. 7(b) suggests
+that our approach is nearly runtime-invariant to number of
+people in the frame making it suitable for crowded scenes.
+
+4.2. Comparison
+
+We present results on PoseTrack dataset in Table 4 for
+2017 validation set (top), 2017 test set (middle) and 2018
+validation set (bottom). FlowTrack, JointFlow and Pose-
+Flow are included as comparison in this table. FlowTrack
+is a top-down approach which means human detection is
+performed ﬁrst followed by pose estimation. Due to this
+reason, it is signiﬁcantly slower than bottom-up approaches
+such as ours. Model II-B with single scale is competitive
+with other bottom-up approaches while being 270% faster.
+However, multi-scale (MS) processing boosts performance
+by ∼6% and ∼1.5% for mAP and MOTA, respectively. We
+are also able to achieve competitive results on the Pose-
+Track 2018 Validation set while maintaining the best speeds
+amongst all reported results. Note that PoseTrack 2018 Test
+set was not released to public at the time of submission of
+this paper. Figure 8 shows some qualitative results.
+
+74626
+
+Figure 8: Three example cases of tracking at ∼30 FPS on multiple targets. Top / Middle: Observe that tracking continues
+to function despite large motion displacements and occlusions. Bottom: A failure case where abrupt scene change causes
+ghosting, where previously tracked person appears in the new frame. This issue can be rectiﬁed through a warm-start.
+
+5. Conclusion
+
+In this paper, we ﬁrst motivated recurrent Spatio-
+Temporal Afﬁnity Fields (STAF) as the right approach for
+detection and tracking of articulated human pose in videos,
+especially for real-time reactive systems. We showed that
+leveraging the previous frame data within a recurrent struc-
+ture and training on video sequences yields as good results
+as a multi-stage network albeit at much lower computation
+cost. We also demonstrated the stability of tracking accu-
+racy at reduced frame rates for the TAF formulation, due to
+its ability to correlate keypoints over large pixel distances.
+This implies that our method can be deployed on low-power
+embedded systems which may not be able to run large net-
+works at high frame rates, yet are able to maintain reason-
+able accuracy. Our new cross-linked limb temporal topol-
+ogy is able to generalize better than previous approaches
+due to strong associative power with PAF being a special
+case of TAF. We are also able to operate at the same con-
+sistent speed irrespective of the number of people due to
+bottom-up formulation. For future work, we plan to embed
+a re-identiﬁcation module to handle cases of people leaving
+and reappearing in a camera view. Furthermore, detecting
+and triggering warm-start at every shot change has the po-
+tential to boost pose estimation and tracking performance.
+
+Acknowledgment: Supported by the Intelligence Ad-
+vanced Research Projects Activity (IARPA) via Depart-
+ment of Interior/ Interior Business Center (DOI/IBC) con-
+tract number D17PC00340. The U.S. Government is autho-
+rized to reproduce and distribute reprints for Governmental
+purposes notwithstanding any copyright annotation/herein.
+Disclaimer: The views and conclusions contained herein
+
+Method
+
+Wrist-AP Ankles-AP mAP MOTA fps
+
+PoseTrack 2017 Validation
+
+Detect-and-track [9]
+FlowTrack - 152 [34]
+FlowTrack - 50 [34]
+MDPN - 152 [13]
+PoseFlow [35]
+JointFlow [8]
+Model II-B (SS)
+Model I-B (SS)
+Model II-B (MS)
+Model I-B (MS)
+
+51.7
+72.4
+66.0
+77.5
+61.1
+
+-
+
+49.8
+67.1
+61.7
+71.4
+61.3
+
+-
+
+55.0
+56.8
+62.9
+65.0
+
+53.5
+56.8
+60.9
+62.7
+PoseTrack 2017 Testing
+
+Detect-and-track [9]
+Flowtrack - 152 [34]
+Flowtrack - 50 [34]
+PoseTrack [2]
+BUTD [19]
+PoseFlow [35]
+JointFlow [8]
+Model II-B (MS)
+Model I-B (MS)
+
+-
+
+70.7
+65.1
+54.3
+52.9
+59.0
+53.1
+62.8
+65.0
+
+-
+
+64.9
+60.3
+49.2
+42.6
+57.9
+50.4
+59.5
+60.7
+
+PoseTrack 2018 Validation
+
+Model II-B (SS)
+Model I-B (SS)
+Model II-B (MS)
+Model I-B (MS)
+
+56.2
+58.3
+62.7
+64.7
+
+54.2
+56.7
+60.6
+62.0
+
+60.6
+76.7
+72.4
+80.7
+66.5
+69.3
+64.6
+66.3
+71.5
+72.6
+
+59.6
+73.9
+70.0
+59.4
+59.1
+63.0
+63.3
+69.6
+70.3
+
+63.7
+64.9
+69.9
+70.4
+
+55.2
+65.4
+62.9
+66.0
+58.3
+59.8
+58.4
+59.4
+61.3
+62.7
+
+51.8
+57.6
+56.4
+48.4
+50.6
+51.0
+53.1
+52.4
+53.8
+
+58.4
+59.6
+59.8
+60.9
+
+1.2
+
+-
+-
+-
+
+10*
+0.2
+27
+13
+7
+2
+
+1.2
+
+-
+-
+-
+-
+
+10*
+0.2
+7
+2
+
+27
+13
+7
+3
+
+n
+w
+o
+D
+-
+p
+o
+T
+
+-
+
+p
+U
+m
+o
+t
+t
+o
+B
+
+n
+w
+o
+D
+-
+p
+o
+T
+
+-
+
+p
+U
+m
+o
+t
+t
+o
+B
+
+-
+
+p
+U
+m
+o
+t
+t
+o
+B
+
+Table 4: This table shows comparison on the PoseTrack
+datasets. For our approach, we report results with Models I
+/ II and Top. B. The last column shows the speed in frames
+per second (* excludes pose inference time). FlowTrack is
+a top-down approach using ResNet-152 (or 50); whereas
+JointFlow, PoseFlow and our approach are bottom-up.
+
+are those of the authors and should not be interpreted as nec-
+essarily representing the ofﬁcial policies or endorsements,
+either expressed or implied, of IARPA, DOI/IBC, or the
+U.S. Government.
+
+84627
+
+References
+
+[1] Posetrack leaderboard.
+
+https://posetrack.net/
+
+leaderboard.php. 2
+
+[2] M. Andriluka, U. Iqbal, E. Insafutdinov, L. Pishchulin, and
+A. Milan. PoseTrack: A benchmark for human pose estima-
+tion and tracking. In CVPR, 2018. 8
+
+[3] M. Andriluka, L. Pishchulin, P. Gehler, and B. Schiele. 2D
+human pose estimation: new benchmark and state of the art
+analysis. In CVPR, 2014. 1, 2
+
+[4] M. Andriluka, S. Roth, and B. Schiele. Monocular 3D pose
+
+estimation and tracking by detection. In CVPR, 2010. 2
+
+[5] Z. Cao, G. Hidalgo, T. Simon, S. Wei, and Y. Sheikh. Open-
+pose: Realtime multi-person 2D pose estimation using part
+afﬁnity ﬁelds. CoRR, abs/1812.08008, 2018. 5
+
+[6] Z. Cao, T. Simon, S.-E. Wei, and Y. Sheikh. Realtime
+multi-person 2D pose estimation using part afﬁnity ﬁelds. In
+CVPR, 2017. 1, 2, 5
+
+[7] Y. Chen, Z. Wang, Y. Peng, Z. Zhang, G. Yu, and J. Sun.
+Cascaded pyramid network for multi-person pose estimation.
+arXiv:1711.07319, 2017. 2
+
+[8] A. Doering, U. Iqbal, and J. Gall.
+
+Joint ﬂow: Temporal
+ﬂow ﬁelds for multi person tracking. CoRR, abs/1805.04596,
+2018. 2, 4, 7, 8
+
+[9] R. Girdhar, G. Gkioxari, L. Torresani, M. Paluri, and D. Tran.
+Detect-and-track: Efﬁcient pose estimation in videos. CoRR,
+abs/1712.09184, 2017. 2, 8
+
+[10] R. Girshick,
+and K. He.
+facebookresearch/detectron, 2018. 2
+
+I. Radosavovic, G. Gkioxari, P. Doll´ar,
+https://github.com/
+
+Detectron.
+
+[11] G. Gkioxari, B. Hariharan, R. Girshick, and J. Malik. Us-
+ing k-poselets for detecting people and localizing their key-
+points. In CVPR, 2014. 2
+
+[12] R. A. Guler, N. Neverova, and I. Kokkinos. DensePose:
+Dense human pose estimation in the wild. In CVPR, 2018. 2
+
+[13] H. Guo, T. Tang, G. Luo, R. Chen, and Y. Lu. Multi-domain
+pose network for multi-person pose estimation and tracking.
+In ECCV, 2018. 8
+
+[14] K. He, G. Gkioxari, P. Doll´ar, and R. Girshick. Mask R-
+
+CNN. In ICCV, 2017. 2
+
+[15] E. Insafutdinov, M. Andriluka, L. Pishchulin, S. Tang,
+E. Levinkov, B. Andres, and B. Schiele. ArtTrack: Artic-
+ulated multi-person tracking in the wild. In CVPR, 2017. 2
+
+[16] U. Iqbal and J. Gall. Multi-person pose estimation with lo-
+cal joint-to-person associations. In ECCVW: Crowd Under-
+standing, 2016. 2
+
+[17] U. Iqbal, A. Milan, and J. Gall. PoseTrack: Joint multi-
+
+person pose estimation and tracking. In CVPR, 2017. 1, 2
+
+[18] H. Jhuang, J. Gall, S. Zufﬁ, C. Schmid, and M. J. Black.
+Towards understanding action recognition. In ICCV, 2013. 2
+
+[19] S. Jin, X. Ma, Z. Han, Y. Wu, and W. Yang. Towards multi-
+person pose tracking: Bottom-up and top-down methods.
+ICCV, 2017. 8
+
+[20] S. Johnson and M. Everingham. Clustered pose and nonlin-
+ear appearance models for human pose estimation. In BMVC,
+2010. 2
+
+[21] T. Lin, M. Maire, S. J. Belongie, L. D. Bourdev, R. B.
+Girshick, J. Hays, P. Perona, D. Ramanan, P. Doll´ar, and
+C. L. Zitnick. Microsoft COCO: common objects in context.
+CoRR, abs/1405.0312, 2014. 1
+
+[22] T.-Y. Lin, M. Maire, S. Belongie, J. Hays, P. Perona, D. Ra-
+manan, P. Doll´ar, and C. L. Zitnick. Microsoft COCO: Com-
+mon objects in context. In ECCV, 2014. 2
+
+[23] Y. Luo, J. Ren, Z. Wang, W. Sun, J. Pan, J. Liu, J. Pang, and
+
+L. Lin. LSTM pose machines. In CVPR, 2018. 2
+
+[24] A. Newell, K. Yang, and J. Deng. Stacked hourglass net-
+works for human pose estimation. CoRR, abs/1603.06937,
+2016. 2
+
+[25] G. Papandreou, T. Zhu, L.-C. Chen, S. Gidaris, J. Tompson,
+and K. Murphy. PersonLab: Person pose estimation and in-
+stance segmentation with a bottom-up, part-based, geometric
+embedding model. arXiv:1803.08225, 2018. 2
+
+[26] G. Papandreou, T. Zhu, N. Kanazawa, A. Toshev, J. Tomp-
+son, C. Bregler, and K. Murphy. Towards accurate multi-
+person pose estimation in the wild. In CVPR, 2017. 2
+
+[27] T. Pﬁster, J. Charles, and A. Zisserman. Flowing convnets
+
+for human pose estimation in videos. In ICCV, 2015. 2
+
+[28] L. Pishchulin, M. Andriluka, P. Gehler, and B. Schiele. Pose-
+
+let conditioned pictorial structures. In CVPR, 2013. 2
+
+[29] L. Pishchulin, A. Jain, M. Andriluka, T. Thormahlen, and . B.
+Schiele. Articulated people detection and pose estimation:
+Reshaping the future. In CVPR, 2012. 2
+
+[30] K. Simonyan and A. Zisserman.
+
+Very deep con-
+large-scale image recognition.
+
+volutional networks for
+arXiv:1409.1556, 2014. 3
+
+[31] J. Song, L. Wang, L. Van Gool, and O. Hilliges. Thin-slicing
+network: A deep structured model for pose estimation in
+videos. In CVPR, 2017. 2
+
+[32] M. Sun and S. Savarese. Articulated part-based model for
+joint object detection and pose estimation. In ICCV, 2011. 2
+[33] S.-E. Wei, V. Ramakrishna, T. Kanade, and Y. Sheikh. Con-
+
+volutional pose machines. In CVPR, 2016. 2
+
+[34] B. Xiao, H. Wu, and Y. Wei. Simple baselines for human
+pose estimation and tracking. CoRR, abs/1804.06208, 2018.
+2, 8
+
+[35] Y. Xiu, J. Li, H. Wang, Y. Fang, and C. Lu. Pose ﬂow: Efﬁ-
+
+cient online pose tracking. In BMVC, 2018. 2, 8
+
+[36] Y. Yang and D. Ramanan. Articulated human detection with
+
+ﬂexible mixtures of parts. TPAMI, 2013. 2
+
+[37] W. Zhang, M. Zhu, and K. Derpanis. From actemes to ac-
+tion: A strongly-supervised representation for detailed action
+understanding. In ICCV, 2013. 2
+
+94628
+
+

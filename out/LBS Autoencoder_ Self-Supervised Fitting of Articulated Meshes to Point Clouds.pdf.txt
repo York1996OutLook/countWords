@@ -1,0 +1,1242 @@
+LBS Autoencoder: Self-supervised Fitting of Articulated Meshes to Point Clouds
+
+Chun-Liang Li1, Tomas Simon2, Jason Saragih2, Barnab´as P´oczos1, Yaser Sheikh1,2
+
+1Carnegie Mellon University and 2Facebook Reality Labs
+
+{chunlial, bapoczos}@cs.cmu.edu
+
+{firstname.lastname}@fb.com
+
+Abstract
+
+We present LBS-AE; a self-supervised autoencoding al-
+gorithm for ﬁtting articulated mesh models to point clouds.
+As input, we take a sequence of point clouds to be regis-
+tered as well as an artist-rigged mesh, i.e. a template mesh
+equipped with a linear-blend skinning (LBS) deformation
+space parameterized by a skeleton hierarchy. As output,
+we learn an LBS-based autoencoder that produces regis-
+tered meshes from the input point clouds. To bridge the gap
+between the artist-deﬁned geometry and the captured point
+clouds, our autoencoder models pose-dependent deviations
+from the template geometry. During training, instead of us-
+ing explicit correspondences, such as key points or pose su-
+pervision, our method leverages LBS deformations to boot-
+strap the learning process. To avoid poor local minima
+from erroneous point-to-point correspondences, we utilize a
+structured Chamfer distance based on part-segmentations,
+which are learned concurrently using self-supervision. We
+demonstrate qualitative results on real captured hands, and
+report quantitative evaluations on the FAUST benchmark
+for body registration. Our method achieves performance
+that is superior to other unsupervised approaches and com-
+parable to methods using supervised examples.
+
+1. Introduction
+
+The registration of unstructured point-clouds to a com-
+mon mesh representation is an important problem in com-
+puter vision and has been extensively studied in the past
+decades. Works in this area can be coarsely grouped to-
+gether based on how much prior knowledge and supervi-
+sion is incorporated into the ﬁtting method. On one end
+of the spectrum, there are entirely unsupervised and object-
+agnostic models, such as FoldingNet [49] or AtlasNet [13].
+These methods learn to deform a ﬂat 2D surface to match
+the target geometry, while making no assumptions about the
+objects being modeled other than that they can be repre-
+sented as a 2D surface. Adding slightly more prior knowl-
+edge, 3D-CODED [12] uses a template mesh (e.g. hand or
+body) with a topology better suited to the object of interest.
+
+Input
+
+Segmentation
+
+Template
+
+Deformed Reconstruction
+
+(a)
+
+(b)
+
+(c)
+
+(d)
+
+(e)
+
+Figure 1: Given point clouds sampled from the surface of
+an input shape (a), our model infers a coarse segmentation
+(b), and learns to deform a given template (c), through a
+combination of deformations of the template (d) as well as
+pose deformation parameterized by LBS to match the re-
+construction (e). We use a structured Chamfer distance that
+uses the inferred segmentation of the data (b) as coarse cor-
+respondence to measure distance between matching regions
+to avoid local optima in the Chamfer distance.
+
+On the other end of the spectrum are highly special-
+ized models for speciﬁc objects, such as hands and bod-
+ies. Works of this kind include SCAPE [2], Dyna [34],
+SMPL [28], and MANO [38]. These models are built us-
+ing high-resolution 3D scans with correspondence and hu-
+man curation. They model correctives for different poses
+and modalities (e.g. body types) and can be used as high-
+quality generative models of geometry. A number of works
+learn to manipulate these models to ﬁt data based on differ-
+ent sources of supervision, such as key points [6, 22, 31, 15]
+and/or prior distributions of model parameters [18, 17].
+
+In this paper, we present an unsupervised/self-supervised
+algorithm, LBS Autoencoder (LBS-AE), to ﬁt such articu-
+lated mesh models to point cloud data. The proposed al-
+gorithm is a middle ground of the two ends of spectrum
+discussed above in two senses.
+
+First, we assume an articulated template model of the ob-
+ject class is available, but not the statistics of its articulation
+in our dataset nor the speciﬁc shape of the object instance.
+We argue that this prior information is widely available for
+many common objects of interest in the form of “rigged”
+
+11967
+
+or “skinned” mesh models, which are typically created by
+artists for use in animation. In addition to a template mesh
+describing the geometric shape, these prior models have two
+more components: (1) a kinematic hierarchy of transforms
+describing the degrees of freedom, and (2) a skinning func-
+tion that deﬁnes how transforms in the hierarchy inﬂuence
+each of the mesh vertices. This enables registration to data
+by manipulating the transforms in the model. One common
+example is Linear Blending Skinning (LBS). Therefore, in-
+stead of relying on deep networks to learn the full deforma-
+tion process from a single template [12], we leverage LBS
+as part of the decoder to model coarse joint deformations.
+Different from hand-crafted models such as SMPL [28],
+LBS by itself does not model pose-dependent correctives
+between the template and data, nor does it model the space
+of non-articulated shape variation (e.g. body shape). To
+model these, we also allow our network to learn deforma-
+tions of the template mesh which, when posed by LBS, re-
+sult in a better ﬁt to the data. The encoder therefore learns a
+latent representation from which it can infer both joint an-
+gles for use by the LBS deformation, as well as corrective
+deformations to the template mesh.
+
+Second, for ﬁtting models to data during the training, ex-
+isting works either rely on explicit supervision (e.g. corre-
+spondence [12] and key points [15]) or unsupervised near-
+est neighbors search (e.g. Chamfer Distance (CD) [49]) to
+ﬁnd point correspondence between the model and data for
+measuring reconstruction loss. Rather than using external
+supervision, we introduce a “Structured Chamfer Distance”
+(SCD), which improves the blind nearest neighbor search in
+CD based on an inferred coarse correspondence. The idea
+is to segment the point clouds into corresponding regions
+(we use regions deﬁned by the LBS weighting). After in-
+ferring the segmentation on the input point cloud and the
+template, we then apply nearest neighbor search between
+corresponding regions as high-level correspondence. The
+challenge is we do not assume external supervision to be
+available for the input point clouds. Instead, we utilize the
+learned LBS-AE model to generate self-supervision to train
+the segmentation network from scratch. As the LBS-AE
+ﬁtting is improved during training, the training data from
+self-supervision for segmentation also improves, leading to
+improved segmentation of the real data. We are then able
+to use the improved segmentation to achieve better corre-
+spondence and in turn better LBS-AE model ﬁtting.
+In
+this paper, we present a joint training framework to learn
+these two components simultaneously. Since LBS-AE does
+not require any explicit correspondence nor key points, it
+is similar to approaches which are sometimes referred to
+as “unsupervised” in the pose estimation literature [42, 9],
+but it is different from existing unsupervised learning ap-
+proach [49] in that it leverages LBS deformation to generate
+self-supervision during training.
+
+scribed by an artist-deﬁned rig may sometimes already be
+sufﬁciently constrained to allow ﬁtting to real data without
+any additional labeling. Such a model-ﬁtting pipeline with-
+out additional supervision has the potential to simplify ge-
+ometric registration tasks by requiring less human labeling
+effort. For example, when ﬁtting an artist-deﬁned hand rig
+to point clouds of hands, our method allows for unsuper-
+vised hand pose estimation. When ﬁtting a body model to
+3D scans of body data, this allows recovering the joint an-
+gles of the body as well as registering the mesh vertices.
+In the experiments, we present the results on ﬁtting real
+hands as well as benchmark body data on the SURREAL
+and FAUST datasets.
+
+2. Proposed Method
+
+We propose to learn a function F(·) that takes as input
+an unstructured point cloud X={x}n
+i=1, where each xi is a
+3D point and n is a variable number, and produces as out-
+put a ﬁxed number m of corresponded vertices V={vi}m
+i=1,
+where V = F (X). The vertices V form a mesh with ﬁxed
+topology whose geometry should closely match that of the
+input1. Rather than allowing F(·) to be any arbitrary defor-
+mation produced by a deep neural network (as in [49, 13]),
+we force the output to be produced by Linear Blending
+Skinning (LBS) to explicitly encode the motion of joints.
+We allow additional non-linear deformations (also given by
+a neural network) to model deviations from the LBS ap-
+proximation. However, an important difference with respect
+to similar models, such as SMPL [28] or MANO [38], is
+that we do not pre-learn the space of non-LBS deforma-
+tions on a curated set (and then ﬁx them) but rather learn
+these simultaneously on the data that is to be aligned, with
+no additional supervision.
+
+Linear Blending Skinning We start by brieﬂy introduc-
+ing LBS [29], which is the core building component of the
+proposed work. LBS models deformation of a mesh from
+a rest pose as a weighted sum of the skeleton bone trans-
+formations applied to each vertex. We follow the notation
+outlined in [28], which is a strong inﬂuence on our model.
+An LBS model with J joints can be deﬁned as follows
+
+V = M (Θ, U),
+
+(1)
+
+with V the vertices of the deformed shape after LBS. The
+LBS function M takes two parameters, one is the vertices
+U = {ui}m
+i=1 of a base mesh (template), and the other are
+the relative joint rotation angles Θ ∈ RJ ×3 for each joint j
+with respect to its parents. If Θ = 0, then M (0, U) = U.
+Two additional parameters, the skinning weights w and
+the joint hierarchy K, are required by LBS. We will con-
+sider them ﬁxed by the artist-deﬁned rig.
+In particular,
+
+1Note that, although we assume the inputs are point clouds, they could
+
+In this work, we show that the space of deformations de-
+
+also be the vertices of a mesh without using any topology information.
+
+11968
+
+(a) U
+
+(b) M (θ, U)
+
+(c) Ud
+
+Figure 2: (a) Template mesh, (b) LBS deformation of the
+template using joint angles θ, and (c) a deformed template.
+
+w ∈ Rm×J deﬁnes the weights of each vertex contribut-
+ing to joint j and Pj wi,j = 1 for all i. K is the joint
+hierarchy. Each vertex vi ∈ V can then be written as
+
+vi = (I3, 0) ·
+
+J
+
+Xj=1
+
+wi,jTj(Θ, K)(cid:18)ui
+
+1(cid:19) ,
+
+where Tj(Θ, K) ∈ SE(3) is a transformation matrix for
+each joint j, which encodes the transformation from the rest
+pose to the posed mesh in world coordinate, constructed by
+traversing the hierarchy K from the root to j. Since each vi
+is constructed by a sequence of linear operations, the LBS
+M (Θ, U) is differentiable respect to Θ and U. A simple ex-
+ample constructed from the LBS component in SMPL [28]
+is shown in Figure 2a and 2b.
+
+In this work, both the joint angles and the template mesh
+used in the LBS function are produced by deep networks
+from the input point cloud data,
+
+V = M (f (X), d(X, U)),
+
+(2)
+
+where we identify a joint angle estimation network f , and a
+template deformation network d which we describe below.
+
+Joint Angle (Pose) Estimation Given an LBS model de-
+ﬁned in (1), the goal is to regress joint angles based on input
+X via a function f : X → Θ such that M (f (X), U) ≈ X.
+We use a deep neural network, which takes set data (e.g.
+point cloud) as input [35, 50] to f , but we must also specify
+how to compare X and V from M (·). Losses that assume
+uniformly sampled surfaces (such as distribution match-
+ing [26] or optimal transport) are less suitable, because re-
+constructed point clouds typically exhibit some amount of
+missing data and non-uniform sampling.
+
+Instead, we adopt a Chamfer distance (CD) [49] deﬁned
+
+as Lc(X, V) =
+
+n
+
+1
+n
+
+Xi=1
+
+kxi − NV(xi)k2 +
+
+1
+m
+
+m
+
+Xj=1
+
+kvj − NX(vj)k2,
+
+(3)
+
+where NV(xi) = arg minvj ∈V kxi − vjk is the nearest
+neighbor of xi in V. This is also called Iterative Clos-
+est Point (ICP) in the registration literature [5]. After
+
+Figure 3: LBS-AE. Given a point cloud X of a input shape,
+we encode X into a latent code φ(X) and the inferred joint
+angles f (X). The decoder contains a deformation network
+d to deform the template U into Ud, then uses a LBS to
+pose Ud into Vd as the reconstruction.
+
+ﬁnding nearest neighbors, we learn f by back-propagating
+this point-wise loss through the differentiable LBS V =
+M (f (X), U). Also note that we only sample a subset of
+points for estimating (3) under SGD training schemes.
+
+In practice, we observe that it takes many iterations for
+PointNet [35] or DeepSet [50] architectures to improve if
+the target loss is CD instead of corresponded supervision.
+Similar behaviors were observed in [49, 26], where the al-
+gorithms may take millions of iterations to converge. To al-
+leviate this problem, we utilize LBS to generate data based
+on a given Θ′ for self-supervision by optimizing
+f LΘ = kf (M (Θ′, U)) − Θ′k2.
+min
+
+It is similar to the loop-back loss [9] that ensures f can cor-
+rectly reinterpret the model’s own output from M . Differ-
+ent from [9, 17], we do not assume a prior pose distribution
+is available. Our Θ′ comes from two sources of random-
+ness. One is uniform distributions within the given joint
+angle ranges (speciﬁed by the artist-deﬁned rig) and the sec-
+ond is we uniformly perturb the inferred angles from input
+samples with a small uniform noise on the ﬂy, which can
+gradually adapt to the training data distribution when the es-
+timation is improved as training progresses (see Section 2.1
+and Figure 6).
+
+Template Deformation Although LBS can represent
+large pose deformations, due to limitations of LBS as well
+as differences between the artist modeled mesh and the real
+data, there will be a large residual in the ﬁtting. We refer
+to this residual as a modality gap between the model and
+reality, and alleviate this difference by using a neural net-
+work d to produce the template mesh to be posed by LBS.
+The deformation network d(φ(X), ui) takes two sources as
+input, where ui is each vertex in the template mesh U, and
+φ(X) are features from an intermediate layer in f , which
+contains information about the state of X. This yields a de-
+formed template Ud = {d(φ(X), ui)}m
+i=1. One example is
+shown in Figure 2c. After LBS, we denote the deformed
+and posed mesh as Vd = M (f (X), Ud), and denote by
+
+11969
+
+(a) Input
+
+(b) Estimate
+
+(c)
+
+Figure 4: When we try to move the middle ﬁnger of the cur-
+rent estimate (b) toward the target (a), the Chamfer distance
+increases before decreasing, showing a local optimum that
+is difﬁcult to overcome.
+
+V = M (f (X), U) the posed original template.
+
+If d is high-capacity, f (X) can learn to generate all-
+zero joint angles for the LBS component (ignoring the in-
+put X), and explain all deformations instead with d. That
+is, M (f (X), Ud) = M (0, Ud) = Ud ≈ X, which re-
+explicit regularization to constrain d (e.g. kd(φ(X), UB)k),
+
+duces to the unsupervised version of [12]. Instead of using
+
+we propose a composition of two Chamfer distances as
+
+(4)
+
+Lc2,λ = Lc(cid:0)X, Vd(cid:1) + λLc (X, V) .
+
+The second term in (4) enforces f (X) to learn correct joint
+angles even without template deformation.
+
+Lastly, we follow [18, 12] and apply Laplacian regular-
+
+ization Llap = kLVdk to encourage smoothness of the de-
+formed template, where L is the discrete Laplace-Beltrami
+operator constructed from mesh U and its faces.
+
+LBS-based Autoencoder The proposed algorithm can be
+interpreted as an encoder-decoder scheme. The joint an-
+gle regressor is the encoder, which compresses X into style
+codes φ(X) and interpretable joint angles f (X). The de-
+coder, different from standard autoencoders, is constructed
+by combining a human designed LBS function and a style
+deformation network d on the base template. We call the
+proposed algorithm LBS-AE as shown in Figure 3.
+
+2.1. Structured Chamfer Distance
+
+To train an autoencoder, we have to deﬁne proper recon-
+struction errors for different data. In LBS-AE, the objective
+that provides information about input point clouds is only
+CD (3). However, it is known that CD has many undesirable
+local optima, which hinders the algorithm from improving.
+A local optimum example of CD is shown in Figure 4. To
+move the middle ﬁnger from the current estimate towards
+the index ﬁnger to ﬁt the input, the Chamfer distance must
+increase before decreasing. This local optimum is caused by
+incorrect correspondences found by nearest neighbor search
+(the nearest neighbor of the middle ﬁnger of the current es-
+timate is the ring ﬁnger of the input).
+
+High-Level Correspondence Given a pair of
+sets
+(V, X), for each v ∈ V, we want to ﬁnd its correspondence
+
+CX(v) in X. In CD, we use the nearest neighbor NX(v) to
+approximate CX(v), which can be wrong, as shown in Fig-
+Instead of searching for nearest neighbors NX(v)
+ure 4.
+over the entire set X, we propose to search within a sub-
+set X ′ ⊂ X, where CX(v) ∈ X ′, by eliminating irrele-
+vant points in X. Following this idea, we partition X into
+k subsets, X1 . . . Xk, where we use s(x; X) ∈ {1, . . . , k}
+to denote which subset x belongs to. A desirable partition
+should ensure s(v; V) = s(CX(v); X); then, to ﬁnd the
+nearest neighbor of v, we need only consider Xs(v) ⊂ X.
+We then deﬁne the Structured Chamfer Distance (SCD) as
+Ls(X, V) =
+1
+n
+
+kxi − NVs(x) (xi)k2 +
+
+kvj − NXs(v) (vj)k2,
+
+1
+m
+
+m
+
+n
+
+Xi=1
+
+Xj=1
+
+(5)
+where we ease the notation of s(x, X) and s(v, V) to be
+s(x) and s(v). Compared with CD, which ﬁnds nearest
+neighbors from all to all, SCD uses region to region based
+on the high-level correspondence by leveraging the struc-
+ture of data. Similar to (4), we deﬁne
+
+Ls2,λ = Ls(cid:0)X, Vd(cid:1) + λLs (X, V) .
+
+(6)
+
+In this paper, we partition
+the vertices based on the LBS
+skinning weights at a chosen
+granularity. Examples of hand
+and body data are shown in Fig-
+ure 5, which use the structure
+and our prior knowledge of the
+human body. These satisfy the property that the true corre-
+spondence is within the same partition. With the proposed
+SCD, we can improve the local optimum in Figure 4.
+
+Figure 5: Joint Partitions.
+
+Segmentation Inference For the deformed mesh V, we
+can easily infer the partition s(v; V), because the mapping
+between vertices and joints is deﬁned by the LBS skinning
+weights w. We directly use argmaxj wi,j as labels. With-
+out additional labeling or keypoint information, the difﬁ-
+culty is to infer s(x; X) for x ∈ X, which is a point cloud
+segmentation task [35]. However, without labels for X, we
+are not able to train a segmentation model on X directly.
+Instead, similar to the self-supervision technique used for
+training the joint angle regressor, we propose to train a seg-
+mentation network s with the data (Vd, Y) generated by
+LBS, where Y are the labels for w deﬁned in LBS and
+V = M (Θ, Ud). Note that Θ follows the same distribution
+as before, which contains uniform sampling for exploration
+and perturbation of the inferred angles f (X), as shown in
+Figure 6. Instead of using the base template U only, we use
+the inferred deformed template Ud to adapt to the real data
+modality, which improves performance (see Section 4.1).
+
+The ﬁnal objective for training the shape deformation
+
+11970
+
+P (Θ)
+
+ft(X1) ft(X2)
+
+ft(X3)
+
+Θ
+
+(1)
+
+(2)
+
+Figure 6: The mixture distribution of self-supervision data
+from the LBS at iteration t. We sample from (1) the per-
+turbed distribution centered at the ft(Xi) and (2) a uniform
+distribution.
+
+Algorithm 1 LBS-AE with SCD
+Inputs: • Point Clouds: {X}
+
+• LBS: M (; w, K, U) and angle ranges (Rl, Ru)
+
+Pretrain s on uniformly sampled poses from LBS
+while f and d have not converged:
+1. Sample minibatch {Xi}B
+2. Θ′ = {f (Xi) + ǫi}B
+3. Generate (Vd, Y) based on Θ′ to update s
+4. Infer segmentation labels {s(X′
+5. Update f and d based on (1)-(3) (Eq. (7))
+
+i=1 ∪ Θr ∼ Unif(Rl, Ru)
+
+i=1, {X′
+
+i)}B
+
+i}B
+
+i=1
+
+i=1
+
+pipeline including f (·) and d(·) is2
+
+L = Lc2,0.5 + λsLs2,0.5 + λlapLlap + λθLΘ,
+
+(7)
+
+and we use standard cross-entropy for training s. In prac-
+tice, since s is noisy during the ﬁrst iterations, we pretrain
+it for 50K iterations with poses from uniform distributions
+over joint angles. Note that, for pretraining, we can only
+use the base template U to synthesize data. After that, we
+then learn everything jointly by updating each network al-
+ternatively. The ﬁnal algorithm, LBS-AE with SCD as re-
+construction loss, is shown in Algorithm 1.
+
+3. Related Works
+
+LBS Extensions Various extensions have been proposed
+to ﬁx some of the shortcomings of LBS [24, 41, 45, 20,
+37, 16, 19, 23, 51, 28, 4], where we only name afew
+here. The proposed template deformation follows the idea
+of [21, 37, 51, 28] to model the modalities and corrections
+of LBS on the base template rest pose. [51, 28] use PCA-
+like algorithms to model modalities via a weighted sum of
+learned shape basis. Instead, our approach is similar to [4]
+by learning modalities via a deformation network. The main
+difference between LBS-AE and [51, 28, 4] is we do not
+rely on correspondence information to learn the template
+deformation d a priori. We simultaneously learn d and infer
+
+2We use λ = 0.5, λlap = 0.005, λθ = 0.5 in all experiments.
+
+pose parameters without external labeling.
+
+Deep Learning for 3D Data Many deep learning tech-
+niques have been developed for different types of 3D in-
+formation, such as 3D voxels [10, 48, 47], geometry im-
+ages [39, 40], meshes [8], depth maps [44] and point
+clouds [35, 36, 50]. Autoencoders for point clouds are ex-
+plored by [49, 13, 26, 1].
+
+Model Fitting with Different Knowledge Different
+works have studied to registration via ﬁtting a mesh model
+by leveraging different levels of information about the data.
+[17] use SMPL [28] to reconstruct meshes from images by
+using key points and prior knowledge of distributions of
+pose parameters. [18] explore using a template instead of a
+controllable model to reconstruct the mesh with key points.
+[6, 15] also adopt pretrained key point detectors from other
+sources of data as supervision. Simultaneous training to im-
+prove model ﬁtting and key point detection are explored
+by [22, 31]. The main difference from the proposed joint
+training in LBS-AE is we do not rely on an additional source
+of real-world data to pretrain networks, as needed to train
+these key point detectors. [46] share a similar idea of using
+segmentation for nearest neighbor search, but they trained
+the segmentation from labeled examples.
+[9] propose to
+control morphable models instead of rig models for model-
+ing faces. They also utilize prior knowledge of the 3DMM
+parameter distributions for real faces. We note that most of
+the works discussed above aim to recover 3D models from
+images. [12] is the most related work to the proposed LBS-
+AE, but doesn’t use LBS-based deformation. They use a
+base template and learn the full deformation process with a
+neural network trained by correspondences provided a
+priori or from nearest neighbor search. More comparison
+between [12] and LBS-AE will be studied in Section 4.
+Lastly, learning body segmentation via SMPL is studied
+by [43], but with a focus on learning a segmentation us-
+ing SMPL with parameters inferred from real-world data to
+synthesize training examples.
+
+Loss Function with Auxiliary Neural Networks Using
+auxiliary neural networks to deﬁne objectives for training
+targeted models is also broadly studied in GAN literature
+(e.g. [11, 30, 33, 3, 25, 32, 14]). [26] use a GAN loss for
+matching input and reconstructed point clouds. By lever-
+aging prior knowledge, the auxiliary network adopted by
+LBS-AE is an interpretable segmentation network which
+can be trained without adversarial training.
+
+4. Experiment
+
+Datasets We consider hand and body data. For body data,
+we test on FAUST benchmark [7], which captures real hu-
+man body with correspondence labeling. For hand data, we
+use a multi-view capture system to captured 1, 524 poses
+from three people, which have missing area and different
+
+11971
+
+Figure 7: Examples of the captured hands.
+
+densities of points across areas. The examples of recon-
+structed meshes are shown in Figure 7. For numerical eval-
+uation, in addition to FAUST, we also consider synthetic
+data since we do not have labeling information on the hand
+data (e.g. key points, poses, correspondence). To generate
+synthetic hands, we ﬁrst estimate pose parameters of the
+captured data under LBS. To model the modality gap, we
+prepare different base templates with various thickness and
+length of palms and ﬁngers. We then generate data with
+LBS based on those templates and the inferred pose pa-
+rameters. We also generate synthetic human body shapes
+using SMPL [6]. We sample 20, 000 parameter conﬁgura-
+tions estimated by SURREAL [43] and 3, 000 samples of
+bent shapes from [12]. For both synthetic hand and body
+
+data, the scale of each shape is in [−1, 1]3 and we generate
+2300 and 300 examples as holdout testing sets.
+
+Architectures The architecture of f follows [26] to use
+DeepSet [50], which shows competitive performance with
+PointNet [35] with half the number of parameters. The out-
+put is set to be J × 3 dimensions, where J is the number of
+joints. We use the previous layer’s activations as φ(X) for
+d. We use a three layer MLP to model d, where the input
+is the concatenation of v, f (X) and φ(X), and the hidden
+layer sizes are 256 and 128. For segmentation network s,
+we use [35] because of better performance. For hand data,
+we use an artist-created LBS, while we use the LBS part
+from SMPL [28] for body data.
+
+4.1. Study on Segmentation Learning
+
+One goal of the proposed LBS-AE is to leverage ge-
+ometry structures of the shape, by learning segmenta-
+tion jointly to improve correspondence ﬁnding via nearest
+neighbor searching when measuring the difference between
+two shapes. Different from previous works (e.g. [46]), we
+do not rely on any human labels. We study how the seg-
+mentation learning with self-supervision interacts with the
+model ﬁtting to data. We train different variants of LBS-AE
+to ﬁt the captured hands data. The ﬁrst is learning LBS-AE
+with CD only (LBS-AECD). The objective is (7) without
+Ls2,0.5. We then train the segmentation network s for SCD
+with hand poses sampled from uniform distributions based
+on U instead of Ud. Note that there is no interaction be-
+tween learning s and the other networks f and d. The seg-
+mentation and reconstructed results are shown in Figure 8a.
+We observe that the segmentation network trained on ran-
+domly sampled poses from a uniform distribution can only
+segment easy poses correctly and fail on challenging cases,
+
+(a) LBS-AECD
+
+(b) Modality Gap
+
+(c) LBS-AE
+
+Figure 8: Ablation study of the proposed LBS-AE. For each
+block, the left column is the inferred segmentations of input
+shapes while the right column is the reconstruction.
+
+such as feast poses, because of the difference between true
+pose distributions and the uniform distribution used as well
+as the modality gaps between real hands and synthetic hands
+from LBS. On the other hand, LBS-AECD is stuck at differ-
+ent local optimums. For example, it recovers to stretch the
+ring ﬁnger instead of the little ﬁnger for the third pose.
+
+Secondly, we study the importance of adapting to dif-
+ferent modalities. In Figure 8b, we train segmentation and
+LBS ﬁtting jointly with SCD. However, when we augment
+the data for training segmentation, we only adapt to pose
+distributions via f (X), instead of using the deformed Ud.
+Therefore, the training data for s for this case has a modality
+gap between it and the true data. Compared with Figure 8a,
+the joint training beneﬁts the performance, for example, on
+the feast pose. It suggests how good segmentation learn-
+ing beneﬁts reconstruction. Nevertheless, it still fails on
+the third pose. By training LBS-AE and the segmentation
+jointly with inferred modalities and poses, we could ﬁt the
+poses better as shown in Figure 8c. This difference demon-
+strates the importance of training segmentation adapting to
+the pose distributions and different modalities.
+
+Numerical Results We also quantitatively investigate the
+learned segmentation when ground truth is available. We
+train s with (1) randomly sampled shapes from uniform dis-
+tributions over joint angle ranges (Random) and (2) the pro-
+posed joint training (Joint). We use pretraining as initial-
+ization as describing in Section 2.1. We then train these two
+algorithms on the synthetic hand and body data and evalu-
+ate segmentation accuracy on the testing sets. The results
+are shown in Figure 9. Random is exactly the same as pre-
+training. After pretraining, Random is almost converged.
+On the other hand, Joint improves the segmentation ac-
+curacy in both cases by gradually adapting to the true pose
+distribution when the joint angle regressorf is improved.
+It justiﬁes the effectiveness of the proposed joint training
+where we can infer the segmentation in a self-supervised
+manner. For hand data, as we show in Figure 8, there are
+many touching-skin poses where ﬁngers are touched to each
+other. For those poses, there are strong correlations between
+
+11972
+
+0.90
+
+c
+c
+A
+
+0.85
+
+ 
+.
+g
+e
+S
+
+0.80
+
+Joint
+Random
+
+0.75
+
+0
+
+50000
+Iterations
+
+100000
+
+(a) Synthetic Hands
+
+(b) SMPL
+
+Figure 9: Segmentation accuracy on holdout testing sets.
+
+joints in each pose, which are hard to be sampled by a sim-
+ple uniform distribution and results in a performance gap
+in Figure 9a. For body data, many poses from SURREAL
+are with separate limbs, which Random can generalize sur-
+prisingly well. Although it seems Joint only leads to in-
+cremental improvement over Random, we argue this gap is
+substantial, especially for resolving challenging touching-
+skin cases as we will show in Section 4.3.
+
+4.2. Qualitative Study
+
+We compare the proposed algorithm with the unsuper-
+vised learning variant of [12], which learns the deformation
+by entirely relying on neural networks. Their objective is
+similar to (7), but using CD and Laplacian regularization
+only. For fair comparison, we also generate synthetic data
+on the ﬂy with randomly sampled poses and correspondence
+for [12], which boosts its performance. We also compare
+with the simpliﬁed version of the proposed algorithm by
+using CD instead of SCD, which is denoted as LBS-AECD
+as above.
+
+We ﬁt and reconstruct the hand and body data as shown
+in Figure 10. For the thumb-up pose, due to wrong cor-
+respondences from nearest neighbor search, both [12] and
+LBS-AECD reconstruct wrong poses. The wrong correspon-
+dence causes problems to [12]. Since the deformation from
+templates to targeted shapes fully relies on a deep neural
+network, when the correspondence is wrong and the net-
+work is powerful, it learns distorted deformation even with
+a Laplacian regularization. On the other hand, since LBS-
+AECD still utilizes LBS, the deformation network d is easier
+to regularize, which results in better ﬁnger reconstructions.
+We note that [12] learns proper deformation if the corre-
+spondence can be found correctly, such as the third row in
+Figure 10. In both cases, the proposed LBS-AE can learn
+segmentation well and recover the poses better.
+
+Lastly, we consider ﬁtting FAUST, with only 200 sam-
+ples, as shown in Figure 11. With limited and diverse
+poses, we have less hint of how the poses deform [46], a
+nearest neighbor search is easily trapped in bad local opti-
+mums as we mentioned in Figure 4. The proposed LBS-AE
+still results in reasonable reconstructions and segmentation,
+though the right arm in the second row suffers from the local
+optimum issues within the segmentation. A ﬁx is to learn
+more ﬁne-grained segmentation, but it brings the trade-off
+
+(a) Input
+
+(b) Segment
+
+(c) [12]
+
+(d) CD
+
+(e) LBS-AE
+
+Figure 10: Qualitative comparisons on captures hands and
+SURREAL (SMPL). Given point clouds sampled from the
+surfaces of input shapes (a), (c-e) are the reconstructions
+from different algorithms. (b) is the inferred segmentation
+of LBS-AE on the input shape.
+
+(a) Input
+
+(b) Segment
+
+(c) [12]
+
+(d) CD
+
+(e) LBS-AE
+
+Figure 11: Qualitative Comparison on FAUST.
+
+between task difﬁculty and model capacity, which we leave
+for future work.
+
+11973
+
+0250005000075000Iterations0.9450.9500.9550.960Seg. AccSMPL
+
+Syn. Hand
+
+Algorithm
+Unsup. [12]
+
+Recon Pose Corre. Recon Pose Corre.
+0.099 0.035 0.176
+0.076 0.082 0.136
+Unsup.+Aug [12] 0.081 0.081 0.132
+0.069 0.049 0.140
+0.062 0.047 0.135
+0.073 0.071 0.104
+0.051 0.152 0.147
+0.082 0.069 0.168
+0.069 0.050 0.137
+0.041 0.058 0.100
+0.037 0.048 0.091
+0.053 0.035 0.111
+
+Sup. [12]
+LBS-AECD
+
+LBS-AERAND
+
+LBS-AE
+
+Table 1: Quantitative results on synthetic data.
+
+4.3. Quantitative Study
+
+We conduct quantitative analysis on reconstruction, pose
+estimation, and correspondence on synthetic hand and body
+
+data. We use √CD as the proxy to reconstructions. Pose
+estimation compares the average ℓ2 distance between true
+joint positions and inferred ones while correspondence also
+measures the average ℓ2 between found and true correspon-
+dences. We randomly generate 4000 testing pairs from the
+testing data for correspondence comparison. Given two
+shapes, we ﬁt the shapes via the trained models. Since we
+know the correspondence of the reconstructions, we project
+the data onto the reconstructions to ﬁnd the correspondence.
+For more details, we refer readers to [12].
+
+We compare three variants of [12], including the super-
+vised version with full correspondence, and the unsuper-
+vised version with and without synthetic data augmentation
+aforementioned. For LBS-AE, we also consider three vari-
+ants, including a simple CD baseline (LBS-AECD), a seg-
+mentation network s trained on poses from uniform distri-
+butions LBS-AERAND and joint training version (LBS-AE).
+The results are shown in Table 1.
+
+For LBS-AE variants, the jointly trained LBS-AE is bet-
+ter than LBS-AECD and LBS-AERAND. It supports the hy-
+pothesis in Section 4.1, that joint training facilitates improv-
+ing model ﬁtting and segmentation. Also, as shown in Sec-
+tion 4.1, the pretrained segmentation network still has rea-
+sonable testing accuracy and brings an improvement over
+using CD loss only. On the other hand, the supervised ver-
+sion of [12] trained with full correspondence is worse than
+the proposed unsupervised LBS-AE due to generalization
+ability. For correspondence on the SMPL training set, su-
+pervised [12] achieves 0.065 while LBS-AE achieve 0.069.
+If we increase the training data size three times, super-
+vised [12] improves its correspondence result to be 0.095.
+For hand data, supervised [12] generalizes even worse with
+only 1500 training examples.
+It suggests that leveraging
+LBS models into the model can not only use smaller net-
+works but also generalize better than relying on an uncon-
+strained deformation from a deep network.
+
+Deformation Network We also investigate the ability of
+the deformation in LBS-AE. For data generated via SMPL,
+we know the ground truth of deformed templates Ugt of
+
+Algorithm
+FMNet [27]
+
+Unsup. [12] (230K)
+
+Sup. [12] (10K)
+Sup. [12] (230K)
+LBS-AE (23K)
+
+Inter. error (cm)
+
+Intra. err (cm)
+
+4.826
+4.88
+4.70
+3.26
+4.08
+
+2.44
+
+-
+-
+
+1.985
+2.161
+
+Table 2: Correspondence results on FAUST testing set.
+
+(a)
+
+(b)
+
+(c)
+
+Figure 12: Inferred correspondence of FAUST testing data.
+
+each shape. The average ℓ2 distance between corresponding
+points from Ugt and Ud is 0.02, while the average distance
+between Ugt and U is 0.03.
+
+Real-World Benchmark. One representative real-world
+benchmark is FAUST [7]. We follow the protocol used
+in [12] for comparison, where they train on SMPL with
+SURREAL parameters and then ﬁne-tune on FAUST.
+In [12], they use a different number of data from SMPL with
+SURREAL parameters, while we only use 23K. The numer-
+ical results are shown in Table 2. With only 23K SMPL data
+and self-supervision, we are better than unsupervised [12]
+with 50K data, supervised [12] with 10K data, and the su-
+pervised learning algorithm FMNet [27]. We show some
+visualization of the inferred correspondence in Figure 12.
+
+5. Conclusion
+
+We propose a self-supervised autoencoding algorithm,
+LBS-AE, to align articulated mesh models to point clouds.
+The decoder leverages an artist-deﬁned mesh rig, and us-
+ing LBS. We constrain the encoder to infer interpretable
+joint angles. We also propose the structured Chamfer dis-
+tance for training LBS-AE, deﬁned by inferring a mean-
+ingful segmentation of the target data to improve the corre-
+spondence ﬁnding via nearest neighbor search in the origi-
+nal Chamfer distance. By combining LBS-AE and the seg-
+mentation inference, we demonstrate we can train these two
+components simultaneously without supervision (labeling)
+from data. As training progress, the proposed model can
+start adapting to the data distribution and improve with self-
+supervision. In addition to opening a new route to model
+ﬁtting without supervision, the proposed algorithm also pro-
+vides a successful example showing how to encode existing
+prior knowledge in a geometric deep learning model.
+
+11974
+
+References
+
+[1] P. Achlioptas, O. Diamanti, I. Mitliagkas, and L. Guibas.
+Learning representations and generative models for 3d point
+clouds. In ICML, 2018.
+
+[2] D. Anguelov, P. Srinivasan, D. Koller, S. Thrun, J. Rodgers,
+and J. Davis. Scape: Shape completion and animation of
+people. TOG, 2005.
+
+[3] M. Arjovsky, S. Chintala, and L. Bottou. Wasserstein gan.
+
+ICML, 2017.
+
+[4] S. W. Bailey, D. Otte, P. Dilorenzo, and J. F. O’Brien. Fast
+
+and deep deformation approximations. TOG, 2018.
+
+[5] P. J. Besl and N. D. McKay. A method for registration of 3-d
+
+shapes. In TPAMI, 1992.
+
+[6] F. Bogo, A. Kanazawa, C. Lassner, P. Gehler, J. Romero,
+and M. J. Black. Keep it smpl: Automatic estimation of 3d
+human pose and shape from a single image. In ECCV, 2016.
+[7] F. Bogo, J. Romero, M. Loper, and M. J. Black. Faust:
+Dataset and evaluation for 3d mesh registration. In CVPR,
+2014.
+
+[8] M. M. Bronstein, J. Bruna, Y. LeCun, A. Szlam, and P. Van-
+dergheynst. Geometric deep learning: going beyond eu-
+clidean data. IEEE Signal Processing Magazine, 2017.
+
+[9] K. Genova, F. Cole, A. Maschinot, A. Sarna, D. Vlasic, and
+W. T. Freeman. Unsupervised training for 3d morphable
+model regression. In CVPR, 2018.
+
+[10] R. Girdhar, D. F. Fouhey, M. Rodriguez, and A. Gupta.
+Learning a predictable and generative vector representation
+for objects. In ECCV, 2016.
+
+[11] I. Goodfellow,
+
+J. Pouget-Abadie, M. Mirza, B. Xu,
+D. Warde-Farley, S. Ozair, A. Courville, and Y. Bengio. Gen-
+erative adversarial nets. In NIPS, 2014.
+
+[12] T. Groueix, M. Fisher, V. G. Kim, B. C. Russell, and
+M. Aubry. 3d-coded: 3d correspondences by deep defor-
+mation. In ECCV, 2018.
+
+[13] T. Groueix, M. Fisher, V. G. Kim, B. C. Russell, and
+M. Aubry. Atlasnet: A papier-m\ˆ ach\’e approach to learn-
+ing 3d surface generation. In CVPR, 2018.
+
+[14] I. Gulrajani, F. Ahmed, M. Arjovsky, V. Dumoulin, and
+In
+
+Improved training of wasserstein gans.
+
+A. Courville.
+NIPS, 2017.
+
+[15] H. Joo, T. Simon, and Y. Sheikh. Total capture: A 3d de-
+In
+
+formation model for tracking faces, hands, and bodies.
+CVPR, 2018.
+
+[16] P. Joshi, M. Meyer, T. DeRose, B. Green, and T. Sanocki.
+In TOG,
+
+Harmonic coordinates for character articulation.
+2007.
+
+[17] A. Kanazawa, M. J. Black, D. W. Jacobs, and J. Malik. End-
+
+to-end recovery of human shape and pose. In CVPR, 2018.
+
+[18] A. Kanazawa, S. Tulsiani, A. A. Efros, and J. Malik. Learn-
+ing category-speciﬁc mesh reconstruction from image col-
+lections. In ECCV, 2018.
+
+[19] L. Kavan, S. Collins, J. ˇZ´ara, and C. O’Sullivan. Geometric
+skinning with approximate dual quaternion blending. TOG,
+2008.
+
+[20] L. Kavan and J. ˇZ´ara. Spherical blend skinning: a real-time
+
+[21] T. Kurihara and N. Miyata. Modeling deformable human
+
+hands from medical images. In SCA, 2004.
+
+[22] C. Lassner, J. Romero, M. Kiefel, F. Bogo, M. J. Black, and
+P. V. Gehler. Unite the people: Closing the loop between 3d
+and 2d human representations. In CVPR, 2017.
+
+[23] B. H. Le and Z. Deng. Smooth skinning decomposition with
+
+rigid bones. TOG, 2012.
+
+[24] J. P. Lewis, M. Cordner, and N. Fong. Pose space deforma-
+tion: a uniﬁed approach to shape interpolation and skeleton-
+driven deformation. In SIGGRAPH, 2000.
+
+[25] C.-L. Li, W.-C. Chang, Y. Cheng, Y. Yang, and B. P´oczos.
+Mmd gan: Towards deeper understanding of moment match-
+ing network. In NIPS, 2017.
+
+[26] C.-L. Li, M. Zaheer, Y. Zhang, B. Poczos, and R. Salakhut-
+dinov. Point cloud gan. arXiv preprint arXiv:1810.05795,
+2018.
+
+[27] O. Litany, T. Remez, E. Rodol`a, A. M. Bronstein, and M. M.
+Bronstein. Deep functional maps: Structured prediction for
+dense shape correspondence. In ICCV, 2017.
+
+[28] M. Loper, N. Mahmood, J. Romero, G. Pons-Moll, and M. J.
+Black. Smpl: A skinned multi-person linear model. TOG,
+2015.
+
+[29] N. Magnenat-Thalmann, R. Laperrire, and D. Thalmann.
+Joint-dependent local deformations for hand animation and
+object grasping. In GI, 1988.
+
+[30] X. Mao, Q. Li, H. Xie, R. Y. Lau, and Z. Wang. Least squares
+
+generative adversarial networks. In ICCV, 2017.
+
+[31] D. Mehta, S. Sridhar, O. Sotnychenko, H. Rhodin,
+M. Shaﬁei, H.-P. Seidel, W. Xu, D. Casas, and C. Theobalt.
+Vnect: Real-time 3d human pose estimation with a single
+rgb camera. TOG, 2017.
+
+[32] Y. Mroueh and T. Sercu. Fisher gan. In NIPS, 2017.
+[33] S. Nowozin, B. Cseke, and R. Tomioka.
+
+f-gan: Training
+generative neural samplers using variational divergence min-
+imization. In NIPS, 2016.
+
+[34] G. Pons-Moll, J. Romero, N. Mahmood, and M. J. Black.
+Dyna: A model of dynamic human shape in motion. TOG,
+2015.
+
+[35] C. R. Qi, H. Su, K. Mo, and L. J. Guibas. Pointnet: Deep
+learning on point sets for 3d classiﬁcation and segmentation.
+In CVPR, 2017.
+
+[36] C. R. Qi, L. Yi, H. Su, and L. J. Guibas. Pointnet++: Deep
+hierarchical feature learning on point sets in a metric space.
+In NIPS, 2017.
+
+[37] T. Rhee, J. P. Lewis, and U. Neumann. Real-time weighted
+In EUROGRAPHICS,
+
+pose-space deformation on the gpu.
+2006.
+
+[38] J. Romero, D. Tzionas, and M. J. Black. Embodied hands:
+Modeling and capturing hands and bodies together. TOG,
+2017.
+
+[39] A. Sinha, J. Bai, and K. Ramani. Deep learning 3d shape
+
+surfaces using geometry images. In ECCV, 2016.
+
+[40] A. Sinha, A. Unmesh, Q. Huang, and K. Ramani. Surfnet:
+Generating 3d shape surfaces using deep residual networks.
+In CVPR, 2017.
+
+[41] P.-P. J. Sloan, C. F. Rose III, and M. F. Cohen. Shape by
+
+deformation of articulated models. In SI3D, 2005.
+
+example. In SI3D, 2001.
+
+11975
+
+[42] A. Tewari, M. Zollhoefer, F. Bernard, P. Garrido, H. Kim,
+P. Perez, and C. Theobalt. High-ﬁdelity monocular face re-
+construction based on an unsupervised model-based face au-
+toencoder. TPAMI, 2018.
+
+[43] G. Varol, J. Romero, X. Martin, N. Mahmood, M. J. Black,
+I. Laptev, and C. Schmid. Learning from synthetic humans.
+In CVPR, 2017.
+
+[44] P. Wang, W. Li, Z. Gao, J. Zhang, C. Tang, and P. O. Ogun-
+bona. Action recognition from depth maps using deep con-
+volutional neural networks. THMS, 2016.
+
+[45] X. C. Wang and C. Phillips. Multi-weight enveloping: least-
+In
+
+squares approximation techniques for skin animation.
+SCA, 2002.
+
+[46] L. Wei, Q. Huang, D. Ceylan, E. Vouga, and H. Li. Dense
+human body correspondences using convolutional networks.
+In CVPR, 2016.
+
+[47] J. Wu, C. Zhang, T. Xue, B. Freeman, and J. Tenenbaum.
+Learning a probabilistic latent space of object shapes via 3d
+generative-adversarial modeling. In NIPS, 2016.
+
+[48] Z. Wu, S. Song, A. Khosla, F. Yu, L. Zhang, X. Tang, and
+J. Xiao. 3d shapenets: A deep representation for volumetric
+shape modeling. In CVPR, 2015.
+
+[49] Y. Yang, C. Feng, Y. Shen, and D. Tian. Foldingnet: Point
+In CVPR,
+
+cloud auto-encoder via deep grid deformation.
+2018.
+
+[50] M. Zaheer, S. Kottur, S. Ravanbakhsh, B. Poczos, R. R.
+
+Salakhutdinov, and A. J. Smola. Deep sets. In NIPS, 2017.
+
+[51] S. Zufﬁ and M. J. Black. The stitched puppet: A graphical
+
+model of 3d human shape and pose. In CVPR, 2015.
+
+11976
+
+

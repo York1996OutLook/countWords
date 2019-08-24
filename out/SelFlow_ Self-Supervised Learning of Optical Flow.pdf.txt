@@ -1,0 +1,1552 @@
+SelFlow: Self-Supervised Learning of Optical Flow
+
+Pengpeng Liu†∗, Michael Lyu†, Irwin King†, Jia Xu§
+† Chinese University of Hong Kong, § Tencent AI Lab
+
+Abstract
+
+We present a self-supervised learning approach for op-
+tical ﬂow. Our method distills reliable ﬂow estimations
+from non-occluded pixels, and uses these predictions as
+ground truth to learn optical ﬂow for hallucinated occlu-
+sions. We further design a simple CNN to utilize tempo-
+ral information from multiple frames for better ﬂow estima-
+tion. These two principles lead to an approach that yields
+the best performance for unsupervised optical ﬂow learn-
+ing on the challenging benchmarks including MPI Sintel,
+KITTI 2012 and 2015. More notably, our self-supervised
+pre-trained model provides an excellent initialization for su-
+pervised ﬁne-tuning. Our ﬁne-tuned models achieve state-
+of-the-art results on all three datasets. At the time of writ-
+ing, we achieve EPE=4.26 on the Sintel benchmark, outper-
+forming all submitted methods.
+
+1. Introduction
+
+Optical ﬂow estimation is a core building block for a va-
+riety of computer vision systems [30, 8, 39, 4]. Despite
+decades of development, accurate ﬂow estimation remains
+an open problem due to one key challenge: occlusion. Tra-
+ditional approaches minimize an energy function to encour-
+age association of visually similar pixels and regularize in-
+coherent motion to propagate ﬂow estimation from non-
+occluded pixels to occluded pixels [13, 5, 6, 38]. However,
+this family of methods is often time-consuming and not ap-
+plicable for real-time applications.
+
+Recent studies learn to estimate optical ﬂow end-to-
+end from images using convolutional neural networks
+(CNNs) [10, 35, 15, 14, 43]. However, training fully su-
+pervised CNNs requires a large amount of labeled training
+data, which is extremely difﬁcult to obtain for optical ﬂow,
+especially when there are occlusions. Considering the re-
+cent performance improvements obtained when employing
+hundreds of millions of labeled images [40], it is obvious
+that the size of training data is a key bottleneck for optical
+ﬂow estimation.
+
+∗Work mainly done during an internship at Tencent AI Lab.
+
+In the absence of large-scale real-world annotations,
+existing methods turn to pre-train on synthetic labeled
+datasets [10, 28] and then ﬁne-tune on small annotated
+datasets [15, 14, 43]. However, there usually exists a large
+gap between the distribution of synthetic data and natu-
+ral scenes.
+In order to train a stable model, we have to
+carefully follow speciﬁc learning schedules across different
+datasets [15, 14, 43].
+
+One promising direction is to develop unsupervised opti-
+cal ﬂow learning methods that beneﬁt from unlabeled data.
+The basic idea is to warp the target image towards the ref-
+erence image according to the estimated optical ﬂow, then
+minimize the difference between the reference image and
+the warped target image using a photometric loss [20, 37].
+Such idea works well for non-occluded pixels but turns to
+provide misleading information for occluded pixels. Recent
+methods propose to exclude those occluded pixels when
+computing the photometric loss or employ additional spa-
+tial and temporal smoothness terms to regularize ﬂow es-
+timation [29, 46, 18]. Most recently, DDFlow [26] pro-
+poses a data distillation approach, which employs random
+cropping to create occlusions for self-supervision. Unfortu-
+nately, these methods fails to generalize well for all natural
+occlusions. As a result, there is still a large performance
+gap comparing unsupervised methods with state-of-the-art
+fully supervised methods.
+
+Is it possible to effectively learn optical ﬂow with oc-
+clusions? In this paper, we show that a self-supervised ap-
+proach can learn to estimate optical ﬂow with any form of
+occlusions from unlabeled data. Our work is based on dis-
+tilling reliable ﬂow estimations from non-occluded pixels,
+and using these predictions to guide the optical ﬂow learn-
+ing for hallucinated occlusions. Figure 1 illustrates our idea
+to create synthetic occlusions by perturbing superpixels. We
+further utilize temporal information from multiple frames to
+improve ﬂow prediction accuracy within a simple CNN ar-
+chitecture. The resulted learning approach yields the high-
+est accuracy among all unsupervised optical ﬂow learning
+methods on Sintel and KITTI benchmarks.
+
+Surprisingly, our self-supervised pre-trained model pro-
+vides an excellent initialization for supervised ﬁne-tuning.
+At the time of writing, our ﬁne-tuned model achieves the
+
+14571
+
+Figure 1. A toy example to illustrate our self-supervised learning idea. We ﬁrst train our NOC-model with the classical photometric loss
+(measuring the difference between the reference image (a) and the warped target image(d)), guided by the occlusion map (g). Then we
+perturbate randomly selected superpixels in the target image (b) to hallucinate occlusions. Finally, we use reliable ﬂow estimations from
+our NOC-Model to guide the learning of our OCC-Model for those newly occluded pixels (denoted by self-supervision mask (i), where
+value 1 means the pixel is non-occluded in (g) but occluded in (h)). Note the yellow region is part of the moving dog. Our self-supervised
+approach learns optical ﬂow for both moving objects and static scenes.
+
+highest reported accuracy (EPE=4.26) on the Sintel bench-
+mark. Our approach also signiﬁcantly outperforms all pub-
+lished optical ﬂow methods on the KITTI 2012 benchmark,
+and achieves highly competitive results on the KITTI 2015
+benchmark. To the best of our knowledge, it is the ﬁrst time
+that a supervised learning method achieves such remarkable
+accuracies without using any external labeled data.
+
+2. Related Work
+
+Classical Optical Flow Estimation. Classical variational
+approaches model optical ﬂow estimation as an energy
+minimization problem based on brightness constancy and
+spatial smoothness [13]. Such methods are effective for
+small motion, but tend to fail when displacements are large.
+Later works integrate feature matching to initialize sparse
+matching, and then interpolate into dense ﬂow maps in
+a pyramidal coarse-to-ﬁne manner [6, 47, 38]. Recent
+works use convolutional neural networks (CNNs) to im-
+prove sparse matching by learning an effective feature em-
+bedding [49, 2]. However, these methods are often compu-
+
+tationally expensive and can not be trained end-to-end. One
+natural extension to improve robustness and accuracy for
+ﬂow estimation is to incorporate temporal information over
+multiple frames. A straightforward way is to add temporal
+constraints such as constant velocity [19, 22, 41], constant
+acceleration [45, 3], low-dimensional linear subspace [16],
+or rigid/non-rigid segmentation [48]. While these formu-
+lations are elegant and well-motivated, our method is much
+simpler and does not rely on any assumption of the data. In-
+stead, our approach directly learns optical ﬂow for a much
+wider range of challenging cases existing in the data.
+
+Supervised Learning of Optical Flow. One promising di-
+rection is to learn optical ﬂow with CNNs. FlowNet [10]
+is the ﬁrst end-to-end optical ﬂow learning framework. It
+takes two consecutive images as input and outputs a dense
+ﬂow map. The following work FlowNet 2.0 [15] stacks
+several basic FlowNet models for iterative reﬁnement, and
+signiﬁcantly improves the accuracy. SpyNet [35] proposes
+to warp images at multiple scales to cope with large dis-
+placements, resulting in a compact spatial pyramid network.
+
+24572
+
+ NOCModelOCCModelGuideFlowFlow 𝐼𝑡  𝐼𝑡+1 (a) Reference Image 𝐼𝑡 (b) Target Image 𝐼𝑡+1 (c) Ground Truth Flow 𝐰𝑡→𝑡+1 (d) Warped Target Image 𝐼𝑡+1→𝑡𝑤 (e) SILC Superpixel (f) 𝐼 𝑡+1 (h) New Occlusion Map 𝑂 𝑡→𝑡+1 (i) Self-Supervision Mask 𝑀𝑡→𝑡+1 (g) Occlusion Map 𝑂𝑡→𝑡+1   𝐼 𝑡+1  𝐼𝑡  𝐼𝑡−1 𝑝1 𝑝2 𝑝1′ 𝑝2′ 𝑝1 𝑝2  𝐼𝑡−1 Figure 2. Our network architecture at each level (similar to PWC-
+˙wl denotes the initial coarse ﬂow of level l and ˆF l de-
+Net [43]).
+notes the warped feature representation. At each level, we swap
+the initial ﬂow and cost volume as input to estimate both for-
+ward and backward ﬂow concurrently. Then these estimations are
+passed to layer l − 1 to estimate higher-resolution ﬂow.
+
+Recently, PWC-Net [43] and LiteFlowNet [14] propose to
+warp features extracted from CNNs and achieve state-of-
+the-art results with lightweight framework. However, ob-
+taining high accuracy with these CNNs requires pre-training
+on multiple synthetic datasets and follows speciﬁc training
+schedules [10, 28]. In this paper, we reduce the reliance on
+pre-training with synthetic data, and propose an effective
+self-supervised training method with unlabeled data.
+
+Unsupervised Learning of Optical Flow. Another inter-
+esting line of work is unsupervised optical ﬂow learning.
+The basic principles are based on brightness constancy and
+spatial smoothness [20, 37]. This leads to the most popular
+photometric loss, which measures the difference between
+the reference image and the warped image. Unfortunately,
+this loss does not hold for occluded pixels. Recent studies
+propose to ﬁrst obtain an occlusion map and then exclude
+those occluded pixels when computing the photometric dif-
+ference [29, 46]. Janai et al. [18] introduces to estimate
+optical ﬂow with a multi-frame formulation and more ad-
+vanced occlusion reasoning, achieving state-of-the-art un-
+supervised results. Very recently, DDFlow [26] proposes
+a data distillation approach to learning the optical ﬂow of
+occluded pixels, which works particularly well for pixels
+near image boundaries. Nonetheless, all these unsupervised
+learning methods only handle speciﬁc cases of occluded
+pixels. They lack the ability to reason about the optical
+ﬂow of all possible occluded pixels. In this work, we ad-
+dress this issue by a superpixel-based occlusion hallucina-
+tion technique.
+
+Self-Supervised Learning. Our work is closely related to
+the family of self-supervised learning methods, where the
+supervision signal is purely generated from the data itself. It
+is widely used for learning feature representations from un-
+labeled data [21]. A pretext task is usually employed, such
+as image inpainting [34], image colorization [24], solving
+
+Figure 3. Data ﬂow for self-training with multiple-frame. To esti-
+mate occlusion map for three-frame ﬂow learning, we use ﬁve im-
+ages as input. This way, we can conduct a forward-backward con-
+sistency check to estimate occlusion maps between It and It+1,
+between It and It−1 respectively.
+
+Jigsaw puzzles [32]. Pathak et al. [33] propose to explore
+low-level motion-based cues to learn feature representations
+without manual supervision. Doersch et al. [9] combine
+multiple self-supervised learning tasks to train a single vi-
+sual representation. In this paper, we make use of the do-
+main knowledge of optical ﬂow, and take reliable predic-
+tions of non-occluded pixels as the self-supervision signal
+to guide our optical ﬂow learning of occluded pixels.
+
+3. Method
+
+In this section, we present our self-supervised approach
+to learning optical ﬂow from unlabeled data. To this end,
+we train two CNNs (NOC-Model and OCC-Model) with
+the same network architecture. The former focuses on accu-
+rate ﬂow estimation for non-occluded pixels, and the latter
+learns to predict optical ﬂow for all pixels. We distill re-
+liable non-occluded ﬂow estimations from NOC-Model to
+guide the learning of OCC-Model for those occluded pix-
+els. Only OCC-Model is needed at testing. We build our
+network based on PWC-Net [43] and further extend it to
+multi-frame optical ﬂow estimation (Figure 2). Before de-
+scribing our approach in detail, we ﬁrst deﬁne our notations.
+
+3.1. Notation
+
+Given three consecutive RGB images It−1, It, It+1, our
+goal is to estimate the forward optical ﬂow from It to It+1.
+Let wi→j denote the ﬂow from Ii to Ij , e.g., wt→t+1 de-
+notes the forward ﬂow from It to It+1, wt→t−1 denotes
+the backward ﬂow from It to It−1. After obtaining opti-
+cal ﬂow, we can backward warp the target image to recon-
+struct the reference image using Spatial Transformer Net-
+work [17, 46]. Here, we use I w
+j→i to denote warping Ij to
+Ii with ﬂow wi→j . Similarly, we use Oi→j to denote the
+occlusion map from Ii to Ij , where value 1 means the pixel
+in Ii is not visible in Ij .
+
+In our self-supervised setting, we create the new target
+
+image eIt+1 by injecting random noise on superpixels for
+
+occlusion generation. We can inject noise to any of three
+consecutive frames and even multiple of them as shown in
+Figure 1. For brevity, here we choose It+1 as an example.
+
+34573
+
+WarpingWarpingBackwardCostVolumeForwardCostVolumeCorrelationCorrelationEstimatorNetworkBackward Cost VolumeForward Cost Volume𝐰𝑡→𝑡−1𝑙 𝐰𝑡→𝑡+1𝑙 Backward Cost VolumeForward Cost Volume𝐹𝑡−1𝑙𝐹𝑡+1𝑙𝐹 𝑡−1𝑙𝐹 𝑡+1𝑙𝐹𝑡𝑙𝐹𝑡𝑙−𝐰𝑡→𝑡−1𝑙 𝐰𝑡→𝑡+1𝑙 −𝐰𝑡→𝑡+1𝑙 𝐰𝑡→𝑡−1𝑙 𝐰𝑡→𝑡+1𝑙 𝐰𝑡→𝑡−1𝑙 𝐹𝑡𝑙UpscalinginResolutionand Magnitude𝐰𝑡→𝑡−1𝑙+1 𝐰𝑡→𝑡+1𝑙+1 Forward-backward consistency check𝐼t−2 & 𝐼𝑡−1 & 𝐼𝑡 𝐼t−1 & 𝐼𝑡 & 𝐼𝑡+1 Model𝐼t & 𝐼𝑡+1 & 𝐼𝑡+2  𝐰𝑡−1→𝑡−2  𝐰𝑡−1→𝑡  𝐰𝑡→𝑡−1  𝐰𝑡→𝑡+1  𝐰𝑡+1→𝑡  𝐰𝑡+1→𝑡+2 𝑂𝑡−1→𝑡 𝑂𝑡→𝑡−1 𝑂𝑡→𝑡+1 𝑂𝑡+1→𝑡 (a) Reference Image
+
+(b) GT Flow
+
+(c) Our Flow
+
+(d) GT Occlusion
+
+(e) Our Occlusion
+
+Figure 4. Sample unsupervised results on Sintel and KITTI dataset. From top to bottom, we show samples from Sintel Final, KITTI 2012
+and KITTI 2015. Our model can estimate both accurate ﬂow and occlusion map. Note that on KITTI datasets, the occlusion maps are
+sparse, which only contain pixels moving out of the image boundary.
+
+If we let It−1, It and eIt+1 as input, then ew, eO, eI w represent
+
+the generated optical ﬂow, occlusion map and warped image
+respectively.
+
+next level both in resolution and magnitude.
+
+3.3. Occlusion Estimation
+
+3.2. CNNs for Multi Frame Flow Estimation
+
+In principle, our method can utilize any CNNs. In our
+implementation, we build on top of the seminar PWC-
+Net [43]. PWC-Net employs pyramidal processing to in-
+crease the ﬂow resolution in a coarse-to-ﬁne manner and
+utilizes feature warping, cost volume construction to esti-
+mate optical ﬂow at each level. Based on these principles,
+it has achieved state-of-the-art performance with a compact
+model size.
+
+As shown in Figure 2, our three-frame ﬂow estimation
+network structure is built upon two-frame PWC-Net with
+several modiﬁcations to aggregate temporal information.
+First, our network takes three images as input, thus pro-
+duces three feature representations Ft−1, Ft and Ft+1. Sec-
+ond, apart from forward ﬂow wt→t+1 and forward cost vol-
+ume, out model also computes backward ﬂow wt→t−1 and
+backward cost volume at each level simultaneously. Note
+that when estimating forward ﬂow, we also utilize the ini-
+tial backward ﬂow and backward cost volume information.
+This is because past frame It−1 can provide very valuable
+information, especially for those regions that are occluded
+in the future frame It+1 but not occluded in It−1. Our net-
+work combines all this information together and therefore
+estimates optical ﬂow more accurately. Third, we stack
+initial forward ﬂow ˙wl
+t→t+1, minus initial backward ﬂow
+− ˙wl
+t , forward cost vol-
+ume and backward cost volume to estimate the forward ﬂow
+at each level. For backward ﬂow, we just swap the ﬂow and
+cost volume as input. Forward and backward ﬂow estima-
+tion networks share the same network structure and weights.
+For initial ﬂow at each level, we upscale optical ﬂow of the
+
+t+1→t, feature of reference image F l
+
+For two-frame optical ﬂow estimation, we can swap two
+images as input to generate forward and backward ﬂow,
+then the occlusion map can be generated based on the
+forward-backward consistency prior [44, 29]. To make this
+work under our three-frame setting, we propose to utilize
+the adjacent ﬁve frame images as input as shown in Fig-
+ure 3. Speciﬁcally, we estimate bi-directional ﬂows be-
+tween It and It+1, namely wt→t+1 and wt+1→t. Similarly,
+we also estimate the ﬂows between It and It−1. Finally,
+we conduct a forward and backward consistency check to
+reason the occlusion map between two consecutive images.
+To check forward-backward consistency, we consider
+one pixel as occluded when the mismatch between the for-
+ward ﬂow and the reversed forward ﬂow is too large. Take
+Ot→t+1 as an example, we can ﬁrst compute the reversed
+forward ﬂow as follows,
+
+ˆwt→t+1 = wt+1→t(p + wt→t+1(p)),
+
+(1)
+
+A pixel is considered occluded whenever it violates the fol-
+lowing constraint:
+
+|wt→t+1 + ˆwt→t+1|2 < α1(|wt→t+1|2 + | ˆwt→t+1|2) + α2,
+(2)
+where we set α1 = 0.01, α2 = 0.05 for all our experiments.
+Other occlusion maps are computed in the same way.
+
+3.4. Occlusion Hallucination
+
+During our self-supervised training, we hallucinate oc-
+clusions by perturbing local regions with random noise. In
+a newly generated target image, the pixels corresponding
+to noise regions automatically become occluded. There
+are many ways to generate such occlusions. The most
+
+44574
+
+d
+e
+s
+i
+v
+r
+e
+p
+u
+s
+n
+U
+
+d
+e
+s
+i
+v
+r
+e
+p
+u
+S
+
+Method
+
+BackToBasic+ft [20]
+DSTFlow+ft [37]
+UnFlow-CSS [29]
+OccAwareFlow+ft [46]
+MultiFrameOccFlow-None+ft [18]
+MultiFrameOccFlow-Soft+ft [18]
+DDFlow+ft [26]
+Ours
+
+FlowNetS+ft [10]
+FlowNetC+ft [10]
+SpyNet+ft [35]
+FlowFieldsCNN+ft [2]
+DCFlow+ft [49]
+FlowNet2+ft [15]
+UnFlow-CSS+ft [29]
+LiteFlowNet+ft-CVPR [14]
+LiteFlowNet+ft-axXiv [14]
+PWC-Net+ft-CVPR [43]
+PWC-Net+ft-axXiv [42]
+ProFlow+ft [27]
+ContinualFlow+ft [31]
+MFF+ft [36]
+Ours+ft
+
+Sintel Clean
+
+Sintel Final
+
+KITTI 2012
+
+KITTI 2015
+
+train
+
+test
+
+train
+
+test
+
+train
+
+test
+
+test(Fl)
+
+train
+
+test(Fl)
+
+–
+
+–
+
+(6.16)
+
+10.41
+
+–
+
+(4.03)
+(6.05)
+(3.89)
+(2.92)
+(2.88)
+
+(3.66)
+(3.78)
+(3.17)
+
+–
+–
+
+(1.45)
+
+–
+
+(1.64)
+(1.35)
+(2.02)
+(1.71)
+(1.78)
+
+–
+–
+
+(1.68)
+
+–
+
+7.95
+
+–
+
+7.23
+6.18
+6.56
+
+6.96
+6.85
+6.64
+3.78
+3.54
+4.16
+
+–
+
+4.86
+4.54
+4.39
+3.45
+2.82
+3.34
+3.42
+3.74
+
+–
+
+(6.81)
+(7.91)
+(5.95)
+(7.09)
+(5.52)
+3.98
+(3.87)
+
+(4.44)
+(5.28)
+(4.32)
+
+–
+–
+
+(2.01)
+
+–
+
+(2.23)
+(1.78)
+(2.08)
+(2.34)
+
+–
+–
+–
+
+(1.77)
+
+–
+
+11.27
+10.22
+9.15
+
+11.3
+10.43
+3.29
+3.55
+
+–
+
+8.81
+7.40
+6.57
+
+7.76
+8.51
+8.36
+5.36
+5.12
+5.74
+
+–
+
+6.09
+5.38
+5.04
+4.60
+5.02
+4.52
+4.57
+4.26
+
+–
+–
+
+2.35
+1.69
+
+7.52
+8.79
+8.25
+
+–
+–
+
+(1.28)
+(1.14)
+(1.26)
+(1.05)
+(1.45)
+(1.08)
+(1.89)
+
+–
+–
+
+(0.76)
+
+9.9
+12.4
+
+–
+4.2
+–
+–
+3.0
+2.2
+
+9.1
+–
+
+10.1
+3.0
+–
+1.8
+1.7
+1.7
+1.6
+1.7
+1.5
+2.1
+–
+1.7
+1.5
+
+–
+
+–
+–
+–
+–
+–
+–
+
+16.79
+8.10
+8.88
+6.65
+6.59
+8.86%
+5.72
+7.68% 4.84
+
+44.49%
+
+–
+
+20.97%
+13.01%
+
+–
+
+–
+–
+–
+–
+–
+
+–
+
+8.8%
+(2.3)
+8.42% (1.86)
+(2.16)
+7.27% (1.62)
+8.10% (2.16)
+6.82% (1.45)
+7.88% (5.22)
+
+–
+
+–
+–
+
+7.87%
+6.19% (1.18)
+
+–
+
+39%
+
+23.30%
+31.2%
+
+–
+
+22.94%
+14.29%
+14.19%
+
+–
+–
+
+35.07%
+18.68 %
+14.83%
+11.48%
+11.11%
+10.24%
+9.38%
+9.60%
+7.90%
+15.04%
+10.03%
+7.17%
+8.42%
+
+Table 1. Comparison with state-of-the-art learning based optical ﬂow estimation methods. Our method outperforms all unsupervised
+optical ﬂow learning approaches on all datasets. Our supervised ﬁne-tuned model achieves the highest accuracy on the Sintel Final dataset
+and KITTI 2012 dataset. All numbers are EPE except for the last column of KITTI 2012 and KITTI 2015 testing sets, where we report
+percentage of erroneous pixels over all pixels (Fl-all). Missing entries (-) indicate that the results are not reported for the respective method.
+Parentheses mean that the training and testing are performed on the same dataset.
+
+straightforward way is to randomly select rectangle regions.
+However, rectangle occlusions rarely exist in real-world se-
+quences. To address this issue, we propose to ﬁrst gener-
+ate superpixels [1], then randomly select several superpix-
+els and ﬁll them with noise. There are two main advantages
+of using superpixel. First, the shape of a superpixel is usu-
+ally random and superpixel edges are often part of object
+boundaries. The is consistent with the real-world cases and
+makes the noise image more realistic. We can choose sev-
+eral superpixels which locate at different locations to cover
+more occlusion cases. Second, the pixels within each su-
+perpixel usually belong to the same object or have similar
+ﬂow ﬁelds. Prior work has found low-level segmentation is
+helpful for optical ﬂow estimation [49]. Note that the ran-
+dom noise should lie in the pixel value range.
+
+Figure 1 shows a simple example, where only the dog
+extracted from the COCO dataset [25] is moving. Initially,
+the occlusion map between It and It+1 is (g). After ran-
+domly selecting several superpixels from (e) to inject noise,
+
+the occlusion map between It and eIt+1 change to (h). Next,
+
+we describe how to make use of these occlusion maps to
+
+guide our self-training.
+
+3.5. NOC to OCC as Self Supervision
+
+Our self-training idea is built on top of the classical pho-
+tometric loss [29, 46, 18], which is highly effective for non-
+occluded pixels. Figure 1 illustrates our main idea. Suppose
+pixel p1 in image It is not occluded in It+1, and pixel p′
+1 is
+its corresponding pixel. If we inject noise to It+1 and let
+
+It−1, It, eIt+1 as input, p1 then becomes occluded. Good
+
+news is we can still use the ﬂow estimation of NOC-Model
+as annotations to guide OCC-Model to learn the ﬂow of p1
+
+from It to eIt+1. This is also consistent with real-world oc-
+
+clusions, where the ﬂow of occluded pixels can be estimated
+based on surrounding non-occluded pixels. In the example
+of Figure 1, self-supervision is only employed to (i), which
+represents those pixels non-occluded from It to It+1 but be-
+
+come occluded from It to eIt+1.
+
+3.6. Loss Functions
+
+Similar to previous unsupervised methods, we ﬁrst apply
+photometric loss Lp to non-occluded pixels. Photometric
+
+54575
+
+Reference Image (training)
+
+Ground Truth
+
+W/O Occlusion
+
+W/O Self-Supervision
+
+Rectangle
+
+Two-frame Superpixel
+
+Superpixel
+
+Finetune
+
+Reference Image (testing)
+
+Target image
+
+W/O Occlusion
+
+W/O Self-Supervision
+
+Rectangle
+
+Two-frame Superpixel
+
+Superpixel
+
+Finetune
+
+Figure 5. Qualitative comparison of our model under different settings on Sintel Clean training and Sintel Final testing dataset. Occlusion
+handling, multi-frame formulation and self-supervision consistently improve the performance.
+
+loss is deﬁned as follows:
+
+Lp = X
+
+i,j
+
+P ψ(Ii − I w
+
+j→i) ⊙ (1 − Oi)
+
+P (1 − Oi)
+
+truth ﬂow is wgt
+t→t+1, and mask V denotes whether the pixel
+has a label, where value 1 means that the pixel has a valid
+ground truth ﬂow. Then we can obtain the supervised ﬁne-
+tuning loss as follows,
+
+(3)
+
+where ψ(x) = (|x|+ǫ)q is a robust loss function, ⊙ denotes
+the element-wise multiplication. We set ǫ = 0.01, q = 0.4
+for all our experiments. Only Lp is necessary to train the
+NOC-Model.
+
+To train our OCC-Model to estimate optical ﬂow of oc-
+cluded pixels, we deﬁne a self-supervision loss Lo for those
+synthetic occluded pixels (Figure 1(i)). First, we compute a
+self-supervision mask M to represent these pixels,
+
+Mi→j = clip(eOi→j − Oi→j, 0, 1)
+
+Then, we deﬁne our self-supervision loss Lo as,
+
+Lo = X
+
+i,j
+
+P ψ(wi→j − ewi→j) ⊙ Mi→j
+
+P Mi→j
+
+(4)
+
+(5)
+
+For our OCC-Model, we train with a simple combination of
+Lp + Lo for both non-occluded pixels and occluded pixels.
+Note our loss functions do not rely on spatial and tempo-
+ral consistent assumptions, and they can be used for both
+classical two-frame ﬂow estimation and multi-frame ﬂow
+estimation.
+
+3.7. Supervised Fine tuning
+
+After pre-training on raw dataset, we use real-world an-
+notated data for ﬁne-tuning. Since there are only annota-
+tions for forward ﬂow wt→t+1, we skip backward ﬂow esti-
+mation when computing our loss. Suppose that the ground
+
+Ls = X(ψ(wgt
+
+t→t+1 − wt→t+1) ⊙ V )/X V
+
+(6)
+
+During ﬁne-tuning, We ﬁrst initialize the model with the
+pre-trained OCC-Model on each dataset, then optimize it
+using Ls.
+
+4. Experiments
+
+We evaluate and compare our methods with state-
+of-the-art unsupervised and supervised learning methods
+on public optical ﬂow benchmarks including MPI Sin-
+tel [7], KITTI 2012 [11] and KITTI 2015 [30].
+To
+ensure reproducibility and advance further innovations,
+we make our code and models publicly available at
+https://github.com/ppliuboy/SelFlow.
+
+4.1. Implementation Details
+
+Data Preprocessing. For Sintel, we download the Sintel
+movie and extract ∼ 10, 000 images for self-training. We
+ﬁrst train our model on this raw data, then add the ofﬁcial
+Sintel training data (including both ”ﬁnal” and ”clean” ver-
+sions). For KITTI 2012 and KITTI 2015, we use multi-view
+extensions of the two datasets for unsupervised pre-training,
+similar to [37, 46]. During training, we exclude the image
+pairs with ground truth ﬂow and their neighboring frames
+(frame number 9-12) to avoid the mixture of training and
+testing data.
+
+64576
+
+Reference Image (training)
+
+Ground Truth
+
+W/O Occlusion
+
+W/O Self-Supervision
+
+Rectangle
+
+Two-frame Superpixel
+
+Superpixel
+
+Finetune
+
+Reference Image (testing)
+
+Target image
+
+W/O Occlusion
+
+W/O Self-Supervision
+
+Rectangle
+
+Two-frame Superpixel
+
+Superpixel
+
+Finetune
+
+Figure 7. Qualitative comparison of our model under different settings on KITTI 2015 training and testing dataset. Occlusion handling,
+Figure 6. Qualitative comparison of our model under different settings on KITTI 2015 training and testing dataset. Occlusion handling,
+multi-frame formulation and self-supervision consistently improve the performance.
+
+We rescale the pixel value from [0, 255] to [0, 1] for
+unsupervised training, while normalizing each channel to
+be standard normal distribution for supervised ﬁne-tuning.
+This is because normalizing image as input is more robust
+for luminance changing, which is especially helpful for op-
+tical ﬂow estimation. For unsupervised training, we apply
+Census Transform [50] to images, which has been proved
+robust for optical ﬂow estimation [12, 29].
+
+Training procedure. We train our model with the Adam
+optimizer [23] and set batch size to be 4 for all experiments.
+For unsupervised training, we set the initial learning rate to
+be 10−4, decay it by half every 50k iterations, and use ran-
+dom cropping, random ﬂipping, random channel swapping
+during data augmentation. For supervised ﬁne-tuning, we
+employ similar data augmentation and learning rate sched-
+ule as [10, 15].
+
+For unsupervised pre-training, we ﬁrst train our NOC-
+Model with photometric loss for 200k iterations. Then, we
+add our occlusion regularization and train for another 500k
+iterations. Finally, we initialize the OCC-Model with the
+trained weights of NOC-Model and train it with Lp +Lo for
+500k iterations.Since training two models simultaneously
+will cost more memory and training time, we just gener-
+ate the ﬂow and occlusion maps using the NOC-Model in
+advance and use them as annotations (just like KITTI with
+sparse annotations).
+
+For supervised ﬁne-tuning, we use the pre-trained OCC-
+Model as initialization, and train the model using our su-
+pervised loss Ls with 500k iterations for KITTI and 1, 000k
+iterations for Sintel. Note we do not require pre-training
+our model on any labeled synthetic dataset, hence we do
+not have to follow the speciﬁc training schedule (Fly-
+ingChairs [10]→ FlyingThings3D [28]) as [15, 14, 43].
+
+Evaluation Metrics. We consider two widely-used metrics
+to evaluate optical ﬂow estimation: average endpoint error
+(EPE), percentage of erroneous pixels (Fl). EPE is the rank-
+
+ing metric on the Sintel benchmark, and Fl is the ranking
+metric on KITTI benchmarks.
+
+4.2. Main Results
+
+As shown in Table 1, we achieve state-of-the-art results
+for both unsupervised and supervised optical ﬂow learn-
+ing on all datasets under all evaluation metrics. Figure 4
+shows sample results from Sintel and KITTI. Our method
+estimates both accurate optical ﬂow and occlusion maps.
+
+Unsupervised Learning. Our method achieves the high-
+est accuracy for unsupervised learning methods on leading
+benchmarks. On the Sintel ﬁnal benchmark, we reduce the
+previous best EPE from 7.40 [26] to 6.57, with 11.2% rel-
+ative improvements. This is even better than several fully
+supervised methods including FlowNetS, FlowNetC [10],
+and SpyNet [35].
+
+On the KITTI datasets, the improvement is more signif-
+icant. For the training dataset, we achieve EPE=1.69 with
+28.1% relative improvement on KITTI 2012 and EPE=4.84
+with 15.3% relative improvement on KITTI 2015 com-
+pared with previous best unsupervised method DDFlow. On
+KITTI 2012 testing set, we achieve Fl-all=7.68%, which
+is better than state-of-the-art supervised methods includ-
+ing FlowNet2 [15], PWC-Net [43], ProFlow [27], and
+MFF [36]. On KITTI 2015 testing benchmark, we achieve
+Fl-all 14.19%, better than all unsupervised methods. Our
+unsupervised results also outperform some fully supervised
+methods including DCFlow [49] and ProFlow [27].
+
+Supervised Fine-tuning. We further ﬁne-tune our unsuper-
+vised model with the ground truth ﬂow. We achieve state-
+of-the-art results on all three datasets, with Fl-all=6.19% on
+KITTI 2012 and Fl-all=8.42% on KITTI 2015. Most im-
+portantly, our method yields EPE=4.26 on the Sintel ﬁnal
+dataset, achieving the highest accuracy on the Sintel bench-
+mark among all submitted methods. All these show that
+our method reduces the reliance of pre-training with syn-
+
+74577
+
+Occlusion Multiple
+
+Self-Supervision
+
+Self-Supervision
+
+Sintel Clean
+
+Sintel Final
+
+KITTI 2012
+
+KITTI 2015
+
+Handling
+
+Frame
+
+Rectangle
+
+Superpixel
+
+ALL
+
+NOC
+
+OCC
+
+ALL
+
+NOC
+
+OCC
+
+ALL NOC OCC
+
+ALL NOC OCC
+
+✗
+
+✗
+
+✓
+
+✓
+
+✓
+
+✓
+
+✓
+
+✗
+
+✓
+
+✗
+
+✓
+
+✗
+
+✓
+
+✓
+
+✗
+
+✗
+
+✗
+
+✗
+
+✗
+
+✓
+
+✗
+
+✗
+
+✗
+
+✗
+
+✗
+
+✓
+
+✗
+
+✓
+
+(3.85)
+(3.67)
+(3.35)
+(3.20)
+(2.96)
+(2.91)
+(2.88)
+
+(1.53)
+(1.54)
+(1.37)
+(1.35)
+(1.33)
+(1.37)
+(1.30)
+
+(33.48)
+(30.80)
+(28.70)
+(26.63)
+(23.78)
+(22.58)
+(22.06)
+
+(5.28)
+(4.98)
+(4.50)
+(4.33)
+(4.06)
+(3.99)
+(3.87)
+
+(2.81)
+(2.68)
+(2.37)
+(2.32)
+(2.25)
+(2.27)
+(2.24)
+
+(36.83)
+(34.42)
+(31.81)
+(29.80)
+(27.19)
+(26.01)
+(25.42)
+
+7.05
+6.52
+4.96
+3.32
+1.97
+1.78
+1.69
+
+1.31
+1.11
+0.99
+0.94
+0.92
+0.96
+0.91
+
+45.03
+42.44
+31.29
+19.11
+8.96
+7.47
+6.95
+
+13.51
+12.13
+8.99
+7.66
+5.85
+5.01
+4.84
+
+3.71
+3.47
+3.20
+2.47
+2.96
+2.55
+2.40
+
+75.51
+66.91
+45.68
+40.99
+24.17
+21.86
+19.68
+
+Table 2. Ablation study. We report EPE of our unsupervised results under different settings over all pixels (ALL), non-occluded pixels
+(NOC) and occluded pixels (OCC). Note that we employ Census Transform when computing photometric loss by default. Without Census
+Transform, the performance will drop.
+
+Unsupervised Pre-training
+
+Sintel Clean
+
+Sintel Final KITTI 2012 KITTI 2015
+
+Without
+
+With
+
+1.97
+1.50
+
+2.68
+2.41
+
+3.93
+1.55
+
+3.10
+1.86
+
+Table 3. Ablation study. We report EPE of supervised ﬁne-tuning
+results on our validation datasets with and without unsupervised
+pre-training.
+
+thetic datasets and we do not have to follow speciﬁc training
+schedules across different datasets anymore.
+
+4.3. Ablation Study
+
+To demonstrate the usefulness of individual technical
+steps, we conduct a rigorous ablation study and show the
+quantitative comparison in Table 2. Figure 5 and Figure 6
+show the qualitative comparison under different settings,
+where “W/O Occlusion” means occlusion handling is not
+considered, “W/O Self-Supervision” means occlusion han-
+dling is considered but self-supervision is not employed,
+“Rectangle” and “Superpixel” represent self-supervision
+is employed with rectangle and superpixel noise injec-
+tion respectively.
+“Two-Frame Superpixel” means self-
+supervision is conducted with only two frames as input.
+
+Two-Frame vs Multi-Frame. Comparing row 1 and row
+2, row 3 and row 4 row 5 and row 7 in Table 2, we can see
+that using multiple frames as input can indeed improve the
+performance, especially for occluded pixels. It is because
+multiple images provide more information, especially for
+those pixels occluded in one direction but non-occluded in
+the reverse direction.
+
+Occlusion Handling. Comparing the row 1 and row 3, row
+2 and row 4 in Table 2, we can see that occlusion handling
+can improve optical ﬂow estimation performance over all
+pixels on all datasets. This is due to the fact that brightness
+constancy assumption does not hold for occluded pixels.
+
+Self-Supervision. We employ two strategies for our occlu-
+sion hallucination: rectangle and superpixel. Both strate-
+gies improve the performance signiﬁcantly, especially for
+occluded pixels. Take superpixel setting as an example,
+EPE-OCC decrease from 26.63 to 22.06 on Sintel Clean,
+from 29.80 to 25.42 on Sintel Final, from 19.11 to 6.95
+on KITTI 2012, and from 40.99 to 19.68 on KITTI 2015.
+
+Such a big improvement demonstrates the effectiveness of
+our self-supervision strategy.
+
+Comparing superpixel noise injection with rectangle
+noise injection, superpixel setting has several advantages.
+First, the shape of the superpixel is random and edges are
+more correlated to motion boundaries. Second, the pixels in
+the same superpixel usually have similar motion patterns.
+As a result, the superpixel setting achieves slightly better
+performance.
+
+Self-Supervised Pre-training. Table 3 compares super-
+vised results with and without our self-supervised pre-
+training on the validation sets. If we do not employ self-
+supervised pre-training and directly train the model using
+only the ground truth, the model fails to converge well due
+to insufﬁcient training data. However, after utilizing our
+self-supervised pre-training, it converges very quickly and
+achieves much better results.
+
+5. Conclusion
+
+We have presented a self-supervised approach to learn-
+ing accurate optical ﬂow estimation. Our method injects
+noise into superpixels to create occlusions, and let one
+model guide the another to learn optical ﬂow for occluded
+pixels. Our simple CNN effectively aggregates temporal
+information from multiple frames to improve ﬂow predic-
+tion. Extensive experiments show our method signiﬁcantly
+outperforms all existing unsupervised optical ﬂow learning
+methods. After ﬁne-tuning with our unsupervised model,
+our method achieves state-of-the-art ﬂow estimation accu-
+racy on all leading benchmarks. Our results demonstrate it
+is possible to completely reduce the reliance of pre-training
+on synthetic labeled datasets, and achieve superior perfor-
+mance by self-supervised pre-training on unlabeled data.
+
+6. Acknowledgment
+
+This work is supported by the Research Grants Council
+of the Hong Kong Special Administrative Region, China
+(No. CUHK 14208815 and No. CUHK 14210717 of the
+General Research Fund). We thank anonymous reviewers
+for their constructive suggestions.
+
+84578
+
+References
+
+[1] Radhakrishna Achanta, Appu Shaji, Kevin Smith, Aurelien
+Lucchi, Pascal Fua, Sabine S¨usstrunk, et al. Slic superpix-
+els compared to state-of-the-art superpixel methods.
+IEEE
+transactions on pattern analysis and machine intelligence,
+34(11):2274–2282, 2012.
+
+[2] Christian Bailer, Kiran Varanasi, and Didier Stricker. Cnn-
+based patch matching for optical ﬂow with thresholded hinge
+embedding loss. In CVPR, 2017.
+
+[3] Michael J Black and Padmanabhan Anandan. Robust dy-
+
+namic motion estimation over time. In CVPR, 1991.
+
+[4] Nicolas Bonneel, James Tompkin, Kalyan Sunkavalli, De-
+qing Sun, Sylvain Paris, and Hanspeter Pﬁster. Blind video
+temporal consistency. ACM Trans. Graph., 34(6):196:1–
+196:9, Oct. 2015.
+
+[5] Thomas Brox, Andr´es Bruhn, Nils Papenberg, and Joachim
+Weickert. High accuracy optical ﬂow estimation based on a
+theory for warping. In ECCV, 2004.
+
+[6] Thomas Brox and Jitendra Malik. Large displacement opti-
+cal ﬂow: descriptor matching in variational motion estima-
+tion. TPAMI, 33(3):500–513, 2011.
+
+[7] Daniel J Butler, Jonas Wulff, Garrett B Stanley, and
+Michael J Black. A naturalistic open source movie for opti-
+cal ﬂow evaluation. In ECCV, 2012.
+
+[8] Abhishek Kumar Chauhan and Prashant Krishan. Moving
+object tracking using gaussian mixture model and optical
+ﬂow. International Journal of Advanced Research in Com-
+puter Science and Software Engineering, 3(4), 2013.
+
+[9] Carl Doersch and Andrew Zisserman. Multi-task self-
+
+supervised visual learning. In ICCV, 2017.
+
+[10] Alexey Dosovitskiy, Philipp Fischer, Eddy Ilg, Philip
+Hausser, Caner Hazirbas, Vladimir Golkov, Patrick Van
+Der Smagt, Daniel Cremers, and Thomas Brox. Flownet:
+Learning optical ﬂow with convolutional networks. In ICCV,
+2015.
+
+[11] Andreas Geiger, Philip Lenz, and Raquel Urtasun. Are we
+ready for autonomous driving? the kitti vision benchmark
+suite. In CVPR, 2012.
+
+[12] David Hafner, Oliver Demetz, and Joachim Weickert. Why
+is the census transform good for robust optic ﬂow computa-
+tion? In International Conference on Scale Space and Vari-
+ational Methods in Computer Vision, 2013.
+
+[13] Berthold KP Horn and Brian G Schunck. Determining opti-
+
+cal ﬂow. Artiﬁcial intelligence, 17(1-3):185–203, 1981.
+
+[14] Tak-Wai Hui, Xiaoou Tang, and Chen Change Loy. Lite-
+ﬂownet: A lightweight convolutional neural network for op-
+tical ﬂow estimation. In CVPR, 2018.
+
+[15] Eddy Ilg, Nikolaus Mayer, Tonmoy Saikia, Margret Keuper,
+Alexey Dosovitskiy, and Thomas Brox. Flownet 2.0: Evolu-
+tion of optical ﬂow estimation with deep networks. In CVPR,
+2017.
+
+[16] Michal Irani. Multi-frame optical ﬂow estimation using sub-
+
+space constraints. In ICCV, 1999.
+
+[17] Max Jaderberg, Karen Simonyan, Andrew Zisserman, et al.
+
+Spatial transformer networks. In NIPS, 2015.
+
+[18] Joel Janai, Fatma G¨uney, Anurag Ranjan, Michael J. Black,
+and Andreas Geiger. Unsupervised learning of multi-frame
+optical ﬂow with occlusions. In ECCV, 2018.
+
+[19] Joel Janai, Fatma G¨uney, Jonas Wulff, Michael J Black, and
+Andreas Geiger. Slow ﬂow: Exploiting high-speed cam-
+eras for accurate and diverse optical ﬂow reference data. In
+CVPR, 2017.
+
+[20] J Yu Jason, Adam W Harley, and Konstantinos G Derpa-
+nis. Back to basics: Unsupervised learning of optical ﬂow
+via brightness constancy and motion smoothness. In ECCV,
+2016.
+
+[21] Longlong Jing and Yingli Tian. Self-supervised visual fea-
+ture learning with deep neural networks: A survey. arXiv
+preprint arXiv:1902.06162, 2019.
+
+[22] Ryan Kennedy and Camillo J Taylor. Optical ﬂow with geo-
+metric occlusion estimation and fusion of multiple frames. In
+International Workshop on Energy Minimization Methods in
+Computer Vision and Pattern Recognition, pages 364–377.
+Springer, 2015.
+
+[23] Diederik P Kingma and Jimmy Ba. Adam: A method for
+arXiv preprint arXiv:1412.6980,
+
+stochastic optimization.
+2014.
+
+[24] Gustav
+
+Larsson, Michael Maire,
+
+and Gregory
+Shakhnarovich. Colorization as a proxy task for visual
+understanding. In CVPR, 2017.
+
+[25] Tsung-Yi Lin, Michael Maire, Serge Belongie, James Hays,
+Pietro Perona, Deva Ramanan, Piotr Doll´ar, and C Lawrence
+Zitnick. Microsoft coco: Common objects in context.
+In
+European conference on computer vision, pages 740–755.
+Springer, 2014.
+
+[26] Pengpeng Liu, Irwin King, Michael R. Lyu, and Jia Xu.
+Ddﬂow: Learning optical ﬂow with unlabeled data distilla-
+tion. In AAAI, 2019.
+
+[27] D. Maurer and A. Bruhn. Proﬂow: Learning to predict opti-
+
+cal ﬂow. In BMVC, 2018.
+
+[28] Nikolaus Mayer, Eddy Ilg, Philip Hausser, Philipp Fischer,
+Daniel Cremers, Alexey Dosovitskiy, and Thomas Brox. A
+large dataset to train convolutional networks for disparity,
+optical ﬂow, and scene ﬂow estimation. In CVPR, 2016.
+
+[29] Simon Meister, Junhwa Hur, and Stefan Roth. UnFlow: Un-
+supervised learning of optical ﬂow with a bidirectional cen-
+sus loss. In AAAI, New Orleans, Louisiana, 2018.
+
+[30] Moritz Menze and Andreas Geiger. Object scene ﬂow for
+
+autonomous vehicles. In CVPR, 2015.
+
+[31] Michal Neoral, Jan ochman, and Ji Matas. Continual occlu-
+
+sions and optical ﬂow estimation. In ACCV, 2018.
+
+[32] Mehdi Noroozi and Paolo Favaro. Unsupervised learning of
+visual representations by solving jigsaw puzzles. In ECCV,
+2016.
+
+[33] Deepak Pathak, Ross Girshick, Piotr Doll´ar, Trevor Darrell,
+and Bharath Hariharan. Learning features by watching ob-
+jects move. In CVPR, 2017.
+
+[34] Deepak Pathak, Philipp Krahenbuhl, Jeff Donahue, Trevor
+Darrell, and Alexei A Efros. Context encoders: Feature
+learning by inpainting. In CVPR, 2016.
+
+[35] Anurag Ranjan and Michael J Black. Optical ﬂow estimation
+
+using a spatial pyramid network. In CVPR, 2017.
+
+94579
+
+[36] Zhile Ren, Orazio Gallo, Deqing Sun, Ming-Hsuan Yang,
+Erik B. Sudderth, and Jan Kautz. A fusion approach for
+multi-frame optical ﬂow estimation.
+In IEEE Winter Con-
+ference on Applications of Computer Vision, 2019.
+
+[37] Zhe Ren, Junchi Yan, Bingbing Ni, Bin Liu, Xiaokang Yang,
+and Hongyuan Zha. Unsupervised deep learning for optical
+ﬂow estimation. In AAAI, 2017.
+
+[38] Jerome Revaud, Philippe Weinzaepfel, Zaid Harchaoui, and
+Cordelia Schmid. Epicﬂow: Edge-preserving interpolation
+of correspondences for optical ﬂow. In CVPR, 2015.
+
+[39] Karen Simonyan and Andrew Zisserman. Two-stream con-
+In
+
+volutional networks for action recognition in videos.
+NIPS, 2014.
+
+[40] Chen Sun, Abhinav Shrivastava, Saurabh Singh, and Abhi-
+nav Gupta. Revisiting unreasonable effectiveness of data in
+deep learning era. In ICCV, 2017.
+
+[41] Deqing Sun, Erik B Sudderth, and Michael J Black. Layered
+image motion with explicit occlusions, temporal consistency,
+and depth ordering. In NIPS, 2010.
+
+[42] Deqing Sun, Xiaodong Yang, Ming-Yu Liu, and Jan
+Kautz. Models matter, so does training: An empirical
+study of cnns for optical ﬂow estimation. arXiv preprint
+arXiv:1809.05571, 2018.
+
+[43] Deqing Sun, Xiaodong Yang, Ming-Yu Liu, and Jan Kautz.
+Pwc-net: Cnns for optical ﬂow using pyramid, warping, and
+cost volume. In CVPR, 2018.
+
+[44] Narayanan Sundaram, Thomas Brox, and Kurt Keutzer.
+Dense point trajectories by gpu-accelerated large displace-
+ment optical ﬂow. In ECCV, 2010.
+
+[45] Sebastian Volz, Andres Bruhn, Levi Valgaerts, and Henning
+Zimmer. Modeling temporal coherence for optical ﬂow. In
+ICCV, 2011.
+
+[46] Yang Wang, Yi Yang, Zhenheng Yang, Liang Zhao, and Wei
+Xu. Occlusion aware unsupervised learning of optical ﬂow.
+In CVPR, 2018.
+
+[47] Philippe Weinzaepfel, Jerome Revaud, Zaid Harchaoui, and
+Cordelia Schmid. Deepﬂow: Large displacement optical
+ﬂow with deep matching. In ICCV, 2013.
+
+[48] Jonas Wulff, Laura Sevilla-Lara, and Michael J Black. Opti-
+
+cal ﬂow in mostly rigid scenes. In CVPR, 2017.
+
+[49] Jia Xu, Ren´e Ranftl, and Vladlen Koltun. Accurate Optical
+
+Flow via Direct Cost Volume Processing. In CVPR, 2017.
+
+[50] Ramin Zabih and John Woodﬁll. Non-parametric local trans-
+forms for computing visual correspondence. In ECCV, 1994.
+
+104580
+
+

@@ -1,0 +1,1305 @@
+Neural RGB→D Sensing: Depth and Uncertainty from a Video Camera
+
+Chao Liu1
+
+2 ∗
+
+,
+
+3 ∗
+
+,
+
+Jinwei Gu1
+1NVIDIA
+
+Kihwan Kim1
+
+2Carnegie Mellon University
+
+Srinivasa G. Narasimhan2
+3SenseTime
+
+Jan Kautz1
+
+Abstract
+
+Depth sensing is crucial for 3D reconstruction and scene
+understanding. Active depth sensors provide dense metric
+measurements, but often suffer from limitations such as re-
+stricted operating ranges, low spatial resolution, sensor in-
+terference, and high power consumption. In this paper, we
+propose a deep learning (DL) method to estimate per-pixel
+depth and its uncertainty continuously from a monocular
+video stream, with the goal of effectively turning an RGB
+camera into an RGB-D camera. Unlike prior DL-based
+methods, we estimate a depth probability distribution for
+each pixel rather than a single depth value, leading to an
+estimate of a 3D depth probability volume for each input
+frame. These depth probability volumes are accumulated
+over time under a Bayesian ﬁltering framework as more in-
+coming frames are processed sequentially, which effectively
+reduces depth uncertainty and improves accuracy, robust-
+ness, and temporal stability. Compared to prior work, the
+proposed approach achieves more accurate and stable re-
+sults, and generalizes better to new datasets. Experimental
+results also show the output of our approach can be directly
+fed into classical RGB-D based 3D scanning methods for
+3D scene reconstruction.
+
+1. Introduction
+
+Depth sensing is crucial for 3D reconstruction [31, 32,
+52] and scene understanding [43, 18, 34]. Active depth
+sensors (e.g., time of ﬂight cameras [19, 35], LiDAR [7])
+measure dense metric depth, but often have limited operat-
+ing range (e.g., indoor) and spatial resolution [5], consume
+more power, and suffer from multi-path reﬂection and inter-
+ference between sensors [29]. In contrast, estimating depth
+directly from image(s) solves these issues, but faces other
+long-standing challenges such as scale ambiguity and drift
+for monocular methods [37], as well as the correspondence
+problem and high computational cost for stereo [47] and
+multi-view methods [41].
+
+Inspired by recent success of deep learning in 3D vi-
+sion [13, 56, 50, 17, 20, 51, 53, 6, 55, 4, 46], in this paper,
+we propose a DL-based method to estimate depth and its
+
+∗The authors contributed on this work when they were at NVIDIA.
+
+Figure 1. We proposed a DL-based method to estimate depth and
+its uncertainty (or, conﬁdence) continuously for a monocular video
+stream, with the goal of turning an RGB camera into an RGB-D
+camera. Its output can be directly fed into classical RGB-D based
+3D scanning methods [31, 32] for 3D reconstruction.
+
+uncertainty continuously from a monocular video stream,
+with the goal of effectively turning an RGB camera into an
+RGB-D camera. We have two key ideas:
+
+1. Unlike prior work, for each pixel, we estimate a
+depth probability distribution rather than a single
+depth value, leading to an estimate of a Depth Prob-
+ability Volume (DPV) for each input frame. As
+shown in Fig. 1, the DPV provides both a Maximum-
+Likelihood-Estimate (MLE) of the depth map, as well
+as the corresponding per-pixel uncertainty measure.
+
+2. These DPVs across different frames are accumulated
+over time, as more incoming frames are processed se-
+quentially. The accumulation step, originated from the
+Bayesian ﬁltering theory and implemented as a learn-
+able deep network, effectively reduces depth uncer-
+tainty and improves accuracy, robustness, and tempo-
+ral stability over time, as shown later in Sec. 4.
+
+We argue that all DL-based depth estimation methods
+should predict not depth values but depth distributions,
+and should integrate such statistical distributions over time
+(e.g., via Bayesian ﬁltering). This is because dense depth
+estimation from image(s) – especially for single-view meth-
+ods – inherently has a lot of uncertainty, due to factors such
+
+10986
+
+Input frameEstimated depthConﬁdence 3D Recon. using 30 views01as lack of texture, specular/transparent material, occlusion,
+and scale drift. While some recent work started focusing on
+uncertainty estimation [15, 23, 24, 21] for certain computer
+vision tasks, to our knowledge, we are the ﬁrst to predict a
+depth probability volume from images and integrate it over
+time in a statistical framework.
+
+We evaluate our method extensively on multiple datasets
+and compare with recent state-of-the-art, DL-based, depth
+estimation methods [13, 17, 50]. We also perform the so-
+called “cross-dataset” evaluation task, which tests models
+trained on a different dataset without ﬁne-tuning. We be-
+lieve such cross-dataset tasks are essential to evaluate the
+robustness and generalization ability [1]. Experimental re-
+sults show that, with reasonably good camera pose estima-
+tion, our method outperforms these prior methods on depth
+estimation with better accuracy, robustness, and temporal
+stability. Moreover, as shown in Fig. 1, the output of the
+proposed method can be directly fed into RGB-D based 3D
+scanning methods [31, 32] for 3D scene reconstruction.
+
+2. Related Work
+
+Depth sensing from active sensors Active depth sen-
+sors, such as depth cameras [19, 35] or LiDAR sen-
+sors [7] provide dense metric depth measurements as well
+as sensor-speciﬁc conﬁdence measure [36]. Despite of their
+wide usage [31, 52, 18, 34], they have several inherent
+drawbacks[33, 49, 29, 5], such as limited operating range,
+low spatial resolution, sensor interference, and high power
+consumption. Our goal in this paper is to mimic a RGB-D
+sensor with a monocular RGB camera, which continuously
+predicts depth (and its uncertainty) from a video stream.
+
+Depth estimation from images Depth estimation directly
+from images has been a core problem in computer vi-
+sion [38, 41]. Classical single view methods [9, 37] often
+make strong assumptions on scene structures. Stereo and
+multi-view methods [41] rely on triangulation and suffer
+from ﬁnding correspondences for textureless regions, trans-
+parent/specular materials, and occlusion. Moreover, due to
+global bundle adjustment, these methods are often compu-
+tationally expensive for real-time applications. For depth
+estimation from a monocular video, there is also scale ambi-
+guity and drifting [30]. Because of these challenges, many
+computer vision systems [39, 30] use RGB images mainly
+for camera pose estimation but rarely for dense 3D recon-
+struction [40]. Nevertheless, depth sensing from images has
+great potentials, since it addresses all the above drawbacks
+of active depth sensors. In this paper, we take a step in this
+direction using a learning-based method.
+
+Learning-based depth estimation Recently researchers
+have shown encouraging results for depth sensing directly
+from images(s), including single-view methods [56, 13, 17],
+video-based methods [28, 54, 51], depth and motion from
+
+two views [50, 6], and multi-view stereo [55, 20, 53]. A
+few work also incorporated these DL-based depth sensing
+methods into visual SLAM systems [4, 46]. Despite of
+the promising performance, however, these DL-based meth-
+ods are still far from real-world applications, since their ro-
+bustness and generalization ability is yet to be thoroughly
+tested [1].
+In fact, as shown in Sec. 4, we found many
+state-of-the-art methods degrade signiﬁcantly even for sim-
+ple cross-dataset tasks. This gives rise to an increasing de-
+mand for a systematic study of uncertainty and Bayesian
+deep learning for depth sensing, as performed in our paper.
+
+Uncertainty and Bayesian deep learning Uncertainty
+and Bayesian modeling have been long studied in last few
+decades, with various deﬁnitions ranging from the vari-
+ance of posterior distributions for low-level vision [45] and
+motion analysis [25] to variability of sensor input mod-
+els [22]. Recently, uncertainty [15, 23] for Bayesian deep
+learning were introduced for a variety of computer vision
+tasks [24, 21, 8]. In our work, the uncertainty is deﬁned as
+the posterior probability of depth, i.e., the DPV estimated
+from a local window of several consecutive frames. Thus,
+our network estimates the “measurement uncertainty” [23]
+rather than the “model uncertainty”. We also learn an ad-
+ditional network module to integrate this depth probability
+distribution over time in a Bayesian ﬁltering manner, in or-
+der to improve the accuracy and robustness for depth esti-
+mation from a video stream.
+
+3. Our Approach
+
+Fig. 2 shows an overview of our proposed method for
+depth sensing from an input video stream, which consists of
+three parts. The ﬁrst part (Sec. 3.1) is the D-Net, which es-
+timates the Depth Probability Volume (DPV) for each input
+frame. The second part (Sec. 3.2) is the K-Net, which helps
+to integrate the DPVs over time. The third part (Sec. 3.3) is
+the reﬁnement R-Net, which improves the spatial resolution
+of DPVs with the guidance from input images.
+
+Speciﬁcally, we denote the depth probability volume
+(DPV) as p(d; u, v), which represents the probability
+of pixel (u, v) having a depth value d, where d ∈
+[dmin, dmax]. Due to perspective projection, the DPV is
+deﬁned on the 3D view frustum attached to the camera, as
+shown in Fig. 3(a). dmin and dmax are the near and far
+planes of the 3D frustum, which is discretized into N = 64
+planes uniformly over the inverse of depth (i.e., disparity).
+The DPV contains the complete statistical distribution of
+depth for a given scene.
+In this paper, we directly use
+the non-parametric volume to represent DPV. Parametric
+models, such as Gaussian Mixture Model [3], can be also
+be used. Given the DPV, we can compute the Maximum-
+
+10987
+
+Estimate Depth Probability (Sec. 3.1)
+
+Integrate Depth Probability Over Time (Sec. 3.2)
+
+Refine Depth Probability(Sec. 3.3)
+
+!"
+
+…
+
+D-Net
+
+Depth
+
+Confidence
+
+Predicted DPV
+
+#(%"|'):"+) )
+
+Shared
+
+K-Net
+
+R-Net
+
+Depth Confidence
+
+Depth
+
+Confidence
+
+Softmax
+
+-
+
++
+
+Measured DPV
+
+#(%"|'" )
+
+Warp
+
+Residual
+
+Residual Gain
+
+Updated DPV
+
+#(%"|'):" )
+
+Refined DPV
+
+…
+
+Skip connection from image features to R-Net
+
+Figure 2. Overview of the proposed network for depth estimation with uncertainty from a video. Our method takes the frames in a local
+time window in the video as input and outputs a Depth Probability Volume (DPV) that is updated over time. The update procedure is in
+a Bayesian ﬁlter fashion: we ﬁrst take the difference between the local DPV estimated using the D-Net (Sec. 3.1) and the predicted DPV
+from previous frames to get the residual; then the residual is modiﬁed by the K-Net (Sec. 3.2) and added back to the predicted DPV; at last
+the DPV is reﬁned and upsampled by the R-Net (Sec. 3.3), which can be used to compute the depth map and its conﬁdence measure.
+
+Figure 3. Representation and update for DPV. (a) The DPV is de-
+ﬁned over a 3D frustrum deﬁned by the pinhole camera model .
+(b) The DPV gets updated over time as the camera moves.
+
+Likelihood Estimates (MLE) for depth and its conﬁdence:
+
+Depth :
+
+ˆd(u, v) =
+
+d=dmax
+
+X
+
+d=dmin
+
+p(d; (u, v)) · d,
+
+(1)
+
+Conﬁdence :
+
+ˆC(u, v) = p( ˆd, (u, v)).
+
+(2)
+
+To make notations more concise, we will omit (u, v) and
+use p(d) for DPVs in the rest of the paper.
+
+When processing a video stream, the DPV can be treated
+as a hidden state of the system. As the camera moves,
+as shown in Fig. 3(b), the DPV p(d) is being updated as
+new observations arrive, especially for the overlapping vol-
+umes. Meanwhile, if camera motion is known, we can eas-
+ily predict the next state p(d) from the current state. This
+predict-update iteration naturally implies a Bayesian ﬁlter-
+ing scheme to update the DPV over time for better accuracy.
+
+3.1. D Net: Estimating DPV
+
+For each frame It, we use a CNN, named D-Net, to esti-
+mate the conditional DPV, p(dt|It), using It and its tempo-
+rally neighboring frames. In this paper, we consider a local
+time window of ﬁve frames Nt = [t − 2∆t, t − ∆t, t, t +
+∆t, t + 2∆t], and we set ∆t = 5 for all our testing videos
+(25fps/30fps). For a given depth candidate d, we can com-
+pute a cost map by warping all the neighboring frames into
+
+the current frame It and computing their differences. Thus,
+for all depth candidates, we can compute a cost volume,
+which produces the DPV after a softmax layer:
+
+L(dt|It) = X
+
+||f (It) − warp(f (Ik); dt, δTkt)||,
+
+k∈Nt,k6=t
+
+p(dt|It) = softmax(L(dt|It)),
+
+(3)
+
+where f (·) is a feature extractor, δTkt is the relative cam-
+era pose from frame Ik to frame It, warp(·) is an operator
+that warps the image features from frame Ik to the refer-
+ence frame It, which is implemented as 2D grid sampling.
+In this paper, without loss of generality, we use the feature
+extractor f (·) from PSM-Net [6], which outputs a feature
+map of 1/4 size of the input image. Later in Sec. 3.3, we
+learn a reﬁnement R-Net to upsample the DPV back to the
+original size of the input image.
+
+Figure 4 shows an example of a depth map ˆd(u, v) and
+its conﬁdence map ˆC(u, v) (blue means low conﬁdence) de-
+rived from a Depth Probability Volume (DPV) from the in-
+put image. The bottom plot shows the depth probability
+distributions p(d; u, v) for the three selected points, respec-
+tively. The red and green points have sharp peaks, which
+indicates high conﬁdence in their depth values. The blue
+point is in the highlight region, and thus it has a ﬂat depth
+probability distribution and a low conﬁdence for its depth.
+
+3.2. K Net: Integrating DPV over Time
+
+When processing a video stream, our goal is to integrate
+the local estimation of DPVs over time to reduce uncer-
+tainty. As mentioned earlier, this integration can be natu-
+rally implemented as Bayesian ﬁltering. Let us deﬁne dt
+as the hidden state, which is the depth (in camera coordi-
+nates) at frame It. The “belief” volume p(dt|I1:t) is the
+conditional distribution of the state giving all the previous
+frames. A simple Bayesian ﬁltering can be implemented in
+
+10988
+
+(b) Update DPVCamera trajectory(a) Depth Probability Volume (DPV)tt+1Figure 4. An example of a depth map ˆd(u, v) and its conﬁdence
+map ˆC(u, v) (blue means low conﬁdence) derived from a Depth
+Probability Volume (DPV). The bottom plot shows the depth prob-
+ability distributions p(d; u, v) for the three selected points, respec-
+tively. The red and green points have sharp peaks, which indicates
+high conﬁdence in their depth values. The blue point is in the
+highlight region, which results in a ﬂat depth probability distribu-
+tion and a low conﬁdence for its depth value.
+
+two iterative steps:
+
+Predict : p(dt|I1:t) → p(dt+1|I1:t),
+Update : p(dt+1|I1:t) → p(dt+1|I1:t+1),
+
+(4)
+
+where the prediction step is to warp the current DPV from
+the camera coordinate at t to the camera coordinate at t + 1:
+
+p(dt+1|I1:t) = warp(p(dt|I1:t), δTt,t+1),
+
+(5)
+
+where δTt,t+1 is the relative camera pose from time t to time
+t + 1, and warp(·) here is a warping operator implemented
+as 3D grid sampling. At time t + 1, we can compute the
+local DPV p(dt+1|It+1) from the new measurement It+1
+using the D-Net. This local estimate is thus used to update
+the hidden state, i.e., the “belief” volume,
+
+p(dt+1|I1:t+1) = p(dt+1|I1:t) · p(dt+1|It+1).
+
+(6)
+
+dmin
+
+Note that we always normalize the DPV in the above equa-
+tions and ensure R dmax
+p(d) = 1. Fig. 5 shows an example.
+As shown in the second row, with the above Bayesian ﬁlter-
+ing (labeled as ”no damping”), the estimated depth map is
+less noisy, especially in the regions of the wall and the ﬂoor.
+However, one problem with directly applying Bayesian
+ﬁltering is it integrates both correct and incorrect informa-
+tion in the prediction step. For example, when there are
+occlusions or disocclusions, the depth values near the oc-
+clusion boundaries change abruptly. Applying Bayesian
+ﬁltering directly will propagate wrong information to the
+next frames for those regions, as highlighted in the red box
+in Fig. 5. One straightforward solution is to reduce the
+weight of the prediction in order to prevent incorrect infor-
+mation being integrated over time. Speciﬁcally, by deﬁning
+E(d) = − log p(d), Eq. 6 can be re-written as
+
+Figure 5. Comparison between different methods for integrating
+DPV over time. Part of the wall is occluded by the chair at frame
+t and disoccluded in frame t + 1. No ﬁltering: not integrating
+the DPV over time. No damping: integrating DPV directly with
+Bayesian ﬁltering. Global damping: down-weighting the pre-
+dicted DPV for all voxels using Eq. 7 with λ = 0.8. Adaptive
+damping: down-weighting the predicted DPV adaptively with the
+K-Net (Sec. 3.2). Using the K-net, we get the best depth estima-
+tion for regions with/without disocclusion.
+
+where the ﬁrst term is the prediction and the second term is
+the measurement. To reduce the weight of the prediction,
+we multiply a weight λ ∈ [0, 1] with the ﬁrst term,
+
+E(dt+1|I1:t+1) = λ · E(dt+1|I1:t) + E(dt+1|It+1).
+
+(7)
+
+We call this scheme “global damping”. As shown in Fig. 5,
+global damping helps to reduce the error in the disoc-
+cluded regions. However, global damping may also prevent
+some correct depth information to be integrated to the next
+frames, since it reduces the weights equally for all voxels
+in the DPV. Therefore, we propose an “adaptive damping”
+scheme to update the DPV:
+
+E(dt+1|I1:t+1) = E(dt+1|I1:t) + g(∆Et+1, It+1),
+
+(8)
+
+where ∆Et+1 is the difference between the measurement
+and the prediction,
+
+E(dt+1|I1:t+1) = E(dt+1|I1:t) + E(dt+1|It+1),
+
+∆Et+1 = E(dt+1|It+1) − E(dt+1|I1:t),
+
+(9)
+
+10989
+
+Input frameDepthConﬁdenceDepth (meter).5Depth probability0p(d)Frame tFrame t+1GT depthConﬁdence Adaptive dampingGlobal dampingNo dampingNo ﬁlteringand g(·) is a CNN, named K-Net, which learns to trans-
+form ∆Et+1 into a correction term to the prediction. Intu-
+itively, for regions with correct depth probability estimates,
+the values in the overlapping volume of DPVs are consis-
+tent. Thus the residual in Eq. 9 is small and the DPV will
+not be updated in Eq. 8. On the other hand, for regions with
+incorrect depth probability, the residual would be large and
+the DPV will be corrected by g(∆E, It+1). This way, the
+weight for prediction will be changed adaptively for differ-
+ent DPV voxels. As shown in Fig. 5, the adaptive damping,
+i.e., K-Net, signiﬁcantly improve the accuracy for depth es-
+timation. In fact, K-Net is closely related to the derivation
+of Kalman ﬁlter, where “K” stands for Kalman gain. Please
+refer to the supplementary for details.
+
+3.3. R Net and Training Details
+
+Finally, since the DPV p(dt|I1:t) is estimated with 1/4
+spatial resolution (on both width and height) of the input
+image, we employ a CNN, named R-Net, to upsample and
+reﬁne the DPV back to the original image resolution. The
+R-Net, h(·), is essentially an U-Net with skip connections,
+which takes input the low-res DPV from the K-Net g(·) and
+the image features extracted from the feature extractor f (·),
+and outputs a high-resolution DPV.
+
+In summary, as shown in Fig. 2, the entire network
+has three modules, i.e., the D-Net, f (·; Θ1), the K-Net,
+g(·; Θ2), and the R-Net, h(·; Θ3). Detailed network archi-
+tectures are provided in the supplementary material. The
+full network is trained end-to-end, with simply the Neg-
+ative Log-Likelihood (NLL) loss over the depth, Loss =
+NLL(p(d), dGT ). We also tried to add image warping as
+an additional loss term (i.e., minimizing the difference be-
+tween It and the warped neighboring frames), but we found
+that it does not improve the quality of depth prediction.
+
+During training, we use ground truth camera poses. For
+all our experiments, we use the ADAM optimizer [26] with
+a learning rate of 10−5, β1 = .9 and β2 = .999. The whole
+framework, including D-Net, K-Net and R-Net, is trained
+together in an end-to-end fashion for 20 epochs.
+
+3.4. Camera Poses during Inference
+
+During inference, given an input video stream, our
+method requires relative camera poses δT between consec-
+utive frames — at least for all the ﬁrst ﬁve frames — to
+bootstrap the computation of the DPV. In this paper, we
+evaluated several options to solve this problem.
+In many
+applications, such as autonomous driving and AR, initial
+camera poses may be provided by additional sensors such
+as GPS, odometer, or IMU. Alternatively, we can also run
+state-of-the-art monocular visual odometry methods, such
+as DSO [12], to obtain the initial camera poses. Since our
+method outputs continuous dense depth maps and their un-
+certainty maps, we can in fact further optimize the initial
+
+Local Time Window !"
+
+Ref. Frame
+
+Local Time Window !"#$
+
+Warp depth map
+
+Ref. Frame
+
+Time
+
+Figure 6. Camera pose optimization in a sliding local time window
+during inference. Given the relative camera pose from the refer-
+ence frame in Nt to the reference frame in Nt+1, we can predict
+the depth map for the reference frame in Nt+1. Then, we opti-
+mize the relative camera poses between every source frame and
+the reference frame in Nt+1 using Eq.10.
+
+camera poses within a local time window, similar to local
+bundle adjustment [48].
+
+Speciﬁcally, as shown in Fig. 6, given p(dt|I1:t), the
+DPV of the reference frame It in the local time window
+Nt, we can warp p(dt|I1:t) to the reference camera view in
+Nt+1 to predict the DPV p(dt+1|I1:t) using Eq. 5. Then
+we get the depth map ˆd and conﬁdence map ˆC for the new
+reference frame using Eq. 2. The camera poses within the
+local time window Nt+1 are optimized as:
+
+min.
+δTk,t+1
+
+k∈Nt+1,k6=t+1
+
+X
+
+k
+
+ˆC|It+1 − warp(Ik; ˆd; δTk,t+1)|1,
+
+(10)
+
+where δTk,t+1 is the relative camera pose of frame k to
+frame t + 1; Ik is the source image at frame k; warp(·) is a
+warping operator from the source to the reference view.
+
+4. Experimental Results
+
+We evaluate our method on multiple indoor and outdoor
+datasets [42, 44, 14, 16], with an emphasis on accuracy and
+robustness. For accuracy evaluation, we argue the widely-
+used statistical metrics [11, 50] are insufﬁcient because they
+can only provide an overall estimate over the entire depth
+map. Rather, we feed the estimated depth maps directly
+into classical RGB-D based 3D scanning systems [31, 32]
+for 3D reconstruction — this will show the metric accuracy,
+the consistency, and the usefulness of the estimation. For
+robustness evaluation, we performed the aforementioned
+cross-dataset evaluation tasks, i.e., testing on new datasets
+without ﬁne-tuning. The performance degradation over new
+datasets will show the generalization ability and robustness
+for a given algorithm.
+
+As no prior work operates in the exact setting as ours, it
+is difﬁcult to choose methods to compare with. We care-
+fully select a few recent DL-based depth estimation meth-
+ods and try our best for a fair comparison. For single-
+view methods, we select DORN [13] which is the current
+state-of-the-art [1]. For two-view methods, we compare
+
+10990
+
+Figure 7. Exemplar results of our approach on ScanNet [10]. In addition to high quality depth output, we also obtain reasonable conﬁdence
+maps (as shown in the marked regions for occlusion and specularity) which correlates with the depth error. Moreover, the conﬁdence maps
+accumulate correctly over time with more input frames.
+
+Table 1. Comparison of depth estimation over the 7-Scenes
+dataset [42] with the metrics deﬁned in [11].
+
+σ < 1.25
+
+abs. rel
+
+rmse
+
+scale inv.
+
+DeMoN [50]
+MVSNet [53]
+DORN [13]
+Ours
+
+31.88
+54.87
+60.05
+69.26
+
+0.3888
+0.3481
+0.2000
+0.1758
+
+0.8549
+0.8305
+0.4591
+0.4408
+
+0.4473
+0.3743
+0.2207
+0.1899
+
+with DeMoN [50], which shows high quality depth pre-
+diction from a pair of images. For multi-view methods,
+we compared with MVSNet [53]. We also compare with
+MonoDepth [17], which is a semi-supervised learning ap-
+proach from stereo images. To improve the temporal con-
+sistency for these per-frame estimations, we trained a post-
+processing network [27], but we observed it does not im-
+prove the performance. Since there is always scale ambigu-
+ity for depth from a monocular camera, for fair comparison,
+we normalize the scale for the outputs from all the above
+methods before we compute statistical metrics [11].
+
+The inference time for processing one frame in our
+method is ∼ 0.7 second per frame without pose optimiza-
+tion and ∼ 1.5 second with pose estimation on a worksta-
+tion with GTX 1080 GPU and 64 GB RAM memory, with
+the framework implemented in Python. The pose estimation
+part can be implemented with C++ to improve efﬁciency.
+
+Results for Indoor Scenarios We ﬁrst evaluated our
+method for indoor scenarios, for which RGB-D sensors
+were used to capture dense metric depth for ground truth.
+We trained our network on ScanNet [10]. Figure 7 shows
+two exemplar results. As shown, in addition to depth maps,
+our method also outputs reasonable conﬁdence maps (e.g.,
+low conﬁdence in the occluded or specular regions) which
+correlates with the depth errors. Moreover, with more in-
+put frames, the conﬁdence maps accumulate correctly over
+time: the conﬁdence of the books (top row) increases and
+the depth error decreases; the conﬁdence of the glass region
+(bottom row) decreases and the depth error increases.
+
+For comparison, since the models provided by DORN,
+DeMoN and MVSNet were trained on different datasets,
+we compare with these two methods on a separate indoor
+dataset 7Scenes [42]. For our method, we assume that
+
+the relative camera rotation δR within a local time win-
+dow is provided (e.g. measured by IMU). We also com-
+pared with DeMoN with given camera poses, by ﬁxing the
+camera poses inputs for their warping module to be the GT
+poses. But we observed that this does not improve the ﬁnal
+depth estimation. For MVSNet, we noticed that the depth
+map estimation result degrades severely when the video in-
+cludes camera motion patterns that are not well included in
+the training data, such as camera rotation and z-axis transla-
+tion. As shown in Table 1, our method signiﬁcantly outper-
+forms DeMoN, DORN and MVSNet on this dataset based
+on the commonly used statistical metrics [11]. We include
+the complete metrics in the supplementary material.
+
+For qualitative comparison, as shown in Fig. 8,
+
+the
+depth maps from our method are less noisy, more
+sharper, and temporally more consistent (see supplemental
+videos). More importantly, using an RGB-D 3D scanning
+method [32], we can reconstruct a much higher quality 3D
+mesh with our estimated depths compared to other meth-
+ods. Even when compared with 3D reconstruction using a
+real RGB-D sensor, our result has better coverage and accu-
+racy in some regions (e.g., monitors / glossy surfaces) where
+active depth sensors cannot capture.
+
+Results for Outdoor Scenarios We evaluated our method
+on outdoor datasets — KITTI [16] and virtual KITTI [14].
+The virtual KITTI dataset is used because it has dense, ac-
+curate metric depth as ground truth, while KITTI only has
+sparse depth values from LiDAR as ground truth. For our
+method, we use the camera poses measured by the IMU and
+GPS. Table 2 lists the comparison results with DORN [13],
+Eigen [11], and MonoDepth [17] which are also trained
+on KITTI [16]. Our method has similar performance with
+DORN [13], and is better than the other two methods. We
+also tested our method with camera poses from DSO [12]
+and obtain slightly worse performance (see supplementary).
+Figure 9 shows qualitative comparison for depth maps
+in KITTI dataset. As shown, our method generate sharper
+and less noisier depth maps. In addition, our method out-
+puts depth conﬁdence maps (e.g., lower conﬁdence on the
+car window). Our depth estimation is temporally consis-
+tent, which leads to the possibility of fusing multiple depth
+
+10991
+
+ErrorEst. depthConﬁdenceInput framesInput frame
+
+GT depth
+
+DORN depth 
+
+DeMoN depth
+
+Our depth
+
+Our conﬁdence
+
+GT view 1
+
+GT view 2
+
+DORN view 1
+
+DeMoN view 1
+
+Our view 1
+
+Our view 2
+
+Input frame
+
+GT depth
+
+DORN depth 
+
+DeMoN depth
+
+Our depth
+
+Our conﬁdence
+
+GT view 1
+
+GT view 2
+
+DORN view 1
+
+DeMoN view 1
+
+Our view 1
+
+Our view 2
+
+Input frame
+
+GT depth
+
+DORN depth 
+
+DeMoN depth
+
+Our depth
+
+Our conﬁdence
+
+GT view 1
+
+GT view 2
+
+DORN view 1
+
+DeMoN view 1
+
+Our view 1
+
+Our view 2
+
+Figure 8. Depth and 3D reconstruction results on indoor datasets (best viewed when zoomed in). We compare our method with DORN [13]
+and DeMoN [50], in terms of both depth maps and 3D reconstruction using Voxel Hashing [32] that accumulates the estimated depth maps
+for multiple frames. To show the temporal consistency of the depths, we use different numbers of depth maps for Voxel Hashing: 2 depth
+maps for the ﬁrst sample and 30 depth maps for the other samples. The depth maps from DORN contain block artifacts as marked in red
+boxes. This is manifested as the rippled shapes in the 3D reconstruction. DeMoN generates sharp depth boundaries but fails to recover the
+depth faithfully in the regions marked in the green box. Also, the depths from DeMoN is not temporally consistent. This leads to the severe
+misalignment artifacts in the 3D reconstructions. In comparison, our method generates correct and temporally consistent depths maps,
+especially at regions with high conﬁdence, such as the monitor where even the Kinect sensor fails to get the depth due to low reﬂectance.
+
+maps with voxel hashing [32] in the outdoors for a large-
+scale dense 3D reconstruction, as shown in Fig. 9.
+In Table 3, we performed the cross-dataset task. The upper
+shows the results with training from KITTI [16] and test-
+ing on virtual KITTI [14]. The lower shows the results with
+training from indoor datasets (NYUv2 for DORN and Scan-
+Net for ours) and testing on KITTI. As shown, our method
+achieves better robustness and generalization ability.
+
+Ablation Study The performance of our method relies on
+accurate estimate of camera poses, so we test our method
+with different camera pose estimation schemes as shown in
+Table 4: (1) Relative camera rotation δR is read from an
+IMU sensor (denoted as “GT R”). (2) δR of all frames are
+
+Table 2. Comparison of depth estimation on KITTI [16].
+
+σ < 1.25
+
+abs. rel
+
+rmse
+
+scale inv.
+
+Eigen [11]
+Mono [17]
+DORN [13]
+Ours
+
+67.80
+86.43
+92.62
+93.15
+
+0.1904
+0.1238
+0.0874
+0.0998
+
+5.114
+2.8684
+3.1375
+2.8294
+
+0.2628
+0.1635
+0.1233
+0.1070
+
+initialized with DSO [12] (denoted as “VO pose”) (3) δR
+of the ﬁrst ﬁve frames are initialized with DSO [12] (de-
+noted as “1st win”). We observe that when only the camera
+poses in the ﬁrst time window are initialized using DSO,
+the performance in terms of depth estimation is better than
+that using the DSO pose initialization for all frames. This
+
+10992
+
+Figure 9. Depth map and 3D reconstruction for KITTI, compared with DORN [13], MonoDepth [50] (best viewed when zoomed in). First
+row: Our depth map is sharper and contains less noise. For specular region (marked in the pink box), the conﬁdence is lower. Second
+row, from left to right: reconstructions using depth maps of the same 100 frames estimated from MonoDepth, DORN and our method. All
+meshes are viewed from above. Within the 100 frames, the vehicle was travelling in a straight line without turning.
+
+Table 3. Cross-dataset tests for depth estimation in the outdoors.
+
+KITTI (train) → virtual KITTI (test)
+
+σ < 1.25
+
+abs. rel
+
+rmse
+
+scale inv.
+
+DORN [13]
+Ours
+
+69.61
+73.38
+
+0.2256
+0.2537
+
+9.618
+6.452
+
+0.3986
+0.2548
+
+Indoor (train) → KITTI (test)
+
+σ < 1.25
+
+abs. rel
+
+rmse
+
+scale inv.
+
+DORN [13]
+Ours
+
+25.44
+72.96
+
+0.6352
+0.2798
+
+8.603
+5.437
+
+0.4448
+0.2139
+
+Table 4. Performance on 7Scenes with different initial poses
+
+σ < 1.25
+
+abs. rel
+
+rmse
+
+scale inv.
+
+VO pose
+1st win.
+GT R
+GT pose
+
+60.63
+62.08
+69.26
+70.54
+
+0.1999
+0.1923
+0.1758
+0.1619
+
+0.4816
+0.4591
+0.4408
+0.3932
+
+0.2158
+0.2001
+0.1899
+0.1586
+
+may seem counter-intuitive, but it is because monocular VO
+methods sometimes have large errors for textureless regions
+while optimization with depths may overcome this problem.
+
+Usefulness of the Conﬁdence Map The estimated conﬁ-
+dence maps can also be used to further improve the depth
+maps. As shown in Fig. 10(a), given the depth map and the
+corresponding conﬁdence, we can correct the regions with
+lower conﬁdence due to specular reﬂection. Also, for 3D
+reconstruction algorithm, given the depth conﬁdence, we
+can mask out the regions with lower conﬁdence for better
+reconstruction, as shown in Fig. 10(b).
+
+5. Conclusions and Limitations
+
+In this paper, we present a DL-based method for contin-
+uous depth sensing from a monocular video camera. Our
+method estimates a depth probability distribution volume
+from a local time window, and integrates it over time under
+a Bayesian ﬁltering framework. Experimental results show
+
+Figure 10. Using the conﬁdence map. (a) Correct depth map using
+Fast Bilateral Solver [2]. (b) Mask out pixels with low conﬁdence
+before applying Voxel Hashing [32].
+
+our approach achieves high accuracy, temporal consistency,
+and robustness for depth sensing, especially for the cross-
+dataset tasks. The estimated depth maps from our method
+can be fed directly into RGB-D scanning systems for 3D
+reconstruction and achieve on-par or sometimes more com-
+plete 3D meshes than using a real RGB-D sensor.
+
+There are several limitations that we plan to address in
+the future. First, camera poses from a monocular video of-
+ten suffer from scale drifting, which may affect the accuracy
+of our depth estimation. Second, in this work we focus on
+depth sensing from a local time window, rather than solving
+it in a global context using all the frames.
+
+Acknowledgements Chao Liu was supported in by NSF
+grant CNS-1446601.
+
+10993
+
+Input frameMonoDepthDORNOurs depthOurs conﬁdenceMonoDepth topviewDORN topviewOurs topviewInput frameConﬁdenceDepth afterDepth beforeBefore maskingAfter masking(a) Depth Correction(b) Mesh MaskingReferences
+
+[1] Robust Vision Challenge Workshop.
+
+http://www.
+
+robustvision.net, 2018. 2, 5
+
+[2] J. T. Barron and B. Poole. The fast bilateral solver. In Euro-
+
+pean Conference on Computer Vision (ECCV), 2016. 8
+
+[3] C. M. Bishop. Mixture density networks. 1994. 2
+[4] M. Bloesch, J. Czarnowski, R. Clark, S. Leutenegger, and
+A. Davison. CodeSLAM - Learning a compact, optimisable
+representation for dense visual SLAM. In IEEE Conference
+on Computer Vision and Pattern Recognition (CVPR), 2018.
+1, 2
+
+[5] D. Chan, H. Buisman, C. Theobalt, and S. Thrun. A noise-
+aware ﬁlter for real-time depth upsampling.
+In Workshop
+on Multi-camera and Multi-modal Sensor Fusion Algorithms
+and Applications - M2SFA2 2008, Marseille, France, 2008.
+Andrea Cavallaro and Hamid Aghajan. 1, 2
+
+[6] J.-R. Chang and Y.-S. Chen. Pyramid stereo matching net-
+work. In IEEE Conference on Computer Vision and Pattern
+Recognition (CVPR), pages 5410–5418, 2018. 1, 2, 3
+
+[7] J. A. Christian and S. Cryan. A survey of LiDAR technology
+and its use in spacecraft relative navigation. In AIAA Guid-
+ance, Navigation, and Control (GNC) Conference, 2013. 1,
+2
+
+[8] R. Clark, S. Wang, A. Markham, N. Trigoni, and H. Wen.
+VidLoc: a deep spatial-temporal model for 6-DoF video-clip
+relocalization. In IEEE Conference on Computer Vision and
+Pattern Recognition (CVPR), 2017. 2
+
+[9] A. Criminisi, I. Reid, and A. Zisserman. Single view metrol-
+ogy. International Journal of Computer Vision (IJCV), 2000.
+2
+
+[10] A. Dai, A. X. Chang, M. Savva, M. Halber, T. Funkhouser,
+and M. Nießner. ScanNet: Richly-annotated 3D reconstruc-
+tions of indoor scenes.
+In IEEE Conference on Computer
+Vision and Pattern Recognition (CVPR), 2017. 6
+
+[11] D. Eigen, C. Puhrsch, and R. Fergus. Depth map prediction
+from a single image using a multi-scale deep network.
+In
+Advances in Neural Information Processing Systems (NIPS),
+2014. 5, 6, 7
+
+[12] J. Engel, V. Koltun, and D. Cremers. Direct sparse odom-
+IEEE Transactions on Pattern Analysis and Machine
+
+etry.
+Intelligence (TPAMI), 40:611–625, 2018. 5, 6, 7
+
+[13] H. Fu, M. Gong, C. Wang, K. Batmanghelich, and D. Tao.
+Deep ordinal regression network for monocular depth esti-
+mation. In IEEE Conference on Computer Vision and Pattern
+Recognition (CVPR), 2018. 1, 2, 5, 6, 7, 8
+
+[14] A. Gaidon, Q. Wang, Y. Cabon, and E. Vig. Virtual worlds as
+proxy for multi-object tracking analysis. In IEEE Conference
+on Computer Vision and Pattern Recognition (CVPR), 2016.
+5, 6, 7
+
+[15] Y. Gal and Z. Ghahramani. Dropout as a Bayesian approx-
+imation: Representing model uncertainty in deep learning.
+In International Conference on Machine Learning (ICML),
+2016. 2
+
+[16] A. Geiger, P. Lenz, and R. Urtasun. Are we ready for au-
+tonomous driving? The KITTI vision benchmark suite. In
+IEEE Conference on Computer Vision and Pattern Recogni-
+tion (CVPR), pages 3354–3361, 2012. 5, 6, 7
+
+[17] C. Godard, O. Mac Aodha, and G. J. Brostow. Unsupervised
+monocular depth estimation with left-right consistency.
+In
+IEEE Conference on Computer Vision and Pattern Recogni-
+tion (CVPR), 2017. 1, 2, 6, 7
+
+[18] S. Gupta, R. Girshick, P. Arbelaez, and J. Malik. Learning
+rich features from RGB-D images for object detection and
+segmentation. In European Conference on Computer Vision
+(ECCV), 2014. 1, 2
+
+[19] R. Horaud, M. Hansard, G. Evangelidis, and C. M´enier. An
+overview of depth cameras and range scanners based on
+time-of-ﬂight technologies. Machine Vision and Applica-
+tions Journal, 27(7):1005–1020, 2016. 1, 2
+
+[20] P.-H. Huang, K. Matzen, J. Kopf, N. Ahuja, and J.-B. Huang.
+DeepMVS: Learning multi-view stereopsis. In IEEE Confer-
+ence on Computer Vision and Pattern Recognition (CVPR),
+2018. 1, 2
+
+[21] E. Ilg, ¨O. C¸ ic¸ek, S. Galesso, A. Klein, O. Makansi, F. Hutter,
+and T. Brox. Uncertainty Estimates and Multi-Hypotheses
+Networks for Optical Flow.
+In European Conference on
+Computer Vision (ECCV), 2018. 2
+
+[22] G. Kamberova and R. Bajcsy. Sensor errors and the uncer-
+tainties in stereo reconstruction.
+In Empirical Evaluation
+Techniques in Computer Vision, pages 96–116. IEEE Com-
+puter Society Press, 1998. 2
+
+[23] A. Kendall and Y. Gal. What uncertainties do we need in
+bayesian deep learning for computer vision? In Advances in
+Neural Information Processing Systems (NIPS), 2017. 2
+
+[24] A. Kendall, Y. Gal, and R. Cipolla. Multi-task learning using
+uncertainty to weigh losses for scene geometry and seman-
+tics. In IEEE Conference on Computer Vision and Pattern
+Recognition (CVPR), 2018. 2
+
+[25] K. Kim, D. Lee, and I. Essa. Gaussian process regression
+In International
+
+ﬂow for analysis of motion trajectories.
+Conference on Computer Vision (ICCV), 2011. 2
+
+[26] D. P. Kingma and J. Ba. Adam: A method for stochastic
+optimization. In International Conference on Learning Rep-
+resentations (ICLR), 2015. 5
+
+[27] W.-S. Lai, J.-B. Huang, O. Wang, E. Shechtman, E. Yumer,
+and M.-H. Yang. Learning blind video temporal consistency.
+In European Conference on Computer Vision (ECCV), 2018.
+6
+
+[28] R. Mahjourian, M. Wicke, and A. Angelova. Unsupervised
+learning of depth and ego-motion from monocular video us-
+ing 3D geometric constraints. In IEEE Conference on Com-
+puter Vision and Pattern Recognition (CVPR), 2018. 2
+
+[29] A. Maimone and H. Fuchs. Reducing interference between
+multiple structured light depth sensors using motion.
+In
+IEEE Virtual Reality Workshops (VRW), pages 51–54, 2012.
+1, 2
+
+[30] R. Mur-Artal and J. D. Tard´os. ORB-SLAM2: an open-
+source SLAM system for monocular, stereo and RGB-D
+cameras. IEEE Transactions on Robotics, 33(5):1255–1262,
+2017. 2
+
+[31] R. A. Newcombe, S. Izadi, O. Hilliges, D. Molyneaux,
+D. Kim, A. J. Davison, P. Kohli, J. Shotton, S. Hodges, and
+A. Fitzgibbon. KinectFusion: Real-time dense surface map-
+ping and tracking. In IEEE and ACM International Sympo-
+
+10994
+
+[46] K. Tateno, F. Tombari, I. Laina, and N. Navab. CNN-SLAM:
+Real-time dense monocular SLAM with learned depth pre-
+diction. In IEEE Conference on Computer Vision and Pattern
+Recognition (CVPR), 2017. 1, 2
+
+[47] B. Tippetts, D. J. Lee, K. Lillywhite, and J. Archibald. Re-
+view of stereo vision algorithms and their suitability for
+resource-limited systems. Journal of Real-Time Image Pro-
+cessing, 11(1):5–25, 2016. 1
+
+[48] B. Triggs, P. McLauchlan, R. Hartley, and A. Fitzgibbon.
+In International
+
+Bundle adjustment a modern synthesis.
+Conference on Computer Vision (ICCV), 1999. 5
+
+[49] J. Tuley, N. Vandapel, and M. Hebert. Analysis and removal
+of artifacts in 3-d LIDAR data. In International Conference
+on Robotics and Automation (ICRA), 2005. 2
+
+[50] B. Ummenhofer, H. Zhou, J. Uhrig, N. Mayer, E. Ilg,
+A. Dosovitskiy, and T. Brox. DeMoN: Depth and motion
+network for learning monocular stereo. In IEEE Conference
+on Computer Vision and Pattern Recognition (CVPR), 2017.
+1, 2, 5, 6, 7, 8
+
+[51] C. Wang, J. M. Buenaposada, R. Zhu, and S. Lucey. Learn-
+ing depth from monocular videos using direct methods. In
+IEEE Conference on Computer Vision and Pattern Recogni-
+tion (CVPR), 2018. 1, 2
+
+[52] T. Whelan, S. Leutenegger, R. S. Moreno, B. Glocker, and
+A. Davison. ElasticFusion: dense SLAM without a pose
+In Robotics: Science and Systems (RSS), 2015. 1,
+graph.
+2
+
+[53] Y. Yao, Z. Luo, S. Li, T. Fang, and L. Quan. MVSNet: Depth
+In European
+
+inference for unstructured multi-view stereo.
+Conference on Computer Vision (ECCV), 2018. 1, 2, 6
+
+[54] Z. Yin and J. Shi. GeoNet: Unsupervised learning of dense
+depth, optical ﬂow and camera pose. In IEEE Conference on
+Computer Vision and Pattern Recognition (CVPR), 2018. 2
+[55] H. Zhou, B. Ummenhofer, and T. Brox. DeepTAM: Deep
+In European Conference on Com-
+
+tracking and mapping.
+puter Vision (ECCV), 2018. 1, 2
+
+[56] T. Zhou, M. Brown, N. Snavely, and D. G. Lowe. Unsu-
+pervised learning of depth and ego-motion from video.
+In
+IEEE Conference on Computer Vision and Pattern Recogni-
+tion (CVPR), 2017. 1, 2
+
+sium on Mixed and Augmented Reality (ISMAR), pages 127–
+136, 2011. 1, 2, 5
+
+[32] M. Nießner, M. Zollh¨ofer, S. Izadi, and M. Stamminger.
+Real-time 3D reconstruction at scale using voxel hashing.
+ACM Transactions on Graphics (TOG), 2013. 1, 2, 5, 6,
+7, 8
+
+[33] F. Pomerleau, A. Breitenmoser, M. Liu, F. Colas, and
+R. Siegwart. Noise characterization of depth sensors for
+surface inspections.
+In International Conference on Ap-
+plied Robotics for the Power Industry (CARPI), pages 16–21,
+2012. 2
+
+[34] C. R. Qi, W. Liu, C. Wu, H. Su, and L. J. Guibas. Frus-
+tum PointNets for 3D object detection from RGB-D data. In
+IEEE Conference on Computer Vision and Pattern Recogni-
+tion (CVPR), 2017. 1, 2
+
+[35] F. Remondino and D. Stoppa. TOF Range-Imaging Cameras.
+
+Springer Publishing Company, Incorporated, 2013. 1, 2
+
+[36] M. Reynolds, J. Dobo, L. Peel, T. Weyrich, and G. J. Bros-
+tow. Capturing time-of-ﬂight data with conﬁdence. In IEEE
+Conference on Computer Vision and Pattern Recognition
+(CVPR), 2011. 2
+
+[37] A. Saxena, S. H. Chung, and A. Y. Ng. 3D depth recon-
+struction from a single still image. International Journal of
+Computer Vision (IJCV), 76(1):53–69, Jan. 2008. 1, 2
+
+[38] A. Saxena, J. Schulte, and A. Y. Ng. Depth estimation us-
+ing monocular and stereo cues. In Proceedings of the 20th
+International Joint Conference on Artiﬁcial Intelligence, IJ-
+CAI’07, pages 2197–2203, 2007. 2
+
+[39] J. L. Sch¨onberger and J.-M. Frahm. Structure-from-motion
+revisited. In IEEE Conference on Computer Vision and Pat-
+tern Recognition (CVPR), 2016. 2
+
+[40] J. L. Sch¨onberger, E. Zheng, M. Pollefeys, and J.-M. Frahm.
+Pixelwise view selection for unstructured multi-view stereo.
+In European Conference on Computer Vision (ECCV), 2016.
+2
+
+[41] S. M. Seitz, B. Curless, J. Diebel, D. Scharstein, and
+R. Szeliski. A comparison and evaluation of multi-view
+stereo reconstruction algorithms.
+In IEEE Conference on
+Computer Vision and Pattern Recognition (CVPR), 2006. 1,
+2
+
+[42] J. Shotton, B. Glocker, C. Zach, S. Izadi, A. Criminisi, and
+A. Fitzgibbon. Scene coordinate regression forests for cam-
+era relocalization in RGB-D images. In IEEE Conference on
+Computer Vision and Pattern Recognition (CVPR), 2013. 5,
+6
+
+[43] S. Song, S. P. Lichtenberg, and J. Xiao. SUN RGB-D:
+A RGB-D scene understanding benchmark suite.
+In IEEE
+Conference on Computer Vision and Pattern Recognition
+(CVPR), 2015. 1
+
+[44] J. Sturm, N. Engelhard, F. Endres, W. Burgard, and D. Cre-
+mers. A benchmark for the evaluation of RGB-D SLAM sys-
+tems. In IEEE/RSJ International Conference on Intelligent
+Robots and Systems (IROS), 2012. 5
+
+[45] R. Szeliski. Bayesian modeling of uncertainty in low-level
+vision. International Journal of Computer Vision, 5(3):271–
+301, Dec 1990. 2
+
+10995
+
+

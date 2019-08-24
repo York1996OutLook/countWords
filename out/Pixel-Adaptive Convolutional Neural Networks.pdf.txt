@@ -1,0 +1,1611 @@
+Pixel-Adaptive Convolutional Neural Networks
+
+Hang Su1, Varun Jampani2, Deqing Sun2, Orazio Gallo2, Erik Learned-Miller1, and Jan Kautz2
+
+1UMass Amherst
+
+2NVIDIA
+
+Abstract
+
+Convolutions are the fundamental building blocks of
+CNNs. The fact that their weights are spatially shared is
+one of the main reasons for their widespread use, but it is
+also a major limitation, as it makes convolutions content-
+agnostic. We propose a pixel-adaptive convolution (PAC)
+operation, a simple yet effective modiﬁcation of standard
+convolutions, in which the ﬁlter weights are multiplied with
+a spatially varying kernel that depends on learnable, lo-
+cal pixel features. PAC is a generalization of several pop-
+ular ﬁltering techniques and thus can be used for a wide
+range of use cases. Speciﬁcally, we demonstrate state-of-
+the-art performance when PAC is used for deep joint im-
+age upsampling. PAC also offers an effective alternative to
+fully-connected CRF (Full-CRF), called PAC-CRF, which
+performs competitively compared to Full-CRF, while being
+considerably faster. In addition, we also demonstrate that
+PAC can be used as a drop-in replacement for convolution
+layers in pre-trained networks, resulting in consistent per-
+formance improvements.
+
+1. Introduction
+
+Convolution is a basic operation in many image process-
+ing and computer vision applications and the major build-
+ing block of Convolutional Neural Network (CNN) archi-
+tectures. It forms one of the most prominent ways of prop-
+agating and integrating features across image pixels due to
+its simplicity and highly optimized CPU/GPU implementa-
+tions. In this work, we concentrate on two important charac-
+teristics of standard spatial convolution and aim to alleviate
+some of its drawbacks: Spatial Sharing and its Content-
+Agnostic nature.
+
+Spatial Sharing: A typical CNN shares ﬁlters’ parame-
+ters across the whole input. In addition to affording trans-
+lation invariance to the CNN, spatially invariant convolu-
+tions signiﬁcantly reduce the number of parameters com-
+pared with fully connected layers. However, spatial sharing
+is not without drawbacks. For dense pixel prediction tasks,
+such as semantic segmentation, the loss is spatially varying
+because of varying scene elements on a pixel grid. Thus
+
+𝐾
+ 𝑊
+
+f-1,-1
+
+f-1,0
+
+f-1,1
+
+f0,-1
+
+f1,-1
+
+f0,1
+
+f1,1
+
+f0,0
+
+f1,0
+
+𝐾
+
+𝐾(f-1,-1,f0,0)𝐾(f-1,0,f0,0)𝐾(f-1,1,f0,0)
+𝐾(f0,-1,f0,0)𝐾(f0,0,f0,0)𝐾(f0,1,f0,0)
+𝐾(f1,-1,f0,0)𝐾(f1,0,f0,0)𝐾(f1,1,f0,0)
+
+Figure 1: Pixel-Adaptive Convolution. PAC modiﬁes a standard
+convolution on an input v by modifying the spatially invariant ﬁl-
+ter W with an adapting kernel K. The adapting kernel is con-
+structed using either pre-deﬁned or learned features f . ⊗ denotes
+element-wise multiplication of matrices followed by a summation.
+Only one output channel is shown for the illustration.
+
+the optimal gradient direction for parameters differs at each
+pixel. However, due to the spatial sharing nature of convo-
+lution, the loss gradients from all image locations are glob-
+ally pooled to train each ﬁlter. This forces the CNN to learn
+ﬁlters that minimize the error across all pixel locations at
+once, but may be sub-optimal at any speciﬁc location.
+
+Content-Agnostic: Once a CNN is trained, the same con-
+volutional ﬁlter banks are applied to all the images and all
+the pixels irrespective of their content. The image content
+varies substantially across images and pixels. Thus a sin-
+gle trained CNN may not be optimal for all image types
+(e.g., images taken in daylight and at night) as well as dif-
+ferent pixels in an image (e.g., sky vs. pedestrian pixels).
+Ideally, we would like CNN ﬁlters to be adaptive to the
+type of image content, which is not the case with standard
+CNNs. These drawbacks can be tackled by learning a large
+number of ﬁlters in an attempt to capture both image and
+pixel variations. This, however, increases the number of
+parameters, requiring a larger memory footprint and an ex-
+tensive amount of labeled data. A different approach is to
+use content-adaptive ﬁlters inside the networks.
+
+Existing content-adaptive convolutional networks can be
+
+111166
+
+broadly categorized into two types. One class of techniques
+make traditional image-adaptive ﬁlters, such as bilateral ﬁl-
+ters [2, 41] and guided image ﬁlters [18] differentiable, and
+use them as layers inside a CNN [24, 28, 51, 11, 9, 21, 29,
+8, 13, 30, 43, 45]. These content-adaptive layers are usually
+designed for enhancing CNN results but not as a replace-
+ment for standard convolutions. Another class of content-
+adaptive networks involve learning position-speciﬁc kernels
+using a separate sub-network that predicts convolutional ﬁl-
+ter weights at each pixel. These are called “Dynamic Fil-
+ter Networks” (DFN) [47, 22, 12, 46] (also referred to as
+cross-convolution [47] or kernel prediction networks [4])
+and have been shown to be useful in several computer vi-
+sion tasks. Although DFNs are generic and can be used as
+a replacement to standard convolution layers, such a kernel
+prediction strategy is difﬁcult to scale to an entire network
+with a large number of ﬁlter banks.
+
+In this work, we propose a new content-adaptive convo-
+lution layer that addresses some of the limitations of the ex-
+isting content-adaptive layers while retaining several favor-
+able properties of spatially invariant convolution. Fig. 1 il-
+lustrates our content-adaptive convolution operation, which
+we call “Pixel-Adaptive Convolution” (PAC). Unlike a typ-
+ical DFN, where different kernels are predicted at differ-
+ent pixel locations, we adapt a standard spatially invariant
+convolution ﬁlter W at each pixel by multiplying it with a
+spatially varying ﬁlter K, which we refer to as an “adapt-
+ing kernel”. This adapting kernel has a pre-deﬁned form
+(e.g., Gaussian or Laplacian) and depends on the pixel fea-
+tures. For instance, the adapting kernel that we mainly use
+in this work is Gaussian: e− 1
+, where fi ∈ Rd is
+a d-dimensional feature at the ith pixel. We refer to these
+pixel features f as “adapting features”, and they can be ei-
+ther pre-deﬁned, such as pixel position and color features,
+or can be learned using a CNN.
+
+2 ||fi−fj ||2
+
+We observe that PAC, despite being a simple modiﬁ-
+cation to standard convolution, is highly ﬂexible and can
+be seen as a generalization of several widely-used ﬁlters.
+Speciﬁcally, we show that PAC is a generalization of spatial
+convolution, bilateral ﬁltering [2, 41], and pooling opera-
+tions such as average pooling and detail-preserving pool-
+ing [35]. We also implement a variant of PAC that does
+pixel-adaptive transposed convolution (also called deconvo-
+lution) which can be used for learnable guided upsampling
+of intermediate CNN representations. We discuss more
+about these generalizations and variants in Sec. 3.
+
+As a result of its simplicity and being a generalization of
+several widely used ﬁltering techniques, PAC can be useful
+in a wide range of computer vision problems. In this work,
+we demonstrate its applicability in three different vision
+problems. In Sec. 4, we use PAC in joint image upsampling
+networks and obtain state-of-the-art results on both depth
+and optical ﬂow upsampling tasks. In Sec. 5, we use PAC in
+
+a learnable conditional random ﬁeld (CRF) framework and
+observe consistent improvements with respect to the widely
+used fully-connected CRF [24]. In Sec. 6, we demonstrate
+how to use PAC as a drop-in replacement of trained con-
+volution layers in a CNN and obtain performance improve-
+ments after ﬁne-tuning. In summary, we observe that PAC
+is highly versatile and has wide applicability in a range of
+computer vision tasks.
+
+2. Related Work
+Image-adaptive ﬁltering. Some important image-adaptive
+ﬁltering techniques include bilateral ﬁltering [2, 41], guided
+image ﬁltering [18], non-local means [6, 3], and propa-
+gated image ﬁltering [34], to name a few. A common line
+of research is to make these ﬁlters differentiable and use
+them as content-adaptive CNN layers. Early work [51, 11]
+in this direction back-propagates through bilateral ﬁltering
+and can thus leverage fully-connected CRF inference [24]
+on the output of CNNs. The work of [21] and [13] pro-
+poses to use bilateral ﬁltering layers inside CNN archi-
+tectures. Chandra et al. [8] propose a layer that performs
+closed-form Gaussian CRF inference in a CNN. Chen et
+al. [9] and Liu et al. [30] propose differentiable local prop-
+agation modules that have roots in domain transform ﬁl-
+tering [14]. Wu et al. [45] and Wang et al. [43] propose
+neural network layers to perform guided ﬁltering [18] and
+non-local means [43] respectively inside CNNs. Since these
+techniques are tailored towards a particular CRF or adap-
+tive ﬁltering technique, they are used for speciﬁc tasks and
+cannot be directly used as a replacement of general convo-
+lution. Closest to our work are the sparse, high-dimensional
+neural networks [21] which generalize standard 2D convo-
+lutions to high-dimensional convolutions, enabling them to
+be content-adaptive. Although conceptually more generic
+than PAC, such high-dimensional networks can not learn
+the adapting features and have a larger computational over-
+head due to the use of specialized lattices and hash tables.
+
+Dynamic ﬁlter networks. Introduced by Jia et al. [22], dy-
+namic ﬁlter networks (DFN) are an example of another class
+of content-adaptive ﬁltering techniques. Filter weights are
+themselves directly predicted by a separate network branch,
+and provide custom ﬁlters speciﬁc to different input data.
+The work is later extended by Wu et al. [46] with an addi-
+tional attention mechanism and a dynamic sampling strat-
+egy to allow the position-speciﬁc kernels to also learn from
+multiple neighboring regions. Similar ideas have been ap-
+plied to several task-speciﬁc use cases, e.g., motion pre-
+diction [47], semantic segmentation [17], and Monte Carlo
+rendering denoising [4]. Explicitly predicting all position-
+speciﬁc ﬁlter weights requires a large number of parame-
+ters, so DFNs typically require a sensible architecture de-
+sign and are difﬁcult to scale to multiple dynamic-ﬁlter lay-
+ers. Our approach differs in that PAC reuses spatial ﬁlters
+
+11167
+
+just as standard convolution, and only modiﬁes the ﬁlters in
+a position-speciﬁc fashion. Dai et al. propose deformable
+convolution [12], which can also produce position-speciﬁc
+modiﬁcations to the ﬁlters. Different from PAC, the modiﬁ-
+cations there are represented as offsets with an emphasis on
+learning geometric-invariant features.
+
+Self-attention mechanism. Our work is also related to the
+self-attention mechanism originally proposed by Vaswani
+et al. for machine translation [42]. Self-attention modules
+compute the responses at each position while attending to
+the global context. Thanks to the use of global information,
+self-attention has been successfully used in several appli-
+cations, including image generation [50, 33] and video ac-
+tivity recognition [43]. Attending to the whole image can
+be computationally expensive, and, as a result, can only be
+afforded on low-dimensional feature maps, e.g., as in [43].
+Our layer produces responses that are sensitive to a more lo-
+cal context (which can be alleviated through dilation), and
+is therefore much more efﬁcient.
+
+3. Pixel-Adaptive Convolution
+
+In this section, we start with a formal deﬁnition of
+standard spatial convolution and then explain our gener-
+alization of it to arrive at our pixel-adaptive convolution
+(PAC). Later, we will discuss several variants of PAC and
+how they are connected to different image ﬁltering tech-
+niques. Formally, a spatial convolution of image features
+v = (v1, . . . , vn), vi ∈ Rc over n pixels and c channels
+with ﬁlter weights W ∈ Rc′×c×s×s can be written as
+
+v′
+
+i = Xj∈Ω(i)
+
+W [pi − pj] vj + b
+
+(1)
+
+i ∈ Rc′
+
+where pi = (xi, yi)⊺ are pixel coordinates, Ω(·) deﬁnes an
+s×s convolution window, and b ∈ Rc′
+denotes biases. With
+a slight abuse of notation, we use [pi − pj] to denote index-
+ing of the spatial dimensions of an array with 2D spatial
+offsets. This convolution operation results in a c′-channel
+output, v′
+, at each pixel i. Eq. 1 highlights how the
+weights only depend on pixel position and thus are agnos-
+tic to image content. In other words, the weights are spa-
+tially shared and, therefore, image-agnostic. As outlined in
+Sec. 1, these properties of spatial convolutions are limiting:
+we would like the ﬁlter weights W to be content-adaptive.
+One approach to make the convolution operation
+content-adaptive, rather than only based on pixel locations,
+is to generalize W to depend on the pixel features, f ∈ Rd:
+
+v′
+
+i = Xj∈Ω(i)
+
+W (fi − fj) vj + b
+
+(2)
+
+where W can be seen as a high-dimensional ﬁlter oper-
+ating in a d-dimensional feature space.
+In other words,
+we can apply Eq. 2 by ﬁrst projecting the input signal
+
+v into a d-dimensional space, and then performing d-
+dimensional convolution with W. Traditionally, such high-
+dimensional ﬁltering is limited to hand-speciﬁed ﬁlters such
+as Gaussian ﬁlters [1]. Recent work [21] lifts this re-
+striction and proposes a technique to freely parameterize
+and learn W in high-dimensional space. Although generic
+and used successfully in several computer vision applica-
+tions [21, 20, 38], high-dimensional convolutions have sev-
+eral shortcomings. First, since data projected on a higher-
+dimensional space is sparse, special lattice structures and
+hash tables are needed to perform the convolution [1] re-
+sulting in considerable computational overhead. Second, it
+is difﬁcult to learn features f resulting in the use of hand-
+speciﬁed feature spaces such as position and color features,
+f = (x, y, r, g, b). Third, we have to restrict the dimension-
+ality d of features (say, < 10) as the projected input image
+can become too sparse in high-dimensional spaces. In addi-
+tion, the advantages that come with spatial sharing of stan-
+dard convolution are lost with high-dimensional ﬁltering.
+
+Pixel-adaptive convolution. Instead of bringing convolu-
+tion to higher dimensions, which has the above-mentioned
+drawbacks, we choose to modify the spatially invariant con-
+volution in Eq. 1 with a spatially varying kernel K ∈
+Rc′×c×s×s that depends on pixel features f :
+
+v′
+
+i = Xj∈Ω(i)
+
+K (fi, fj) W [pi − pj] vj + b
+
+(3)
+
+where K is a kernel function that has a ﬁxed parametric
+form such as Gaussian: K(fi, fj) = exp(− 1
+2 (fi − fj)⊺(fi −
+fj)).
+Since K has a pre-deﬁned form and is not param-
+eterized as a high-dimensional ﬁlter, we can perform this
+ﬁltering on the 2D grid itself without moving onto higher
+dimensions. We call the above ﬁltering operation (Eq. 3) as
+“Pixel-Adaptive Convolution” (PAC) because the standard
+spatial convolution W is adapted at each pixel using pixel
+features f via kernel K. We call these pixel features f as
+“adapting features” and the kernel K as “adapting kernel”.
+The adapting features f can be either hand-speciﬁed such as
+position and color features f = (x, y, r, g, b) or can be deep
+features that are learned end-to-end.
+
+Generalizations. PAC, despite being a simple modiﬁcation
+to standard convolution, generalizes several widely used ﬁl-
+tering operations, including
+
+• Spatial Convolution can be seen as a special case of
+PAC with adapting kernel being constant K(fi, fj) =
+1. This can be achieved by using constant adapting
+features, fi = fj, ∀i, j. In brief, standard convolution
+(Eq. 1) uses ﬁxed, spatially shared ﬁlters, while PAC
+allows the ﬁlters to be modiﬁed by the adapting kernel
+K differently across pixel locations.
+
+• Bilateral Filtering [41] is a basic image processing op-
+eration that has found wide-ranging uses [32] in im-
+age processing, computer vision and also computer
+
+11168
+
+graphics. Standard bilateral ﬁltering operation can be
+seen as a special case of PAC, where W also has a
+ﬁxed parametric form, such as a 2D Gaussian ﬁlter,
+W [pi − pj] = exp(− 1
+
+2 (pi − pj)⊺Σ−1(pi − pj)).
+
+• Pooling operations can also be modeled by PAC. Stan-
+dard average pooling corresponds to the special case
+of PAC where K(fi, fj) = 1, W = 1
+s2 · 1. De-
+tail Preserving Pooling [35, 44] is a recently proposed
+pooling layer that is useful to preserve high-frequency
+details when performing pooling in CNNs. PAC can
+model the detail-preserving pooling operations by in-
+corporating an adapting kernel that emphasizes more
+distinct pixels in the neighborhood, e.g., K(fi, fj) =
+
+α +(cid:0)|fi − fj|2 + ǫ2(cid:1)λ
+
+.
+
+The above generalizations show the generality and the
+wide applicability of PAC in different settings and applica-
+tions. We experiment using PAC in three different problem
+scenarios, which will be discussed in later sections.
+
+Some ﬁltering operations are even more general than the
+proposed PAC. Examples include high-dimensional ﬁlter-
+ing shown in Eq. 2 and others such as dynamic ﬁlter net-
+works (DFN) [22] discussed in Sec. 2. Unlike most of those
+general ﬁlters, PAC allows efﬁcient learning and reuse of
+spatially invariant ﬁlters because it is a direct modiﬁcation
+of standard convolution ﬁlters. PAC offers a good trade-off
+between standard convolution and DFNs. In DFNs, ﬁlters
+are solely generated by an auxiliary network and different
+auxiliary networks or layers are required to predict kernels
+for different dynamic-ﬁlter layers. PAC, on the other hand,
+uses learned pixel embeddings f as adapting features, which
+can be reused across several different PAC layers in a net-
+work. When related to sparse high-dimensional ﬁltering in
+Eq. 2, PAC can be seen as factoring the high-dimensional
+ﬁlter into a product of standard spatial ﬁlter W and the
+adapting kernel K. This allows efﬁcient implementation
+of PAC in 2D space alleviating the need for using hash ta-
+bles and special lattice structures in high dimensions. PAC
+can also use learned pixel embeddings f instead of hand-
+speciﬁed ones in existing learnable high-dimensional ﬁlter-
+ing techniques such as [21].
+
+Implementation and variants. We implemented PAC as a
+network layer in PyTorch with GPU acceleration1. Our im-
+plementation enables back-propagation through the features
+f , permitting the use of learnable deep features as adapt-
+ing features. We also implement a PAC variant that does
+pixel-adaptive transposed convolution (also called “decon-
+volution”). We refer to pixel-adaptive convolution shown
+in Eq. 3 as PAC and the transposed counterpart as PAC⊺.
+Similar to standard transposed convolution, PAC⊺ uses frac-
+tional striding and results in an upsampled output. Our PAC
+and PAC⊺ implementations allow easy and ﬂexible speciﬁ-
+
+1Code can be found at https://suhangpro.github.io/pac/
+
+Encoder
+
+V
+N
+O
+C
+
+V
+N
+O
+C
+
+V
+N
+O
+C
+
+T
+C
+A
+P
+
+T
+C
+A
+P
+
+T
+C
+A
+P
+
+V
+N
+O
+C
+
+V
+N
+O
+C
+
+V
+N
+O
+C
+
+V
+N
+O
+C
+
+V
+N
+O
+C
+
+Guidance
+
+Decoder
+
+Figure 2: Joint upsampling with PAC. Network architecture
+showing encoder, guidance and decoder components. Features
+from the guidance branch are used to adapt PAC⊺ kernels that are
+applied on the encoder output resulting in upsampled signal.
+
+cation of different options that are commonly used in stan-
+dard convolution: ﬁlter size, number of input and output
+channels, striding, padding and dilation factor.
+
+4. Deep Joint Upsampling Networks
+
+Joint upsampling is the task of upsampling a low-
+resolution signal with the help of a corresponding high-
+resolution guidance image. An example is upsampling
+a low-resolution depth map given a corresponding high-
+resolution RGB image as guidance.
+Joint upsampling is
+useful when some sensors output at a lower resolution than
+cameras, or can be used to speed up computer vision appli-
+cations where full-resolution results are expensive to pro-
+duce. PAC allows ﬁltering operations to be guided by the
+adapting features, which can be obtained from a separate
+guidance image, making it an ideal choice for joint image
+processing. We investigate the use of PAC for joint upsam-
+pling applications. In this section, we introduce a network
+architecture that relies on PAC for deep joint upsampling,
+and show experimental results on two applications:
+joint
+depth upsampling and joint optical ﬂow upsampling.
+
+4.1. Deep joint upsampling with PAC
+
+A deep joint upsampling network takes two inputs,
+a low-resolution signal x ∈ Rc×h/m×w/m and a high-
+resolution guidance g ∈ Rcg×h×w, and outputs upsampled
+signal x↑ ∈ Rc×h×w. Here m is the required upsampling
+factor. Similar to [26], our upsampling network has three
+components (as illustrated in Fig. 2):
+
+• Encoder branch operates directly on the low-resolution
+
+signal with convolution (CONV) layers.
+
+• Guidance branch operates solely on the guidance im-
+age, and generates adapting features that will be used
+in all PAC⊺ layers later in the network.
+
+• Decoder branch starts with a sequence of PAC⊺, which
+perform transposed pixel-adaptive convolution, each
+of which upsamples the feature maps by a factor of
+2. PAC⊺ layers are followed by two CONV layers to
+generate the ﬁnal upsampled output.
+
+11169
+
+Input
+
+Guide
+
+Bilinear
+
+DJF
+
+Ours
+
+GT
+
+Figure 3: Deep joint upsampling. Results of different methods for 16× joint depth usampling (top row) and 16× joint optical ﬂow
+upsampling (bottom row). Our method produces results that have more details and are more faithful to the edges in the guidance image.
+
+Each of the CONV and PAC⊺ layers, except the ﬁnal one,
+is followed by a rectiﬁed linear unit (ReLU).
+
+4.2. Joint depth upsampling
+
+Here, the task is to upsample a low-resolution depth by
+using a high-resolution RGB image as guidance. We ex-
+periment with the NYU Depth V2 dataset [37], which has
+1449 RGB-depth pairs. Following [26], we use the ﬁrst
+1000 samples for training and the rest for testing. The low-
+resolution depth maps are obtained from the ground-truth
+depth maps using nearest-neighbor downsampling. Tab. 1
+shows root mean square error (RMSE) of different tech-
+niques and for different upsampling factors m (4×, 8×,
+16×). Results indicate that our network outperforms oth-
+ers in comparison and obtains state-of-the-art performance.
+Sample visual results are shown in Fig. 3.
+
+We train our network with the Adam optimizer using a
+learning rate schedule of [10−4× 3.5k, 10−5× 1.5k, 10−6×
+0.5k] and with mini-batches of 256×256 crops. We found
+this training setup to be superior to the one recommended
+in DJF [26], and also compare with our own implementa-
+tion of it under such a setting (“DJF (Our impl.)” in Tab. 1).
+We keep the network architecture similar to that of previous
+
+Table 1: Joint depth upsampling. Results (in RMSE) show
+that our upsampling network consistently outperforms other tech-
+niques for different upsampling factors.
+
+Method
+
+4×
+
+8×
+
+16×
+
+Bicubic
+MRF
+GF [18]
+JBU [23]
+Ham et al. [15]
+DMSG [19]
+FBS [5]
+DJF [26]
+DJF+ [27]
+DJF (Our impl.)
+
+Ours-lite
+Ours
+
+8.16
+7.84
+7.32
+4.07
+5.27
+3.78
+4.29
+3.54
+3.38
+2.64
+
+2.55
+2.39
+
+14.22
+13.98
+13.62
+8.29
+12.31
+6.37
+8.94
+6.20
+5.86
+5.15
+
+4.82
+4.59
+
+22.32
+22.20
+22.03
+13.35
+19.24
+11.16
+14.59
+10.21
+10.11
+9.39
+
+8.52
+8.09
+
+state-of-the-art technique, DJF [26]. In DJF, features from
+the guidance branch are simply concatenated with encoder
+outputs for upsampling, whereas we use guidance features
+to adapt PAC⊺ kernels. Although with similar number of
+layers, our network has more parameters compared with
+DJF (see supp. mat. for details). We also trained a lighter
+version of our network (“Ours-lite”) that matches the num-
+ber of parameters of DJF, and still observe better perfor-
+mance showing the importance of PAC⊺ for upsampling.
+
+4.3. Joint optical ﬂow upsampling
+
+We also evaluate our joint upsampling network for
+upsampling low-resolution optical ﬂow using the origi-
+nal RGB image as guidance. Estimating optical ﬂow is
+a challenging task, and even recent state-of-the-art ap-
+proaches [39] resort to simple bilinear upsampling to pre-
+dict optical ﬂow at the full resolution. Optical ﬂow is
+smoothly varying within motion boundaries, where accom-
+panying RGB images can offer strong clues, making joint
+upsampling an appealing solution. We use the same net-
+work architecture as in the depth upsampling experiments,
+with the only difference being that instead of single-channel
+depth, input and output are two-channel ﬂow with u, v com-
+ponents. We experiment with the Sintel dataset [7] (clean
+pass). The same training protocol in Sec. 4.2 is used, and the
+low-resolution optical ﬂow is obtained from bilinear down-
+sampling of the ground-truth. We compare with baselines
+of bilinear interpolation and DJF [26], and observe consis-
+tent advantage (Tab. 2). Fig. 3 shows a sample visual re-
+sult indicating that our network is capable of restoring ﬁne-
+structured details and also produces smoother predictions in
+areas with uniform motion.
+
+Table 2: Joint optical ﬂow upsampling. End-Point-Error (EPE)
+showing the improved performance compared with DJF [26].
+
+4×
+
+8×
+
+16×
+
+Bilinear
+DJF [26]
+
+0.465
+0.176
+
+0.901
+0.438
+
+1.628
+1.043
+
+Ours
+
+0.105
+
+0.256
+
+0.592
+
+11170
+
+5. Conditional Random Fields
+
+Early adoptions of CRFs in computer vision tasks were
+limited to region-based approaches and short-range struc-
+tures [36] for efﬁciency reasons. Fully-Connected CRF
+(Full-CRF) [24] was proposed to offer the beneﬁts of dense
+pairwise connections among pixels, which resorts to ap-
+proximate high-dimensional ﬁltering [1] for efﬁcient infer-
+ence. Consider a semantic labeling problem, where each
+pixel i in an image I can take one of the semantic labels
+li ∈ {1, ..., L}. Full-CRF has unary potentials usually de-
+ﬁned by a classiﬁer such as CNN: ψu(li) ∈ RL. And, the
+pairwise potentials are deﬁned for every pair of pixel loca-
+tions (i, j): ψp(li, lj|I) = µ(li, lj)K(fi, fj), where K is a
+kernel function and µ is a compatibility function. A com-
+mon choice for µ is the Potts model: µ(li, lj) = [li 6= lj].
+[24] utilizes two Gaussian kernels with hand-crafted fea-
+tures as the kernel function:
+
+K(fi, fj) =w1 exp(−
++ w2 exp(cid:26)−
+
+kpi − pjk2
+
+2θ2
+α
+
+−
+
+kIi − Ijk2
+
+β )
+
+2θ2
+
+kpi − pjk2
+
+2θ2
+γ
+
+(cid:27)
+
+(4)
+
+where w1, w2, θα, θβ, θγ are model parameters, and are typ-
+ically found by a grid-search. Then, inference in Full-
+CRF amounts to maximizing the following Gibbs distribu-
+
+(l1, l2, ..., ln). Exact inference of Full-CRF is hard, and [24]
+relies on mean-ﬁeld approximation which is optimizing for
+
+tion: P (l|I) = exp(−Pi ψu(li) −Pi<j ψp(li, lj)), l =
+an approximate distribution Q(l) =Qi Qi(li) by minimiz-
+
+ing the KL-divergence between P (l|I) and the mean-ﬁeld
+approximation Q(l). This leads to the following mean-ﬁeld
+(MF) inference step that updates marginal distributions Qi
+iteratively for t = 0, 1, ... :
+
+i
+
+1
+Zi
+
+(l) ←
+
+Q(t+1)
+
+exp(cid:26) − ψu(l)
+−Xl′∈L
+µ(l, l′)Xj6=i
+Pj6=i K(fi, fj)Q(t)
+
+The main
+
+in
+
+computation
+each MF iteration,
+j , can be viewed as high-dimensional
+Gaussian ﬁltering.
+Previous work [24, 25] relies on
+permutohedral lattice convolution [1] to achieve efﬁcient
+implementation.
+
+K(fi, fj)Q(t)
+
+j (l′)(cid:27) (5)
+
+5.1. Efﬁcient, learnable CRF with PAC
+
+Existing work [51, 21] back-propagates through the
+above MF steps to combine CRF inference with CNNs re-
+sulting in end-to-end training of CNN-CRF models. While
+there exists optimized CPU implementations, permutohe-
+dral lattice convolution cannot easily utilize GPUs because
+it “does not follow the SIMD paradigm of efﬁcient GPU
+
+t…
+
+u
+p
+n
+
+I
+
+s
+e
+i
+r
+a
+n
+U
+
+x
+a
+m
+
+t
+f
+o
+S
+
+PAC
+
+dilation=16
+
+PAC
+
+dilation=64
+
+x
+a
+m
+
+𝑡 steps 
+𝑀𝐹
+
+PAC-CRF
+
+t
+f
+o
+S
+
+n
+o
+
+i
+
+i
+t
+c
+d
+e
+r
+P
+
+dilation=16
+
+dilation=64
+
+Figure 4: PAC-CRF. Illustration of inputs, outputs and the oper-
+ations in each mean-ﬁeld (MF) step of PAC-CRF inference. Also
+shown is the coverage of two 5×5 PAC ﬁlters, with dilation factors
+16 and 64 respectively.
+
+computation” [40]. Another drawback of relying on per-
+mutohedral lattice convolution is the approximation error
+incurred during both inference and gradient computation.
+
+We propose PAC-CRF, which alleviates these computa-
+tion issues by relying on PAC for efﬁcient inference, and is
+easy to integrate with existing CNN backbones. PAC-CRF
+also has additional learning capacity, which leads to better
+performance compared with Full-CRF in our experiments.
+
+PAC-CRF. In PAC-CRF, we deﬁne pairwise connections
+over ﬁxed windows Ωk around each pixel instead of dense
+p (li, lj|I), where the k-th
+
+connections: PkPiPj∈Ωk(i) ψk
+
+pairwise potential is deﬁned as
+
+ψk
+p (li, lj|I) = K k(fi, fj)Wk
+
+lj li [pj − pi]
+
+(6)
+
+Here Ωk(·) speciﬁes the pairwise connection pattern of the
+k-th pairwise potential originated from each pixel, and K k
+is a ﬁxed Gaussian kernel. Intuitively, this formulation al-
+lows the label compatibility transform µ in Full-CRF to be
+modeled by W, and to vary across different spatial offsets.
+Similar derivation as in Full-CRF yields the following iter-
+ative MF update rule (see supp. mat. for more details):
+
+exp(cid:26) − ψu(l)−
+
+K k(fi, fj)Wk
+
+l′l[pj − pi]Q(t)
+
+j (l′)
+
+Q(t+1)
+
+i
+
+(l) ←
+
+1
+Zi
+
+Xk Xl′∈L Xj∈Ωk(i)
+|
+
+PAC
+
+{z
+
+(cid:27) (7)
+}
+
+MF update now consists of PAC instead of sparse high-
+dimensional ﬁltering as in Full-CRF (Eq. 5). As outlined
+in Sec. 2, there are several advantages of PAC over high-
+dimensional ﬁltering. With PAC-CRF, we can freely pa-
+rameterize and learn the pairwise potentials in Eq. 6 that
+also use a richer form of compatibility transform W. PAC-
+CRF can also make use of learnable features f for pairwise
+potentials instead of pre-deﬁned ones in Full-CRF. Fig. 4
+(left) illustrates the computation steps in each MF step with
+two pairwise PAC kernels.
+
+Long-range connections with dilated PAC. The major
+source of heavy computation in Full-CRF is the dense pair-
+
+11171
+
+In PAC-CRF, the pairwise con-
+wise pixel connections.
+nections are deﬁned by the local convolution windows Ωk.
+To have long-range pairwise connections while keeping the
+number of PAC parameters managable, we make use of
+dilated ﬁlters [10, 48]. Even with a relatively small ker-
+nel size (5 × 5), with a large dilation, e.g., 64, the CRF
+can effectively reach a neighborhood of 257 × 257. A
+concurrent work [40] also propose a convolutional version
+of CRF (Conv-CRF) to reduce the number of connections
+in Full-CRF. However, [40] uses connections only within
+small local windows. We argue that long-range connections
+can provide valuable information, and our CRF formulation
+uses a wider range of connections while still being efﬁcient.
+Our formulation allows using multiple PAC ﬁlters in par-
+allel, each with different dilation factors. In Fig. 4 (right),
+we show an illustration of the coverage of two 5 × 5 PAC
+ﬁlters, with dilation factors 16 and 64 respectively. This
+allows PAC-CRF to achieve a good trade-off between com-
+putational efﬁciency and long-range pairwise connectivity.
+
+5.2. Semantic segmentation with PAC CRF
+
+The task of semantic segmentation is to assign a seman-
+tic label to each pixel in an image. Full-CRF is proven to
+be a valuable post-processing tool that can considerably im-
+prove CNN segmentation performance [10, 51, 21]. Here,
+we experiment with PAC-CRF on top of the FCN semantic
+segmentation network [31]. We choose FCN for simplicity
+and ease of comparisons, as FCN only uses standard convo-
+lution layers and does not have many bells and whistles.
+
+, B
+σB
+
+In the experiments, we use scaled RGB color,
+, G
+[ R
+]⊺, as the guiding features for the PAC layers
+σG
+σR
+in PAC-CRF . The scaling vector [σR, σG, σB]⊺ is learned
+jointly with the PAC weights W. We try two internal con-
+ﬁgurations of PAC-CRF: a single 5×5 PAC kernel with di-
+lation of 32, and two parallel 5×5 PAC kernels with dilation
+factors of 16 and 64. 5 MF steps are used for a good balance
+between speed and accuracy (more details in supp. mat.).
+We ﬁrst freeze the backbone FCN network and train only
+the PAC-CRF part for 40 epochs, and then train the whole
+network for another 40 epochs with reduced learning rates.
+
+Dataset. We follow the training and validation settings of
+FCN [31] which is trained on PascalVOC images and vali-
+dated on a reduced validation set of 736 images. We also
+submit our ﬁnal trained models to the ofﬁcial evaluation
+server to get test scores on 1456 test images.
+
+Baselines. We compare PAC-CRF with three baselines:
+Full-CRF [24], BCL-CRF [21], and Conv-CRF [40]. For
+Full-CRF, we use the publicly available C++ code, and ﬁnd
+the optimal CRF parameters through grid search. For BCL-
+CRF, we use 1-neighborhood ﬁlters to keep the runtime
+manageable and use other settings as suggested by the au-
+thors. For Conv-CRF, the same training procedure is used
+as in PAC-CRF. We use the more powerful variant of Conv-
+
+Table 3: Semantic segmentation with PAC-CRF. Validation and
+test mIoU scores along with the runtimes of different techniques.
+PAC-CRF results in better improvements than Full-CRF [24]
+while being faster. PAC-CRF also outperforms Conv-CRF [40]
+and BCL [21]. Runtimes are averaged over all validation images.
+
+Method
+
+mIoU (val / test) CRF Runtime
+
+Unaries only (FCN)
+
+65.51 / 67.20
+
+-
+
+Full-CRF [24]
+BCL-CRF [21]
+Conv-CRF [40]
+
+PAC-CRF, 32
+PAC-CRF, 16-64
+
++2.11 / +2.45
++2.28 / +2.33
++2.13 / +1.57
+
++3.01 / +2.21
++3.39 / +2.62
+
+629 ms
+
+2.6 s
+38 ms
+
+39 ms
+78 ms
+
+CRF with learnable compatibility transform (referred to as
+“Conv+C” in [40]), and we learn the RGB scales for Conv-
+CRF in the same way as for PAC-CRF. We follow the sug-
+gested default settings for Conv-CRF and use a ﬁlter size of
+11×11 and a blurring factor of 4. Note that like Full-CRF
+(Eq. 4), the other baselines also use two pairwise kernels.
+
+Results. Tab. 3 reports validation and test mean Intersection
+over Union (mIoU) scores along with average runtimes of
+different techniques. Our two-ﬁlter variant (“PAC-CRF, 16-
+64”) achieves better mIoU compared with all baselines, and
+also compares favorably in terms of runtime. The one-ﬁlter
+variant (“PAC-CRF, 32”) performs slightly worse than Full-
+CRF and BCL-CRF, but has even larger speed advantage,
+offering a strong option where efﬁciency is needed. Sam-
+ple visual results are shown in Fig. 5. While being quan-
+titatively better and retaining more visual details overall,
+PAC-CRF produces some amount of noise around bound-
+aries. This is likely due to a known “gridding” effect of
+dilation [49], which we hope to mitigate in future work.
+
+6. Layer hot-swapping with PAC
+
+So far, we design speciﬁc architectures around PAC for
+different use cases. In this section, we offer a strategy to
+use PAC for simply upgrading existing CNNs with minimal
+modiﬁcations through what we call layer hot-swapping.
+
+Layer hot-swapping. Network ﬁne-tuning has become
+a common practice when training networks on new data
+or with additional layers. Typically, in ﬁne-tuning, newly
+added layers are initialized randomly. Since PAC general-
+izes standard convolution layers, it can directly replace con-
+volution layers in existing networks while retaining the pre-
+trained weights. We refer to this modiﬁcation of existing
+pre-trained networks as layer hot-swapping.
+
+We continue to use semantic segmentation as an exam-
+ple, and demonstrate how layer hot-swapping can be a sim-
+ple yet effective modiﬁcation to existing CNNs. Fig. 6 illus-
+trates a FCN [31] before and after the hot-swapping modi-
+ﬁcations. We swap out the last CONV layer of the last three
+convolution groups, CONV3 3, CONV4 3, CONV5 3,
+
+11172
+
+Input
+
+PAC-FCN-CRF
+Figure 5: Semantic segmentation with PAC-CRF and PAC-FCN. We show three examples from the validation set. Compared to Full-
+CRF [24], BCL-CRF [21], and Conv-CRF [40], PAC-CRF can recover ﬁner details faithful to the boundaries in the RGB inputs.
+
+PAC-CRF,16-64
+
+PAC-CRF,32
+
+Conv-CRF
+
+BCL-CRF
+
+PAC-FCN
+
+Full-CRF
+
+Unary
+
+GT
+
+with PAC layers with the same conﬁguration (ﬁlter size,
+input and output channels, etc.), and use the output of
+CONV2 2 as the guiding feature for the PAC layers. By
+this example, we also demonstrate that one could use ear-
+lier layer features (CONV2 2 here) as adapting features for
+PAC. Using this strategy, the network parameters do not
+increase when replacing CONV layers with PAC layers.
+All the layer weights are initialized with trained FCN pa-
+rameters. To ensure a better starting condition for further
+training, we scale the guiding features by a small constant
+(0.0001) so that the PAC layers initially behave very closely
+to their original CONV counterparts. We use 8825 images
+for training, including the Pascal VOC 2011 training images
+and the additional training samples from [16]. Validation
+and testing are performed in the same fashion as in Sec. 5.
+
+Results are reported in Tab. 4. We show that our simple
+modiﬁcation (PAC-FCN) provides about 2 mIoU improve-
+ment on test (67.20 → 69.18) for the semantic segmenta-
+tion task, while incurring virtually no runtime penalty at in-
+ference time. Note that PAC-FCN has the same number of
+
+t
+u
+p
+n
+
+I
+
+…
+
+t
+
+u
+p
+n
+
+I
+
+…
+
+2
+_
+2
+V
+N
+O
+C
+
+2
+_
+2
+V
+N
+O
+C
+
+…
+
+3
+_
+3
+V
+N
+O
+C
+
+…
+
+3
+_
+4
+V
+N
+O
+C
+
+…
+
+3
+_
+5
+V
+N
+O
+C
+
+…
+
+hot swapping
+
+…
+
+3
+_
+3
+C
+A
+P
+
+…
+
+3
+_
+4
+C
+A
+P
+
+…
+
+3
+_
+5
+C
+A
+P
+
+…
+
+n
+o
+
+i
+
+i
+t
+c
+d
+e
+r
+P
+
+n
+o
+
+i
+
+i
+t
+c
+d
+e
+r
+P
+
+Figure 6: Layer hot-swapping with PAC. A few layers of a net-
+work before (top) and after (bottom) hot-swapping. Three CONV
+layers are replaced with PAC layers, with adapting features com-
+ing from an earlier convolution layer. All the original network
+weights are retained after the modiﬁcation.
+
+parameters as the original FCN model. The improvement
+brought by PAC-FCN is also complementary to any addi-
+tional CRF post-processing that can still be applied. After
+combined with a PAC-CRF (the 16-64 variant) and trained
+jointly, we observe another 2 mIoU improvement. Sample
+visual results are shown in Fig. 5.
+
+Table 4: FCN hot-swapping CONV with PAC. Validation and
+test mIoU scores along with runtimes of different techniques. Our
+simple hot-swapping strategy provides 2 IoU gain on test. Com-
+bining with PAC-CRF offers additional improvements.
+
+Method
+
+PAC-CRF mIoU (val / test) Runtime
+
+FCN-8s
+FCN-8s
+
+PAC-FCN
+PAC-FCN
+
+-
+
+16-64
+
+-
+
+16-64
+
+65.51 / 67.20
+68.90 / 69.82
+
+67.44 / 69.18
+69.87 / 71.34
+
+39 ms
+117 ms
+
+41 ms
+118 ms
+
+7. Conclusion
+
+In this work we propose PAC, a new type of ﬁltering op-
+eration that can effectively learn to leverage guidance infor-
+mation. We show that PAC generalizes several popular ﬁl-
+tering operations and demonstrate its applicability on differ-
+ent uses ranging from joint upsampling, semantic segmenta-
+tion networks, to efﬁcient CRF inference. PAC generalizes
+standard spatial convolution, and can be used to directly re-
+place standard convolution layers in pre-trained networks
+for performance gain with minimal computation overhead.
+
+Acknowledgements H. Su and E. Learned-Miller ac-
+knowledge support from AFRL and DARPA (#FA8750-18-
+2-0126)2 and the MassTech Collaborative grant for funding
+the UMass GPU cluster.
+
+2The U.S. Gov. is authorized to reproduce and distribute reprints for Gov.
+purposes notwithstanding any copyright notation thereon. The views and
+conclusions contained herein are those of the authors and should not be in-
+terpreted as necessarily representing the ofﬁcial policies or endorsements,
+either expressed or implied, of the AFRL and DARPA or the U.S. Gov.
+
+11173
+
+References
+
+[1] A. Adams, J. Baek, and M. A. Davis. Fast high-dimensional
+ﬁltering using the permutohedral lattice. Computer Graphics
+Forum, 29(2):753–762, 2010. 3, 6
+
+[2] V. Aurich and J. Weule. Non-linear Gaussian ﬁlters perform-
+In DAGM, pages 538–545.
+
+ing edge preserving diffusion.
+Springer, 1995. 2
+
+[3] S. P. Awate and R. T. Whitaker. Higher-order image statistics
+for unsupervised, information-theoretic, adaptive, image ﬁl-
+tering. In Proc. CVPR, volume 2, pages 44–51. IEEE, 2005.
+2
+
+[4] S. Bako, T. Vogels, B. McWilliams, M. Meyer, J. Nov´ak,
+A. Harvill, P. Sen, T. Derose, and F. Rousselle. Kernel-
+predicting convolutional networks for denoising monte carlo
+renderings. ACM Trans. Graph., 36(4):97, 2017. 2
+
+[5] J. T. Barron and B. Poole. The fast bilateral solver. In Proc.
+
+ECCV, pages 617–632. Springer, 2016. 5
+
+[6] A. Buades, B. Coll, and J.-M. Morel. A non-local algorithm
+for image denoising. In Proc. CVPR, volume 2, pages 60–65.
+IEEE, 2005. 2
+
+[7] D. J. Butler, J. Wulff, G. B. Stanley, and M. J. Black. A
+naturalistic open source movie for optical ﬂow evaluation.
+In A. Fitzgibbon et al. (Eds.), editor, Proc. ECCV, Part IV,
+LNCS 7577, pages 611–625. Springer-Verlag, Oct. 2012. 5
+
+[8] S. Chandra and I. Kokkinos. Fast, exact and multi-scale in-
+ference for semantic image segmentation with deep Gaussian
+CRFs. In Proc. ECCV, pages 402–418. Springer, 2016. 2
+
+[9] L.-C. Chen, J. T. Barron, G. Papandreou, K. Murphy, and
+A. L. Yuille. Semantic image segmentation with task-speciﬁc
+edge detection using CNNs and a discriminatively trained
+domain transform. In Proc. CVPR, pages 4545–4554, 2016.
+2
+
+[10] L.-C. Chen, G. Papandreou, I. Kokkinos, K. Murphy, and
+A. L. Yuille. Deeplab: Semantic image segmentation with
+deep convolutional nets, atrous convolution, and fully con-
+nected CRFs. PAMI, 40(4):834–848, 2018. 7
+
+[11] L.-C. Chen, A. Schwing, A. Yuille, and R. Urtasun. Learning
+deep structured models. In Proc. ICML, pages 1785–1794,
+2015. 2
+
+[12] J. Dai, H. Qi, Y. Xiong, Y. Li, G. Zhang, H. Hu, and Y. Wei.
+arXiv:1703.06211,
+
+Deformable convolutional networks.
+1(2):3, 2017. 2, 3
+
+[13] R. Gadde, V. Jampani, M. Kiefel, D. Kappler, and P. V.
+Gehler. Superpixel convolutional networks using bilateral
+inceptions. In Proc. ECCV, pages 597–613. Springer, 2016.
+2
+
+[14] E. S. Gastal and M. M. Oliveira. Domain transform for edge-
+aware image and video processing. ACM Trans. Graph.,
+30(4):69, 2011. 2
+
+[15] B. Ham, M. Cho, and J. Ponce. Robust image ﬁltering using
+In Proc. CVPR, pages
+
+joint static and dynamic guidance.
+4823–4831, 2015. 5
+
+[16] B. Hariharan, P. Arbelaez, L. Bourdev, S. Maji, and J. Malik.
+In Proc. ICCV,
+
+Semantic contours from inverse detectors.
+2011. 8
+
+[17] A. W. Harley, K. G. Derpanis,
+
+and I. Kokkinos.
+Segmentation-aware convolutional networks using local at-
+tention masks. In Proc. ICCV, volume 2, page 7, 2017. 2
+
+[18] K. He, J. Sun, and X. Tang. Guided image ﬁltering. PAMI,
+
+35(6):1397–1409, 2013. 2, 5
+
+[19] T.-W. Hui, C. C. Loy, and X. Tang. Depth map super-
+In Proc. ECCV,
+
+resolution by deep multi-scale guidance.
+pages 353–369. Springer, 2016. 5
+
+[20] V. Jampani, R. Gadde, and P. V. Gehler. Video propagation
+
+networks. In Proc. CVPR, 2017. 3
+
+[21] V. Jampani, M. Kiefel, and P. V. Gehler. Learning sparse high
+dimensional ﬁlters: Image ﬁltering, dense CRFs and bilateral
+neural networks. In Proc. CVPR, pages 4452–4461, 2016. 2,
+3, 4, 6, 7, 8
+
+[22] X. Jia, B. De Brabandere, T. Tuytelaars, and L. V. Gool. Dy-
+namic ﬁlter networks. In Proc. NIPS, pages 667–675, 2016.
+2, 4
+
+[23] J. Kopf, M. F. Cohen, D. Lischinski, and M. Uyttendaele.
+Joint bilateral upsampling. ACM Trans. Graph., 26(3):96,
+2007. 5
+
+[24] P. Kr¨ahenb¨uhl and V. Koltun. Efﬁcient inference in fully con-
+nected CRFs with Gaussian edge potentials. In Proc. NIPS,
+pages 109–117, 2011. 2, 6, 7, 8
+
+[25] P. Kr¨ahenb¨uhl and V. Koltun. Parameter learning and con-
+vergent inference for dense random ﬁelds. In Proc. ICML,
+pages 513–521, 2013. 6
+
+[26] Y. Li, J.-B. Huang, N. Ahuja, and M.-H. Yang. Deep joint
+In Proc. ECCV, pages 154–169. Springer,
+
+image ﬁltering.
+2016. 4, 5
+
+[27] Y. Li, J.-B. Huang, N. Ahuja, and M.-H. Yang. Joint image
+
+ﬁltering with deep convolutional networks. PAMI, 2018. 5
+
+[28] Y. Li and R. Zemel. Mean ﬁeld networks. arXiv:1410.5884,
+
+2014. 2
+
+[29] G. Lin, C. Shen, A. Van Den Hengel, and I. Reid. Efﬁcient
+piecewise training of deep structured models for semantic
+segmentation. In Proc. CVPR, pages 3194–3203, 2016. 2
+
+[30] S. Liu, S. D. Mello, J. Gu, G. Zhong, M.-H. Yang, and
+J. Kautz. Learning afﬁnity via spatial propagation networks.
+In Proc. NIPS, 2017. 2
+
+[31] J. Long, E. Shelhamer, and T. Darrell. Fully convolutional
+networks for semantic segmentation. In Proc. CVPR, pages
+3431–3440, 2015. 7
+
+[32] S. Paris, P. Kornprobst, J. Tumblin, F. Durand, et al. Bi-
+lateral ﬁltering: Theory and applications.
+Foundations
+and Trends R(cid:13) in Computer Graphics and Vision, 4(1):1–73,
+2009. 3
+
+[33] N. Parmar, A. Vaswani, J. Uszkoreit, Ł. Kaiser, N. Shazeer,
+
+and A. Ku. Image transformer. arXiv:1802.05751, 2018. 3
+
+[34] J.-H. Rick Chang and Y.-C. Frank Wang. Propagated image
+
+ﬁltering. In Proc. CVPR, pages 10–18, 2015. 2
+
+[35] F. Saeedan, N. Weber, M. Goesele, and S. Roth. Detail-
+preserving pooling in deep networks. In cvpr, pages 9108–
+9116, 2018. 2, 4
+
+[36] J. Shotton, J. Winn, C. Rother, and A. Criminisi. Texton-
+boost: Joint appearance, shape and context modeling for
+multi-class object recognition and segmentation.
+In Proc.
+ECCV, 2006. 6
+
+11174
+
+[37] N. Silberman, D. Hoiem, P. Kohli, and R. Fergus.
+
+segmentation and support inference from rgbd images.
+Proc. ECCV, pages 746–760. Springer, 2012. 5
+
+Indoor
+In
+
+[38] H. Su, V. Jampani, D. Sun, S. Maji, E. Kalogerakis, M.-H.
+Yang, and J. Kautz. Splatnet: Sparse lattice networks for
+point cloud processing. In Proc. CVPR, 2018. 3
+
+[39] D. Sun, X. Yang, M.-Y. Liu, and J. Kautz. PWC-Net: CNNs
+for optical ﬂow using pyramid, warping, and cost volume. In
+Proc. CVPR, pages 8934–8943, 2018. 5
+
+[40] M. T. T. Teichmann and R. Cipolla. Convolutional CRFs for
+
+semantic segmentation. arXiv:1805.04777, 2018. 6, 7, 8
+
+[41] C. Tomasi and R. Manduchi. Bilateral ﬁltering for gray and
+
+color images. In Proc. ICCV, 1998. 2, 3
+
+[42] A. Vaswani, N. Shazeer, N. Parmar, J. Uszkoreit, L. Jones,
+A. N. Gomez, Ł. Kaiser, and I. Polosukhin. Attention is all
+you need. In Proc. NIPS, pages 5998–6008, 2017. 3
+
+[43] X. Wang, R. Girshick, A. Gupta, and K. He. Non-local neural
+
+networks. In Proc. CVPR, 2018. 2, 3
+
+[44] N. Weber, M. Waechter, S. C. Amend, S. Guthe, and M. Goe-
+sele. Rapid, detail-preserving image downscaling. ACM
+Trans. Graph., 35(6):205, 2016. 4
+
+[45] H. Wu, S. Zheng, J. Zhang, and K. Huang. Fast end-to-end
+In Proc. CVPR, pages 1838–1847,
+
+trainable guided ﬁlter.
+2018. 2
+
+[46] J. Wu, D. Li, Y. Yang, C. Bajaj, and X. Ji. Dynamic sampling
+
+convolutional neural networks. arXiv:1803.07624, 2018. 2
+
+[47] T. Xue, J. Wu, K. Bouman, and B. Freeman. Visual dynam-
+ics: Probabilistic future frame synthesis via cross convolu-
+tional networks. In Proc. NIPS, pages 91–99, 2016. 2
+
+[48] F. Yu and V. Koltun. Multi-scale context aggregation by di-
+
+lated convolutions. arXiv:1511.07122, 2015. 7
+
+[49] F. Yu, V. Koltun, and T. Funkhouser. Dilated residual net-
+
+works. In Proc. CVPR, pages 472–480, 2017. 7
+
+[50] H. Zhang,
+
+I. Goodfellow, D. Metaxas, and A. Odena.
+networks.
+
+adversarial
+
+generative
+
+Self-attention
+arXiv:1805.08318, 2018. 3
+
+[51] S. Zheng, S. Jayasumana, B. Romera-Paredes, V. Vineet,
+Z. Su, D. Du, C. Huang, and P. H. Torr. Conditional random
+ﬁelds as recurrent neural networks.
+In Proc. ICCV, pages
+1529–1537, 2015. 2, 6, 7
+
+11175
+
+

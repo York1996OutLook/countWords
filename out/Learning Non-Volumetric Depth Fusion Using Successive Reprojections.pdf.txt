@@ -1,0 +1,1206 @@
+Learning Non-volumetric Depth Fusion using Successive Reprojections
+
+Simon Donn´e
+
+Andreas Geiger
+
+Autonomous Vision Group
+
+MPI for Intelligent Systems and University of T¨ubingen
+
+{simon.donne,andreas.geiger}@tue.mpg.de
+
+Abstract
+
+Given a set of input views, multi-view stereopsis tech-
+niques estimate depth maps to represent the 3D reconstruc-
+tion of the scene; these are fused into a single, consistent,
+reconstruction – most often a point cloud. In this work we
+propose to learn an auto-regressive depth reﬁnement directly
+from data. While deep learning has improved the accuracy
+and speed of depth estimation signiﬁcantly, learned MVS
+techniques remain limited to the planesweeping paradigm.
+We reﬁne a set of input depth maps by successively reproject-
+ing information from neighbouring views to leverage multi-
+view constraints. Compared to learning-based volumetric
+fusion techniques, an image-based representation allows
+signiﬁcantly more detailed reconstructions; compared to tra-
+ditional point-based techniques, our method learns noise
+suppression and surface completion in a data-driven fashion.
+Due to the limited availability of high-quality reconstruction
+datasets with ground truth, we introduce two novel synthetic
+datasets to (pre-)train our network. Our approach is able to
+improve both the output depth maps and the reconstructed
+point cloud, for both learned and traditional depth estima-
+tion front-ends, on both synthetic and real data.
+
+1. Introduction
+
+Multi-view stereopsis techniques constitute the current
+state-of-the-art in 3D point cloud reconstruction [21]. Given
+a set of images and camera matrices, MVS techniques esti-
+mate depth maps for all input views and subsequently merge
+them into a consistent 3D reconstruction. While the deep
+learning paradigm has led to drastic improvements in the
+depth estimation step itself, the existing learned MVS ap-
+proaches [11, 38] consist of plane-sweeping, followed by
+classical depth fusion approaches [7, 30] (which mainly ﬁlter
+out invalid estimates). Instead, we propose to learn depth
+map fusion from data; by incorporating and fusing infor-
+mation from neighbouring views we reﬁne the depth map
+estimate of a central view. We dub our approach DeFuSR:
+Depth Fusion Through Successive Reprojections.
+
+Figure 1: The center view depth estimate is inaccurate
+around the center of the Buddha, even though the neigh-
+bouring view has a conﬁdent estimate for these areas. By
+reprojecting the neighbour’s information onto the center im-
+age, we efﬁciently encode this information for the reﬁnement
+network to resolve the uncertain areas. Iteratively perform-
+ing this reﬁnement further improves the estimates.
+
+In volumetric space, learned approaches [2, 16, 17, 29]
+that fuse depth information from multiple views have shown
+great promise but are inherently limited because of com-
+putation time and memory requirements. Working in the
+image domain bypasses these scaling issues [8, 30, 38], but
+existing image-based fusing techniques focus on ﬁltering out
+bad estimates in the fusion step rather than improving them.
+However, neighbouring views often contain information that
+is missing in the current view, as illustrated in Figure 1. We
+show that there is still a signiﬁcant margin for improvement
+of the depth estimates by auto-regressively incorporating
+information from neighbouring views.
+
+7634
+
+neighbourdepth estimateneighbourconﬁdencecenterdepth estimatecenterconﬁdencereprojectiononto centerreﬁned centerdepth estimatereﬁned centerconﬁdenceDeFuSRAs the absence of large-scale high-quality ground truth
+depth maps is a potential hurdle in training our model, we
+introduce two novel synthetic MVS datasets for pre-training.
+The ﬁrst is similar to Flying Chairs [4] and Flying Things
+3D [24]. To close the domain gap between this dataset and
+the DTU [14] dataset, we also use Unreal Engine to render
+the unrealDTU dataset, a drop-in replacement for DTU.
+
+To summarize our contributions: we propose auto-
+regressive learned depth fusion in the image domain, we
+create two synthetic MVS datasets for pretraining, we em-
+pirically motivate the design choices with ablation stud-
+ies, and we compare our approach with state-of-the-art
+depth fusion baselines. Code and datasets are available via
+https://github.com/simon-donne/defusr/.
+
+2. Related Work
+
+We ﬁrst discuss the estimation of the depth maps before
+we go on to discuss their fusion. We give only an overview of
+the most inﬂuential recent work in both areas; an exhaustive
+historical overview can be found in [6].
+
+2.1. Multi view Depth Estimation
+
+Traditional MVS: Based on the popular PatchMatch al-
+gorithm for rectiﬁed stereomatching [1], Gipuma [8] and
+COLMAP [30] are popular state-of-the-art approaches [21,
+31]; they propagate best ﬁtting planes to estimate per-pixel
+depth. While Gipuma selects neighbouring views on a per-
+view basis, COLMAP does so per-pixel for better results.
+
+Deep Stereo: Initial learning-based depth estimation con-
+sidered only the binocular task, using Siamese Networks
+to learn patch-based descriptors that are aggregated using
+winner-takes all [40] or global optimization [41]. By com-
+bining patch description, matching cost and cost volume
+processing in a single network, disparity estimation can
+be learned end-to-end [19, 20, 23]. Finally, Ummenhofer
+et al. [35] demonstrate a model which jointly predicts depth,
+camera motion, normals and optical ﬂow from two views.
+
+Deep MVS: Hartmann et al. succesfully showed the gen-
+eralization of two-view matching-based costs to multiple
+views [10]. While the end-to-end approaches for disparity
+estimation mentioned above were restricted to the binocular
+case, Leroy et al. [22], DeepMVS [11] and MVSNet [38]
+show that depth map prediction can beneﬁt from multiple
+input views. Similarly, Xu et al. recently proposed AMH-
+MVS [36], a learning-based version of Gipuma [8]. Paschali-
+dou et al. [27] exploit the combination of deep learning and
+Markov random ﬁelds for highly accurate depth maps, but
+are restricted to relatively low resolutions. All of these meth-
+ods have focused on the depth estimation problem. However,
+we show that fusing and incorporating depth from multiple
+views is a viable avenue for improvements.
+
+2.2. Depth Map Fusion
+
+Depth-based stereopsis techniques are subsequently faced
+with the task of fusing a set of depth maps into a consistent
+reconstruction. This part, too, can be split up into volumet-
+ric and image-based fusion approaches. Intuitively, volu-
+metric fusion can better leverage spatial information, but
+image-domain techniques such as ours are more efﬁcient
+and lightweight, enabling higher output resolutions.
+
+Volumetric Fusion, initially proposed by Curless et al. [3],
+was made increasingly popular by Zach et al. [39] and Kinect-
+Fusion [26], fusing various depth maps into a single trun-
+cated signed distance ﬁeld (TSDF). Leroy et al. have re-
+cently integrated this TSDF-based fusion into an end-to-end
+pipeline [22]. Fuhrmann et al. discuss how to handle the case
+of varying viewing distances and at the same time do away
+with the volumetric grid in favour of a point list [5] which
+scales better. Other non-learning-based techniques have
+been proposed to counter this scaling behaviour, such as a
+hybrid Delaunay-volumetric approach [25] and octrees [34].
+The ﬁrst does not lean itself well for learning-based ap-
+proaches, but three concurrent works have leveraged hier-
+archical surface representations (i.e., octrees) to improve
+execution speed [9, 29, 32]. However, even such approaches
+have issues scaling beyond 5123 voxels: eventually, they hit
+a computational ceiling. By working in the image domain,
+we largely sidestep the scaling issue and can additionally
+lean on the large amount of work and understanding avail-
+able for image-based deep learning.
+
+Image-based Fusion promises quadratic rather than cubic
+scaling. Traditionally, it only discards reconstructed points
+that are not supported by multiple views. This is imple-
+mented in Gipuma as the Fusibile algorithm [8], and Xu
+et al. [36] use the same fusion technique in AMHMVS, their
+learning-based version of Gipuma. In COLMAP [30], the
+accepted pixels are clustered in “consistent pixel clusters”
+that are combined into a single reconstructed point cloud:
+clusters not supported by a minimum number of views are
+discarded. Similarly, Poggi et al. [28] and Tosi et al. [33]
+have leveraged deep learning to yield conﬁdence estimates.
+While the former techniques ﬁlter out bad depth estimates,
+they do not attempt to improve the estimates. We argue
+that the depth maps can still be signiﬁcantly improved by
+incorporating information from neighbouring views. To the
+best of our knowledge, learning-based reﬁnement of depth
+maps was only done in a single-view setting [15, 37].
+
+We aim to learn depth map fusion and reﬁnement from a
+variable number of input views – the zero-neighbour variant
+of our approach serves as the single-image baseline similar
+to [15] and [37]. Our combined approach notably improves
+the quality of the fused point clouds, quantiﬁed in terms of
+the Chamfer distance (see Section 5), and at the same time
+yields improved depth maps for all input views.
+
+7635
+
+(a)
+
+(b)
+
+(c)
+
+(d)
+
+Figure 2: Example from our synthetic dataset: an input image (a) with the corresponding ground truth depth map (b). The
+depth map estimates from COLMAP (c) and MVSNet (d) show the issues in poorly constrained areas, usually because of
+occlusions and homogeneous areas. While MVSNet also returns a conﬁdence estimate for its estimate, we bootstrap our
+method with single-view conﬁdence estimation in the case of COLMAP inputs.
+
+Figure 3: Examples from our unrealDTU dataset: similar in set-up to DTU, we observe a series of objects on a table from a set
+of cameras scattered across one octant of a sphere.
+
+3. Datasets
+
+4.1. Network overview
+
+For evaluation and training, we consider the DTU MVS
+dataset [14]. Unfortunately, DTU lacks perfect ground truth:
+a potential hurdle for the learning task. To tackle this, we
+have constructed two new synthetic datasets for pre-training;
+see the supplementary material for more details.
+
+The ﬁrst, as seen in Figure 2,
+
+is similar to Flying
+Chairs [4] and Flying Things 3D [24]. We create ten ob-
+servations of a static scene rather than only two views of a
+non-rigid scene. Rendered with Blender, each scene consists
+of 10-20 ShapeNet objects randomly placed in front of a
+slanted background plane with an arbitrary image texture.
+
+Secondly, we also introduce a more realistic dataset to
+close the domain gap between the above dataset and real
+imagery. This second dataset is a drop-in replacement for the
+DTU dataset, rendered within Unreal Engine (see Figure 3),
+sporting perfect ground truth and more realistic rendering.
+
+Our network is summarized in Figure 4. We ﬁrst outline
+the entire process before discussing each aspect in detail.
+For an exhaustive listing, we refer to the supplementary.
+
+As mentioned before, the depth fusion step happens en-
+tirely in the image domain. To encode the information from
+neighbouring views, we project their depth maps and image
+features (obtained from a image-local network) onto the cen-
+ter view. After pooling the information of all neighbours, we
+have a two-sided approach: one head to residually reﬁne the
+input depth values (with limited spatial support), and another
+head that is intended to inpaint large unknown areas (with
+much larger spatial support). A third network weights the
+two options to yield the output estimate. A ﬁnal network
+predicts the conﬁdence of the reﬁned estimate. We do not
+use any normalization layers in the reﬁnement parts of the
+network, as absolute depth values need to be preserved.
+
+4. Method
+
+Neighbour reprojection
+
+We now outline the various aspects of our approach. We
+assume a set of depth map estimates as input, in this work
+from one of two front-ends: the traditional COLMAP [30]
+or the learning-based MVSNet [38]. The photometric depth
+map estimates from COLMAP are extremely noisy in poorly
+constrained areas (see Figure 2); although this would inter-
+fere with our reprojection step (see later), it proves to be
+straightforward to ﬁlter such areas out. We bootstrap our
+method by estimating the conﬁdence for the input estimates
+– we discuss this in more detail at the end of this section.
+
+Consider the set of N images In(u) with corresponding
+camera matrices Pn = Kn [Rn|tn], and estimated depth
+values dn(u) for each input pixel u = [u, v, 1]T. The 3D
+point corresponding with a given pixel is then given by
+
+xn(u) = RT
+
+n K−1
+
+n (dn(u)u − Kntn) .
+
+(1)
+
+Those xn(u) for which the input conﬁdence is larger than 0.5
+are then projected onto the center view 0. Call un→m(u) =
+Pmxn(u) the projection of xn(u) onto neighbour m, and
+zn→m(u) = [0 0 1] un→m(u) its depth.
+
+7636
+
+Figure 4: Overview of our proposed fusion network. A difference in coloring represents a difference in vantage point, i.e. the
+information is represented in different image planes. As outlined in Section 4.1, neighbouring views are ﬁrst reprojected, and
+then passed alongside the center depth estimate and the observed image. The output of the network is an improved version of
+the input depth of the reference view as well as a conﬁdence map for this output.
+
+(a)
+
+(b)
+
+(c)
+
+(d)
+
+(e)
+
+Figure 5: Example of the depth reprojection, bound calculation, and culling results. A neighbour image (a) is reprojected onto
+the center view (b), resulting in unﬁltered reprojection (c). Calculating the lower bound as in Section 4.1 yields (d). Finally,
+we ﬁlter (c) with (d) as outlined in Section 4.1 to result in the culled depth map (e). Note in the crop-outs how the bound
+calculation completes depth edges, while the culling step removes bleed-through.
+
+The z-buffer in view 0 based on neighbour n is then
+
+zn(u) = min
+
+un∈Ωn(u)
+
+zn→0(un),
+
+(2)
+
+where Ωn(u) = {u ∈ Ω|P0xn(un) ∼ u} is the collection
+of pixels in view n that reproject onto u in view 0.
+
+We call un(u) the pixel in view n for which zn(u) =
+zn→m(un(u)), i.e. the pixel responsible for the entry in the
+z-buffer. We now construct the reprojected image as
+
+˜In(u) = In(un(u)).
+
+(3)
+
+Note the apparent similarity with Spatial Transformer
+Networks [13], at least as far as the projection of the image
+features goes; the geometry involved in the reprojection of
+the depth maps is not captured by a Spatial Transformer.
+
+The reprojected depth and features have two major issues
+(as a result of the aliasing inherent in the reprojection, which
+is essentially a form of resampling). First of all, sharp depth
+edges in the neighbour view are often smeared over a large
+area in the center view, due to the difference in vantage
+points. While they do not constitute a evidence-supported
+surface, they do imply evidence-supported free space which
+
+contains information valuable to the network; we encode this
+into a lower bound image. Secondly, because of the aliasing
+in the reprojection step, background surfaces bleed through
+foreground surfaces. We now detail how to address both
+issues, as visualized in Figure 5.
+
+Minimum depth bound To encode the free space im-
+plied by a neighbour’s depth estimate, we calculate a lower
+bound depth map bn(u) for the center view with respect
+to neighbour n as the lowest depth hypotheses along each
+pixel’s ray that is no longer observed as free space by the
+neighbour image (see Figure 6). As far as the reference view
+is concerned, this is the lower bound on the depth of that
+pixel as implied by that neighbour’s depth map estimate. In
+terms of the previous notations, we can express the lower
+bound gn(u) from neighbour n as
+
+gn(u) = min {d > 0 | dm(u0→n(u)) > z0→n(u)} .
+
+(4)
+
+Culling invisible surfaces We now cull invisible surfaces
+in the reprojected depth zn(u): any pixel signiﬁcantly be-
+yond the lower bound bn(u) is considered to be invisible to
+the center view and is discarded in the culled version ˜zn(u).
+The threshold we use here is 1/1000th of the maximum depth
+in the scene (determined experimentally).
+
+7637
+
+center depthand featuresview 1 depthand featuresview N depthand featuresreprojectionview 1 depthand featuresreprojectedview N depthand featuresreprojectedpoolingmean depthand featuresreprojectedmax depthand featuresreprojectedresidualreﬁnementnon-residualinpaintinghead scoringnetworkreﬁnedcenter depthconﬁdenceclassiﬁcationcenter depthconﬁdencemin residualand featuresreprojectedFigure 6: Visualization of the lower bound calculation. For
+each pixel in the center view, we ﬁnd the lowest depth value
+for which the unprojected point is no longer viewed as empty
+space by the neighbouring camera.
+
+Value of initial conﬁdence estimation MVSNet yields a
+conﬁdence for its estimates, but for COLMAP, we bootstrap
+our method with a conﬁdence estimation for the input depth.
+Figure 7 illustrates the necessity of this conﬁdence ﬁltering:
+the bounds image and culled reprojection become noticeably
+cleaner. This conﬁdence estimation is described below.
+
+Neighbour pooling
+
+We perform three types of per-pixel pooling over the repro-
+jected neighbour information. First of all, we calculate the
+mean and maximum depth bound and culled reprojected
+depth, as well as the average reprojected feature and the
+feature corresponding to the maximum culled reprojected
+depth. We also extract the culled reprojected depth that is
+closest to the center view estimate, and its feature. These are
+passed to the reﬁnement and classiﬁcation heads, along with
+the input depth estimate and image features.
+
+Depth reﬁnement
+
+The depth reﬁnement step consists of two steps. In a ﬁrst
+step, the center view depth estimate and features, as well
+as the pooled reprojected neighbour information (we will
+refer to these as the “shared features”), are processed by
+two networks: a local residual depth reﬁnement module (a
+UNet block with depth 1 whose output is added to the input
+depth estimate) and a depth inpainting module (a UNet block
+with depth 5). Finally, a scoring network takes the output
+of the two other heads as input in addition to the shared
+features and outputs scores for both the residual reﬁnement
+and inpainting alternatives. These are softmaxed and used to
+weight both outputs.
+
+Conﬁdence classiﬁcation
+
+Finally, the last part of the network takes both the shared
+features and the ﬁnal depth estimate as input to yield a conﬁ-
+dence classiﬁcation of the output depth. This network is a
+UNet with depth 4, outputting a single channel on which a
+sigmoid is applied to acquire the ﬁnal conﬁdence prediction.
+
+(a)
+
+(b)
+
+(c)
+
+(d)
+
+(e)
+
+(f)
+
+(g)
+
+(h)
+
+(i)
+
+Figure 7: The necessity of the initial conﬁdence estimate for
+the depth map inputs. While the noisy input depth map (a)
+yields noticeable artifacts in the bounds image (b) and culled
+reprojected image (c), the conﬁdence-ﬁltered estimate (d)
+yields cleaner bounds (e) and culled reprojection (f). The
+ﬁnal row shows the same steps after one iteration of reﬁne-
+ment: the reﬁned neighbour estimate (g), and its implied
+bounds (h) and reprojection (i).
+
+Training
+
+As the feature reprojection is differentiable in terms of the
+features themselves (but not in terms of the depth values), we
+train the entire architecture end-to-end. However, training
+the different reﬁnement/inpainting/head scoring networks is
+challenging and training the conﬁdence network from the
+get-go causes it to degenerate into estimating zero conﬁdence
+everywhere (which is correct in the initial epochs).
+
+To mitigate this, we apply curriculum learning. In an
+initial phase, only the inpainting head is used. After a while,
+we enable the weighting network between the two heads, but
+keep the residual reﬁnement disabled. Once the classiﬁcation
+network makes valid choices between inpainted and input
+depth, we enable the residual reﬁnement and the conﬁdence
+classiﬁcation: utilizing the entirety of our architecture.
+
+The reﬁned depth output is supervised with an L1 loss
+on both the depth values and their gradients. The conﬁdence
+is supervised with a binary cross-entropy loss, where pixels
+are assumed to be trusted if they are within a given threshold
+of the ground truth value. The conﬁdence loss is only back-
+propagated through the conﬁdence classiﬁcation block to
+prevent it from degenerating the depth estimate to make its
+own optimization easier; as a result we require no weighting
+between both losses as they affect distinct sets of weights.
+
+7638
+
+centerneighbourestimated surfaceobserved occupiedobserved emptyfree space bound(a)
+
+(b)
+
+(c)
+
+(d)
+
+Figure 8: The depth maps used for supervision on the DTU dataset. For a given input image (a), the dataset contains a
+reference point cloud (b) obtained with a structured light scanner. After creating a watertight mesh (c) from this point cloud
+and projecting that, we reject any point in the point cloud which gets projected behind this surface from the supervision depth
+map (d). Additionally, we reject the points of the white table.
+
+To unify the world scales of the different datasets, we
+scale all scenes such that the used depth range is roughly
+between 1 and 5. To reduce the sensitivity to this scale
+factor, as well as augment the training set, we scale each
+minibatch element by a random value between 0.5 and 2.0.
+After inference, we undo this scaling.
+
+Supervision
+
+Our approach requires ground truth depth maps for super-
+vision. In the synthetic case, ﬂawless ground truth depth is
+provided by the rendering engine. For the DTU dataset, how-
+ever, ground truth consists of point clouds reconstructed by
+a structured light scanner [14]. Creating depth maps out of
+these point clouds, as before, faces the issue of bleedthrough
+as in Figure 5c. To address this issue, we perform Poisson
+surface reconstruction of the point cloud to yield a water-
+tight mesh [18]; any point in the point cloud which projects
+behind this surface is rejected from the ground truth depth
+maps. While this method works well, it was not viable for
+use inside the network because of its relatively low speed.
+Finally, we also reject points on the surface of the white
+table – this cannot be reconstructed by photometric methods
+and our network should not be penalized for incorrect depth
+estimates here: instead, we supervise those areas with zero
+conﬁdence. These issues are illustrated in Figure 8.
+
+5. Experimental Evaluation
+
+In what follows we empirically show the beneﬁt of our
+approach. To quantify performance, we recall the accuracy
+and completeness metrics from the DTU dataset [14]:
+
+accuracy(u, n) = min
+
+g
+
+kxg − xn(u)k2 , and
+
+completeness(g) = min
+u∈Ω,n
+
+kxg − xn(u)k2 .
+
+(5)
+
+(6)
+
+Accuracy indicates how close a reconstructed point lies to
+the ground truth, while completeness expresses how close
+a reference point lies to our reconstruction (for both met-
+rics, lower is better); the Chamfer distance is deﬁned as the
+algebraic mean of accuracy and completeness.
+
+We are mostly interested in the percentage of points
+whose accuracy or completeness is lower than τ = 2.0mm,
+which we consider more indicative than the average accu-
+racy or completeness metrics: it matters little whether an
+erroneous surface is 10 or 20 cm offset – yet this strongly
+affects the global averages. We report on both per-view, to
+quantify individual depth map quality, and for the ﬁnal point
+cloud. More results, including results on the new synthetic
+datasets for pre-training and the absolute distances for DTU,
+are provided in the supplementary.
+
+To create the fused point cloud for our network, we simul-
+taneously thin the point clouds and remove outliers (similar
+to Fusibile). The initial point cloud from the output of our
+network is given by all pixels for which the predicted conﬁ-
+dence is larger than a given threshold – the choice for this
+threshold is empirically decided below. For each point, we
+count the reconstructed points within a given threshold τ :
+
+cτ (u, n) = X
+
+I(kxn(u) − xn2 (u2)k2 < τ ),
+
+(7)
+
+u2∈Ω,n2
+
+where I(·) is the indicator function. xn(u) is accepted in
+the ﬁnal cloud with probability I(cτ (u, n) > 1)/cτ /5(u, n).
+Obvious outliers, with no points closer than τ , are rejected.
+For the other points, rejection probability is inversely pro-
+portional to the number of points closer than τ /5, mitigating
+the effect of non-uniform density of the reconstruction.
+
+All evaluations are at a resolution of 480 × 270, for
+
+feasability and because MVSNet is also restricted to this.
+
+5.1. Selecting the conﬁdence thresholds
+
+The conﬁdence classiﬁcation of our approach is binary;
+whether or not a depth estimate lies within a given threshold
+τd of the ground truth. Only depth estimates for which
+this predicted probability is above τprob are considered for
+the ﬁnal point cloud. Figure 9 illustrates that training the
+conﬁdence classiﬁcation for various τd yield the same trade-
+off between accuracy and completeness percentages. Based
+on these curves, we select τd = 2 and τprob = 0.5 for the
+evaluation to maximize the sums of both percentages.
+
+7639
+
+Table 1: Quantitative evaluation of the neighbour selection.
+Using twelve neighbours for three iterations of reﬁnement,
+leveraging information from both close-by and far-away
+neighbours yields the best results, mostly improving com-
+pleteness compared to the COLMAP fusion result.
+
+τd = 2
+τd = 5
+τd = 10
+
+60 65 70 75 80 85 90 95100
+
+per-view
+
+Accuracy (%)
+
+COLMAP
+
+nearest mixed
+
+furthest
+
+acc. (%)
+comp. (%)
+mean (%)
+acc. (%)
+comp. (%)
+mean (%)
+
+66
+40
+52
+73
+72
+72
+
+91
+38
+64
+83
+72
+78
+
+89
+45
+67
+80
+84
+82
+
+86
+37
+62
+74
+76
+75
+
+full
+
+Full cloud
+
+Per view
+
+)
+
+%
+
+(
+
+s
+s
+e
+n
+e
+t
+e
+l
+p
+m
+o
+C
+
+75
+70
+65
+60
+55
+50
+45
+
+τd = 2
+τd = 5
+τd = 10
+
+60 65 70 75 80 85 90
+
+Accuracy (%)
+
+)
+
+%
+
+(
+
+s
+s
+e
+n
+e
+t
+e
+l
+p
+m
+o
+C
+
+50
+45
+40
+35
+30
+25
+20
+15
+10
+
+Figure 9: The percentage of points with accuracy respec-
+tively completeness below 2.0, over the DTU validation set,
+for varying values of τd. The curves result from varying τprob;
+note that the evaluated options essentially lead to a continua-
+tion of the same curve. We select τd = 2 and τprob = 0.5 as
+the values that optimize the sum of both percentages.
+
+5.2. Selecting and leveraging neighbours
+
+We consider three strategies for neighbour selection: se-
+lecting the closest views, selecting the most far-away views,
+and selecting a mix of both. We evaluate three separate
+networks with these strategies to perform reﬁnement of
+COLMAP depth estimates with twelve neighbouring views.
+Table 1 shows the performance of these strategies, after
+three iterations of reﬁnement, compared to the result of
+COLMAP’s fusion. The mixed strategy proved to be the
+most efﬁcient: while far-away views clearly contain valuable
+information, close-by neighbours should not be neglected.
+In following experiments, we have always used the mixed
+strategy. While there is a practical limit (we have limited our-
+selves to twelve neighbours in this work), Table 2 shows that,
+as expected, using more neighbours leads to better results.
+
+5.3. Reﬁning MVSNet estimates
+
+Finally, we evaluate the use of our network architecture
+for reﬁning the MVSNet depth estimates. As shown in
+Table 3, our approach is not able to reﬁne the MVSNet
+estimates much; while the per-view accuracy increases no-
+ticeably, the other metrics remain roughly the same.
+
+The raw MVSNet estimates perform better than the
+COLMAP depth estimates. Reﬁning the COLMAP esti-
+mates with our approach, however, signiﬁcantly improves
+over the MVSNet results (reﬁned or otherwise). We observe
+(e.g. Figure 10) that the COLMAP estimates are much more
+view-point dependent: surface patches observed by many
+neighbours are reconstructed more accurately than others.
+MVSNet, as a learned technique, was trained to optimize
+the L1 error and appears to smooth these errors out over
+the surface. Intuitively, the former case indeed allows for
+more improvements by our approach, by propagating these
+accurate areas to neighbouring views.
+
+Table 2: Quantitative evaluation of the number of neighbours.
+Using zero, four, or twelve neighbours for three iterations of
+reﬁnement. As expected, more neighbours results in better
+performance, and too few neighbours performs worse than
+COLMAP’s fusion approach (which essentially uses all 48).
+
+COLMAP
+
+per-view
+
+full
+
+acc. (%)
+comp. (%)
+mean (%)
+acc. (%)
+comp. (%)
+mean (%)
+
+66
+40
+52
+73
+72
+72
+
+neighbours
+0
+91
+28
+59
+81
+66
+74
+
+4
+92
+31
+62
+84
+64
+74
+
+12
+89
+45
+67
+80
+84
+82
+
+Table 3: Reﬁning the MVSNet output depth estimates using
+three iterations of our approach. The per-view accuracy
+noticeably increases, while other metrics see a slight drop.
+
+MVSNet Reﬁned (it. 3)
+
+per-view
+
+full
+
+acc. (%)
+comp. (%)
+mean (%)
+acc. (%)
+comp. (%)
+mean (%)
+
+76
+35
+55
+88
+66
+77
+
+92
+34
+63
+86
+65
+76
+
+5.4. Qualitative results
+
+Figure 10 illustrates that performing more than one itera-
+tion is paramount to a good result but as the gains level out
+quickly, we have settled on three reﬁnement steps.
+
+Neighbouring views are crucial to ﬁlling in missing ar-
+eas of individual views, as Figure 11 illustrates: here, the
+entire right side of the box is missing in the input estimate.
+Single-view reﬁnement is not able to ﬁll in this missing
+area and does not beneﬁt from multiple reﬁnement iterations.
+Reﬁnement based on 12 neighbours, however, propagates
+information from other views and further improves the esti-
+mate over the next iteration, leveraging the now-improved
+information in those neighbours.
+
+Having focused on structure throughout this work, rather
+than appearance, our reconstructed point clouds look more
+noisy due to lighting changes (see Figure 12), while
+COLMAP fusion averages colour over the input views.
+
+7640
+
+COLMAP
+
+It 1
+
+It 2
+
+It 3
+
+COLMAP
+
+It 1
+
+It 2
+
+It 3
+
+MVSNet
+
+It 1
+
+It 2
+
+It 3
+
+MVSNet
+
+It 1
+
+It 2
+
+It 3
+
+Figure 10: Visualization of the depth map error over multiple iterations, for two elements of the DTU test set (darker blue is
+better). The ﬁrst two iterations are the most signiﬁcant, after that the improvements level out. Object elements not available in
+any view (the middle part of the buildings on the bottom right) cannot be recovered.
+
+Color image
+
+Ground truth depth
+
+Input depth error
+
+0 neighbours,
+
+0 neighbours,
+
+12 neighbours,
+
+12 neighbours,
+
+iteration 1
+
+iteration 2
+
+iteration 1
+
+iteration 2
+
+Figure 11: Output depth errors (middle) and conﬁdence
+(bottom) for our approach (darker blue is better). Without
+leveraging neighbouring views, additional iterations yield
+little beneﬁt. Neighbour information leads to better depth
+estimates and conﬁdence, further improving over iterations.
+
+Finally, we also provided a qualitative comparison on
+a small handheld capture. Without retraining the network,
+we process the COLMAP depth estimates resulting from 12
+images taken with a smartphone, both for a DTU-style object
+on a table and a less familiar setting of a large couch. While
+the conﬁdence network trained on DTU has issues around
+depth discontinuities, Figure 13 shows that the surfaces are
+well reconstructed.
+
+6. Conclusion and Future Work
+
+We have introduced a novel learning-based approach to
+depth fusion, DeFuSR: by iteratively propagating informa-
+tion from neighbouring views, we reﬁne the input depth
+maps. We have shown the importance of both neighbour-
+hood information and successive reﬁnement for this problem,
+resulting in signiﬁcantly more accurate and complete per-
+view and overall reconstructions.
+
+GT
+
+COLMAP
+
+Ours
+
+Figure 12: Example reconstructed cloud for an element of
+the test set. Note the signiﬁcant imperfections in the refer-
+ence point cloud (left). A visual drawback of our approach
+is that we focus solely on structure; the fusion step used by
+COLMAP innately also averages out the difference in color
+appearance between various views.
+
+P
+A
+M
+L
+O
+C
+
+P
+r
+o
+p
+o
+s
+e
+d
+
+Figure 13: Two scenes captured with a smartphone (12 im-
+ages). Note that the surfaces are well estimated (the green
+pillow and the gnome’s nose) and holes are completed cor-
+rectly (the black pillow, the gnome’s hat).
+
+We mention two directions for future work. First of all,
+our training loss is the L1 loss, which is known to have a
+tendency towards smooth outputs; alternative loss functions,
+such as the PatchGAN [12] can help mitigate this. Secondly,
+we have selected neighbours on the image level. Ideally,
+the selection of neighbours would happen more ﬁnegrained,
+and integrated into the learning pipeline, e.g. in the form of
+attention networks.
+
+7641
+
+References
+
+[1] M. Bleyer, C. Rhemann, and C. Rother. Patchmatch stereo
+- stereo matching with slanted support windows. In Proc. of
+the British Machine Vision Conf. (BMVC), 2011. 2
+
+[2] C. B. Choy, D. Xu, J. Gwak, K. Chen, and S. Savarese. 3d-
+r2n2: A uniﬁed approach for single and multi-view 3d object
+reconstruction. In Proc. of the European Conf. on Computer
+Vision (ECCV), 2016. 1
+
+[3] B. Curless and M. Levoy. A volumetric method for build-
+ing complex models from range images. In ACM Trans. on
+Graphics, 1996. 2
+
+[4] A. Dosovitskiy, P. Fischer, E. Ilg, P. Haeusser, C. Hazirbas,
+V. Golkov, P. v.d. Smagt, D. Cremers, and T. Brox. Flownet:
+Learning optical ﬂow with convolutional networks. In Proc.
+of the IEEE International Conf. on Computer Vision (ICCV),
+2015. 2, 3
+
+[5] S. Fuhrmann and M. Goesele. Floating scale surface recon-
+
+struction. TG, 2014. 2
+
+[6] Y. Furukawa, C. Hern´andez, and al. Multi-view stereo: A
+tutorial. Foundations and Trends in Computer Graphics and
+Vision, 2015. 2
+
+[7] S. Galliani, K. Lasinger, and K. Schindler. Massively parallel
+multiview stereopsis by surface normal diffusion. In Proc.
+of the IEEE International Conf. on Computer Vision (ICCV),
+2015. 1
+
+[8] S. Galliani, K. Lasinger, and K. Schindler. Gipuma: Mas-
+sively parallel multi-view stereo reconstruction. Publikatio-
+nen der Deutschen Gesellschaft f¨ur Photogrammetrie, Fern-
+erkundung und Geoinformation e. V, 25:361–369, 2016. 1,
+2
+
+[9] C. H¨ane, S. Tulsiani, and J. Malik. Hierarchical surface pre-
+diction for 3d object reconstruction. arXiv.org, 1704.00710,
+2017. 2
+
+[10] W. Hartmann, S. Galliani, M. Havlena, L. Van Gool, and
+K. Schindler. Learned multi-patch similarity. In Proc. of the
+IEEE International Conf. on Computer Vision (ICCV), 2017.
+2
+
+[11] P. Huang, K. Matzen, J. Kopf, N. Ahuja, and J. Huang. Deep-
+mvs: Learning multi-view stereopsis. In Proc. IEEE Conf. on
+Computer Vision and Pattern Recognition (CVPR), 2018. 1, 2
+[12] P. Isola, J. Zhu, T. Zhou, and A. A. Efros. Image-to-image
+translation with conditional adversarial networks. In Proc.
+IEEE Conf. on Computer Vision and Pattern Recognition
+(CVPR), 2017. 8
+
+[13] M.
+
+Jaderberg, K. Simonyan, A. Zisserman,
+transformer networks.
+
+and
+K. Kavukcuoglu.
+In
+Advances in Neural Information Processing Systems (NIPS),
+2015. 4
+
+Spatial
+
+[14] R. R. Jensen, A. L. Dahl, G. Vogiatzis, E. Tola, and H. Aanæs.
+Large scale multi-view stereopsis evaluation. In Proc. IEEE
+Conf. on Computer Vision and Pattern Recognition (CVPR),
+2014. 2, 3, 6
+
+[15] J. Jeon and S. Lee. Reconstruction-based pairwise depth
+dataset for depth image enhancement using cnn. In Proc. of
+the European Conf. on Computer Vision (ECCV), 2018. 2
+
+[16] M. Ji, J. Gall, H. Zheng, Y. Liu, and L. Fang. SurfaceNet:
+an end-to-end 3d neural network for multiview stereopsis. In
+
+Proc. of the IEEE International Conf. on Computer Vision
+(ICCV), 2017. 1
+
+[17] A. Kar, C. H¨ane, and J. Malik. Learning a multi-view stereo
+In Advances in Neural Information Processing
+
+machine.
+Systems (NIPS), 2017. 1
+
+[18] M. M. Kazhdan and H. Hoppe. Screened poisson surface
+reconstruction. ACM Trans. on Graphics, 32(3):29, 2013. 6
+
+[19] A. Kendall, H. Martirosyan, S. Dasgupta, and P. Henry. End-
+to-end learning of geometry and context for deep stereo regres-
+sion. In Proc. of the IEEE International Conf. on Computer
+Vision (ICCV), 2017. 2
+
+[20] S. Khamis, S. Fanello, C. Rhemann, A. Kowdle, J. Valentin,
+and S. Izadi. Stereonet: Guided hierarchical reﬁnement for
+real-time edge-aware depth prediction. arXiv.org, 2018. 2
+
+[21] A. Knapitsch, J. Park, Q.-Y. Zhou, and V. Koltun. Tanks
+and temples: Benchmarking large-scale scene reconstruction.
+ACM Trans. on Graphics, 36(4), 2017. 1, 2
+
+[22] V. Leroy, J.-S. Franco, and E. Boyer. Shape reconstruction
+using volume sweeping and learned photoconsistency.
+In
+Proc. of the European Conf. on Computer Vision (ECCV),
+2018. 2
+
+[23] W. Luo, A. Schwing, and R. Urtasun. Efﬁcient deep learning
+for stereo matching. In Proc. IEEE Conf. on Computer Vision
+and Pattern Recognition (CVPR), 2016. 2
+
+[24] N. Mayer, E. Ilg, P. Haeusser, P. Fischer, D. Cremers, A. Doso-
+vitskiy, and T. Brox. A large dataset to train convolutional
+networks for disparity, optical ﬂow, and scene ﬂow estima-
+tion. In Proc. IEEE Conf. on Computer Vision and Pattern
+Recognition (CVPR), 2016. 2, 3
+
+[25] C. Mostegel, R. Prettenthaler, F. Fraundorfer, and H. Bischof.
+Scalable surface reconstruction from point clouds with ex-
+treme scale and density diversity. In Proc. IEEE Conf. on
+Computer Vision and Pattern Recognition (CVPR), 2017. 2
+
+[26] R. A. Newcombe, S. Izadi, O. Hilliges, D. Molyneaux,
+D. Kim, A. J. Davison, P. Kohli, J. Shotton, S. Hodges, and
+A. Fitzgibbon. Kinectfusion: Real-time dense surface map-
+ping and tracking. In Proc. of the International Symposium
+on Mixed and Augmented Reality (ISMAR), 2011. 2
+
+[27] D. Paschalidou, A. O. Ulusoy, C. Schmitt, L. van Gool, and
+A. Geiger. Raynet: Learning volumetric 3d reconstruction
+with ray potentials. In Proc. IEEE Conf. on Computer Vision
+and Pattern Recognition (CVPR), 2018. 2
+
+[28] M. Poggi and S. Mattoccia. Learning from scratch a conﬁ-
+
+dence measure. In BMVC, 2016. 2
+
+[29] G. Riegler, A. O. Ulusoy, H. Bischof, and A. Geiger. Oct-
+NetFusion: Learning depth fusion from data. In Proc. of the
+International Conf. on 3D Vision (3DV), 2017. 1, 2
+
+[30] J. L. Sch¨onberger, E. Zheng, M. Pollefeys, and J.-M. Frahm.
+Pixelwise view selection for unstructured multi-view stereo.
+In Proc. of the European Conf. on Computer Vision (ECCV),
+2016. 1, 2, 3
+
+[31] T. Sch¨ops, J. Sch¨onberger, S. Galliani, T. Sattler, K. Schindler,
+M. Pollefeys, and A. Geiger. A multi-view stereo benchmark
+with high-resolution images and multi-camera videos. In Proc.
+IEEE Conf. on Computer Vision and Pattern Recognition
+(CVPR), 2017. 2
+
+7642
+
+[32] M. Tatarchenko, A. Dosovitskiy, and T. Brox. Octree gen-
+erating networks: Efﬁcient convolutional architectures for
+high-resolution 3d outputs. In Proc. of the IEEE International
+Conf. on Computer Vision (ICCV), 2017. 2
+
+[33] F. Tosi, M. Poggi, A. Benincasa, and S. Mattoccia. Beyond
+local reasoning for stereo conﬁdence estimation with deep
+learning. In ECCV, 2018. 2
+
+[34] B. Ummenhofer and T. Brox. Global, dense multiscale recon-
+struction for a billion points. In Proc. of the IEEE Interna-
+tional Conf. on Computer Vision (ICCV), 2015. 2
+
+[35] B. Ummenhofer, H. Zhou, J. Uhrig, N. Mayer, E. Ilg, A. Doso-
+vitskiy, and T. Brox. Demon: Depth and motion network for
+learning monocular stereo. In Proc. IEEE Conf. on Computer
+Vision and Pattern Recognition (CVPR), 2017. 2
+
+[36] Q. Xu and W. Tao. Multi-view stereo with asymmetric
+checkerboard propagation and multi-hypothesis joint view
+selection. arXiv.org, 2018. 2
+
+[37] S. Yan, C. Wu, L. Wang, F. Xu, L. An, K. Guo, and Y. Liu.
+Ddrnet: Depth map denoising and reﬁnement for consumer
+depth cameras using cascaded cnns. In Proc. of the European
+Conf. on Computer Vision (ECCV), 2018. 2
+
+[38] Y. Yao, Z. Luo, S. Li, T. Fang, and L. Quan. Mvsnet:
+Depth inference for unstructured multi-view stereo. arXiv.org,
+abs/1804.02505, 2018. 1, 2, 3
+
+[39] C. Zach, T. Pock, and H. Bischof. A globally optimal algo-
+rithm for robust tv-l1 range image integration. In Proc. of the
+IEEE International Conf. on Computer Vision (ICCV), 2007.
+2
+
+[40] S. Zagoruyko and N. Komodakis. Learning to compare image
+
+patches via convolutional neural networks. 2015. 2
+
+[41] J. ˇZbontar and Y. LeCun. Stereo matching by training a con-
+volutional neural network to compare image patches. Journal
+of Machine Learning Research (JMLR), 17(65):1–32, 2016.
+2
+
+7643
+
+

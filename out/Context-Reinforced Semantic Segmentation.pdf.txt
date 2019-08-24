@@ -1,0 +1,1487 @@
+Context-Reinforced Semantic Segmentation
+
+Yizhou Zhou∗1
+
+Xiaoyan Sun2
+
+Zheng-Jun Zha†1
+
+1University of Science and Technology of China
+zyz0205@mail.ustc.edu.cn, zhazj@ustc.edu.cn
+
+Wenjun Zeng2
+2Microsoft Research Asia
+
+{xysun,wezeng}@microsoft.com
+
+Abstract
+
+Recent efforts have shown the importance of context on
+deep convolutional neural network based semantic segmen-
+tation. Among others, the predicted segmentation map (p-
+map) itself which encodes rich high-level semantic cues
+(e.g. objects and layout) can be regarded as a promising
+source of context.
+In this paper, we propose a dedicated
+module, Context Net, to better explore the context informa-
+tion in p-maps. Without introducing any new supervisions,
+we formulate the context learning problem as a Markov De-
+cision Process and optimize it using reinforcement learning
+during which the p-map and Context Net are treated as en-
+vironment and agent, respectively. Through adequate ex-
+plorations, the Context Net selects the information which
+has long-term beneﬁt for segmentation inference. By in-
+corporating the Context Net with a baseline segmentation
+scheme, we then propose a Context-reinforced Semantic
+Segmentation network (CiSS-Net), which is fully end-to-end
+trainable. Experimental results show that the learned con-
+text brings 3.9% absolute improvement on mIoU over the
+baseline segmentation method, and the CiSS-Net achieves
+the state-of-the-art segmentation performance on ADE20K,
+PASCAL-Context and Cityscapes.
+
+1. Introduction
+
+Semantic image segmentation is a fundamental and chal-
+lenging task in computer vision. It interprets an image by
+assigning each pixel a semantic label. These semantic la-
+bels provide high-level semantic information varying from
+the layout of a scene to the category, location, and shape of
+each individual object in an image, which makes semantic
+image segmentation essential for many intelligent systems,
+such as autonomous driving and image editing.
+
+Context is known to be essential for semantic segmen-
+tation [11]. Classifying a local region/pixel with regard to
+its surroundings is super helpful for reducing local ambi-
+guities. However, the fully convolutional network (FCN),
+
+∗ This work was performed while Yizhou Zhou was an intern with
+
+Microsoft Research Asia. † Corresponding author.
+
+Figure 1. Visualized segmentation results (also denoted as pre-
+dicted segmentation maps (p-map)) and context maps in our CiSS-
+Net.
+(a) Context maps at 3 steps. Here the white areas denote
+uncertain regions that are excluded from valid contextual informa-
+tion. The context map shown here upgrades gradually. (b) p-map
+at 3 steps. The prediction improves gradually due to the context-
+reinforced learning. It can be observed that reﬂection of trees in
+the water which easily deceives the baseline algorithm is well han-
+dled by our CiSS-Net based on the learned context.
+
+which is the most popular baseline of current successful se-
+mantic segmentation methods, lacks suitable strategies to
+utilize global information about an image. In order to in-
+clude more information, dilated/atrous convolutions are em-
+ployed in FCN to expand the receptive ﬁeld of convolutions
+and enable dense predictions [5, 34, 4, 6]. Also, multi-
+scale/multi-stage features are assembled to exploit informa-
+tion from different scales/layers to improve the segmenta-
+tion performance [21, 30, 16, 7, 13].
+
+Recent efforts focus more on integrating global context
+features in FCNs. Global average pooling is adopted to
+pool a global context feature from one of the last few layers
+of FCN, which is then fused with local features to provide
+
+4046
+
+Ground-truth(a) Context mapsInputriverwaterplantearthtreefloorfieldrockfenceColor mapBaseline(b) P-mapsStep 1Step 2Step 3global hints for segmentation [23]. Based on the atrous con-
+volution, the atrous spatial pyramid pooling network [5] is
+presented to capture multi-scale features by involving mul-
+tiple parallel atrous ﬁlters at different rates. In addition to
+the dilated FCN, PSPNet in [37] extends the pixel-level fea-
+tures to the global pyramid pooled one which fuses fea-
+tures under four different pyramid scales.
+In addition to
+the multi-scale and multi-level features, Ding et al. intro-
+duce a context contrasted local feature to highlight the dif-
+ference between each local and global features and boost
+the performance for inconspicuous objects[11]. In [35], a
+context encoding module is presented to capture the order-
+less correlations between scene context and probabilities of
+categories in feature maps. Lin et al. [22] explicitly model
+the patch-patch and patch-background contextual correla-
+tions via trainable pairwise potential functions and multi-
+scale sliding pooling. Huang et al. [15] introduce a extra
+network into semantic segmentation based on scene simi-
+larities to encode the global scene information followed by
+an image retrieval module which captures non-parametric
+prior information for the input image.
+
+Besides aforementioned global/local context features
+used in feature learning, we notice that the predicted seg-
+mentation map (p-map, which refers to the intermediate
+segmentation map as well as the ﬁnal result) generated by
+each semantic segmentation method already encodes rich
+high-level semantic cues both locally (e.g., objects) and
+globally (e.g., layouts) and can be another good candidate
+for context. In addition, the dimension of p-maps usually
+is much lower compared with that of feature maps in deep
+networks, which could facilitate the exploration of context.
+Therefore, it is beneﬁcial to incorporate such information
+into feature learning. However, as illustrated in Fig.1 (b), a
+p-map often contains lots of noises such as misclassiﬁed re-
+gions and chaotic objects, which makes it very challenging
+to use p-maps as context for semantic segmentation.
+
+In fact, p-map has been used in previous works to re-
+ﬁne itself either by exploiting Conditional Random Field
+(CRF) [19] on top of the p-map in a post-processing fashion
+[4, 5, 32, 3], concatenating a trainable network to facilitate
+end-to-end training [38, 24, 31], or incorporating a recurrent
+architecture to enable coarse-to-ﬁne reﬁnement [36, 28, 17].
+Different from these algorithms that set out to reﬁne its ac-
+curacy, we seek to fully explore the p-map to generate an-
+other source of scene context that can be effectively com-
+bined with the traditional features to further improve the
+segmentation performance in a recursive manner.
+
+More speciﬁcally, we propose a Context-reinforced Se-
+mantic Segmentation Network (CiSS-Net) to explore the
+high-level semantic context information in p-maps to fur-
+ther enhance modern semantic segmentation methods. Our
+CiSS-Net consists of two sub-networks, Context Net (C-
+Net) which is a dedicated network to learn effective seman-
+
+tic context from p-maps, and Segment Net (S-Net) which
+embeds the learned context in the inference of FCN-based
+segmentation. Since it is hard to tell which information
+should be selected from p-maps as learned context, we
+choose not to introduce any new supervisions on context.
+Instead, we formulate the context learning problem as a
+Markov Decision Process (MDP) and propose learning the
+context via interactions between C-Net and S-Net. Natu-
+rally, the optimization problem can be solved through deep
+reinforcement learning (RL) by treating the p-maps as envi-
+ronment and the C-Net as agent. As shown in Fig.1, thanks
+to the exploration of long-term beneﬁt during the context-
+reinforced learning, the p-map improves step by step based
+on the gradually upgraded context maps, and the challeng-
+ing water area is well segmented by our CiSS-Net based on
+the learned context.
+
+In summary, our main contributions are three-fold:
+
+• We propose exploring high-level semantic context
+from p-maps by a dedicated network which will be
+embedded in the inference of the FCN-based seman-
+tic segmentation.
+
+• Without any new supervisions, we formulate the con-
+text learning problem as a MDP and propose learning
+the context using reinforcement learning so that it has
+long-term beneﬁts on segmentation inference, by re-
+ciprocally interacting with the segmentation network.
+• We propose a fully end-to-end context-reinforced se-
+mantic segmentation network that efﬁciently facili-
+tates the above learning process and achieves state-
+of-the-art performance on three popular segmentation
+datasets.
+
+2. Context-reinforced Semantic Segmentation
+
+We propose a new framework, CiSS-Net, which recur-
+sively extracts context from p-maps and then embeds it
+to improve the segmentation performance. For better un-
+derstanding, we ﬁrst present the overall framework of the
+CiSS-Net and then give detailed descriptions of the two
+main modules, Context Net and Segment Net, respectively.
+
+2.1. The Framework
+
+The overall framework of our CiSS-Net is shown in
+Fig.2. The CiSS-Net consists of two modules, Segment Net
+(S-Net) and Context Net (C-Net). The S-Net is designed to
+infer p-maps of input images given the additional context
+maps generated by C-Net through exploring both the inputs
+and outputs of S-Net. The S-Net and C-Net work interac-
+tively for both segmentation and context learning. To be
+more speciﬁc, the S-Net predicts a segmentation map based
+on the input image features as well as the generated con-
+text; the C-Net is then fed with both the p-map as well as
+
+4047
+
+Figure 2. Overview of our proposed Context-reinforced Semantic Segmentation Network. Our CiSS-Net has two sub-networks, Segment
+Net and Context Net. These two sub-networks mutually beneﬁt each other and work iteratively. The Segment Net takes the encoded context
+maps as additional information to generate the segmentation prediction, while the prediction is then used as conditions for Context Net to
+produce new context maps to further improve the segmentation prediction.
+
+the input image features to generate new context. By prop-
+erly deﬁning the state, action and transition matrix, the con-
+text can be explicitly learned through reinforcement learn-
+ing towards improving the segmentation performance with-
+out any extra supervision.
+
+Before elaborating on each module, we ﬁrst provide a
+short list of notations used in the following description.
+Given an input image I, we have
+
+• Context map KI ∈ {0, 1, 2, ..., Nc}H ′
+
+, where Nc,
+H ′ and W ′ are the number of classes, height and width
+of KI , respectively.
+
+×W ′
+
+• Domain features XI ∈ RH ′
+
+×W ′
+
+×C , where C is the
+
+channel size of the feature map.
+
+• P-map YI ∈ RH o
+
+×W o
+
+, where H o and W o denote the
+
+spatial resolution of a segmentation prediction.
+
+• Pyramid Pooling Module (Encoder in the ﬁgure) Fe :
+×Ce , where Ce is the channel size
+
+→ RH ′
+
+RH ′
+
+×W ′
+
+×W ′
+
+of output.
+
+• Encoded context map and p-map K (e)
+
+, Y (e)
+
+I
+
+∈
+
+I
+
+×W ′
+
+RH ′
+
+×Ce .
+• Base Net F ba
+s
+
+Net F bi
+
+s : ReH ′
+
+: RH ′
+×W ′
+
+×C → RH o
+×W ′
+×(C+Ce) → RH o
+
+×W o
+
+×W o
+
+×Nc and Bias
+×Nc .
+
+• Context Net Fk : RH ′
+×W o
+• Policy QI ∈ RH o
+
+×2.
+
+×W ′
+
+×(C+Ce) → RH o
+
+×W o
+
+×2.
+
+2.2. Segment Net
+
+As shown in Fig.2, the S-Net has two inputs, the con-
+text map KI and domain features XI of the input image
+I. The context map is a two-dimensional semantic map de-
+rived from p-maps by the C-Net, which will be introduced
+in details in subsection 2.3. As illustrated in Fig.1 (b), a
+context map encodes certain semantic information, e.g. the
+layout of a scene and category of objects, but with an extra
+class ‘uncertain’. Regions assigned with ’uncertain’ will be
+ignored in the S-Net during inference.
+
+In order to efﬁciently take advantages of the context map
+during the inference, we apply some special designs for the
+S-Net. Since lots of low-level features, such as textures and
+boundaries, will be extracted by the ﬁrst several convolu-
+tional layers, it is neither reasonable nor efﬁcient to fuse the
+high-level semantic context with those low-level features.
+We thus adopt a pre-trained convolutional neural network
+(CNN) to extract mid-level domain features XI instead of
+using the raw image. A Pyramid Pooling Module Fe(·) [37]
+as shown in Fig.3 (a) is also employed to encode context
+map into multiple spatial levels, which reveal more global
+information at each spatial position. Then the encoded con-
+text map K (e)
+I = Fe(KI ) is concatenated with XI and fed
+into the S-Net.
+
+Our S-Net Fs(XI , K (e)
+
+networks, Base Net F ba
+s
+mulated as
+
+I ) is composed of two sub-
+and Bias Net F bi
+s . It can be for-
+
+(cid:26) F ba
+
+F ba
+
+s (XI ),
+s (XI )+F bi
+
+s (XI ⊕K (e)
+
+I ),
+
+if KI is N one
+otherwise
+
+(1)
+
+where ⊕ denotes concatenation operation and KI is N one
+refers that there is not context map provided. Therefore,
+p-map YI is derived as YI = argmax(Fs(XI , KI )). As
+shown in Fig.2 and Eq. (1), the Base Net only processes XI
+to infer a basic segmentation map, while the Bias Net is fed
+with the context embedded feature XI ⊕K (e)
+to learn a con-
+ditional mask for each class that reﬂects the per-class bias
+based on the context map KI . The mask is then added to the
+basic segmentation map (the tensor before Softmax activa-
+tion) to further rectify the predictions. Inspired by the idea
+of residual learning [14], this design helps to both reduce
+the learning complexity and emphasize the role of context.
+
+I
+
+2.3. Context Net
+
+The structure of C-Net is illustrated on the left side of
+Fig. 2. Our C-Net also has two inputs, the domain fea-
+tures XI and p-map YI generated by the S-Net. Learning
+
+4048
+
+Encoded Cont. MapsBase Net 𝐹𝑠𝑏𝑎Bias Net𝐹𝑠𝑏𝑖EncodedSeg. MapsCSegmentNetContext NetEncoder 𝑭𝒆Policy Q𝐼Features 𝑋𝐼Cont. Maps𝐾𝐼P-map 𝑌𝐼S: Concatenation: AdditionS: SamplingAAFeatures 𝑋𝐼P−map𝑌𝐼Features 𝑋𝐼𝑌𝐼(𝑒)𝐾𝐼(𝑒)Features 𝑋𝐼Encoder 𝑭𝒆P-map 𝑌𝐼Policy Q𝐼(st ∈ S and at ∈ A), ρ0 : S → R is the probability distri-
+bution for the initial state, γ ∈ [0, 1] is the discount factor
+and r : S × A → RH ′
+is the reward function. Letting
+πFk denote the probability distribution over the outputs of
+the C-Net and η(Fk) denote the expected discount reward
+under C-Net Fk, we have
+
+×W ′
+
+η(Fk) = Es0,a0,..." ∞
+Xt=0
+
+γtrt# , where
+
+(3)
+
+s0 ∼ ρ0, at ∼ πFk (at|st), st+1 ∼ P (st+1|st).
+
+The behavior of the C-Net can be aligned to the reward
+function r by maximizing the expected future discount re-
+ward η(Fk). In order to enable the context to incrementally
+improve the segmentation, we compute rt(i, j), i.e., the re-
+ward on spatial location (i, j) at time step t as
+
+1
+
+ChCw Xi′,j ′
+
+M (Y t
+
+I (i′, j′), Y t+1
+
+I
+
+(i′, j′), LI (i′, j′))
+
+(4)
+
++ β1✶LI (i,j)(K t
+
+I (i, j)) + β2✶0(K t
+
+I (i, j)).
+
+I
+
+I to Y t+1
+
+The reward function has three terms. The ﬁrst term M () is
+a measurement function that calculates how much improve-
+ment is made from Y t
+for a given location, where
+i′ ∈ [i − Ch/2, i + Ch/2], j ′ ∈ [j − Cw/2, j + Cw/2] and
+Ch/Cw denotes the height/width of the region considered in
+the reward computing for the action at position (i, j). This
+is used to encourage the generated context map to improve
+the segmentation performance. More speciﬁcally, given the
+LI (i′, j ′), i.e. the ground-truth at location i′, j ′, M () ﬁrst
+computes the correctness of the prediction at time t and t+1
+respectively. There are four different cases, i.e. Y t
+I (i′, j ′) is
+correct/incorrect → Y t+1
+(i′, j ′) is correct/incorrect. We as-
+sign a reward 1 to the case ‘incorrect → correct’, -1 to the
+case ‘correct → incorrect’, 0 to the case ‘incorrect → in-
+correct’ and 0.5 to the case ‘correct → correct’. Because
+the value of K t
+I at position (i, j) actually takes effect on a
+Ch × Cw rectangle region of Y t+1
+(depends on the recep-
+tive ﬁeld of the C-Net), the scores computed by M () are
+averaged in the target region. We simply ignore the associ-
+ated regions that go beyond the boundary of the image. The
+I (i, j))
+second and third terms ✶
+are indicator functions that assign a smaller positive rewards
+β1 and β2 for the correct context (the semantic information
+that is consistent with the ground-truth) and ‘uncertain’ re-
+spectively, since effective context is always supposed to be
+correct information.
+
+I (i, j)) and ✶0(K t
+
+LI (i,j)(K t
+
+I
+
+I
+
+2.4. Context reinforced Segmentation
+
+We employ the asynchronous advantage actor-critic al-
+gorithm [26] to optimize the MDP presented in the previous
+section, and the following standard deﬁnitions are used for
+the value function VFk , the state-action value function QFk
+
+4049
+
+Figure 3. Illustrations of (a) the architecture of Pyramid Pooling
+Module (Grid rectangle blocks are spatial pooling layers with dif-
+ferent pooling sizes and strides) and (b) the architecture of C-Net.
+
+context KI on top of YI makes KI conditioned on YI , and
+by treating the prediction YI as a state that will be updated
+based on the content of the context KI , the context learn-
+ing process in C-Net can be reformulated as a Markov de-
+
+K 0
+I==⇒ Y 1
+I
+
+K 1
+I==⇒ · · ·
+
+N −1
+
+K
+I====⇒ Y N
+
+I
+
+cision chain Y 0
+I . This in-
+I
+dicates that KI can be learned to incrementally improve
+the segmentation through reinforcement learning. Our C-
+Net is instantiated with a ﬁve-layer CNN as illustrated in
+Fig. 3 (b). The input of the C-Net is the concatenation of
+the two signals XI and Y (e)
+. The output of the C-Net Fk
+is a policy map QI = Fk(XI ⊕ Y (e)
+), where the value
+of Q(i, j, k) indicates the probability of taking action k at
+position (i, j). We deﬁne k ∈ {0, 1}, where k = 1 de-
+notes the action of adopting the prediction YI (i, j) as con-
+text whereas k = 0 ignores the prediction. Then a binary
+decision BI (i, j) ∼ QI (i, j) is sampled at each position
+to generate the context map KI = (YI + 1) ◦ BI , where
+◦ denotes the element-wise matrix multiplication. Conse-
+quently, each value in KI signiﬁes the corresponding index
+of classes (indexed from one), except for the number ‘0’
+that represents the class ‘uncertain’.
+
+I
+
+Having both Eq. 1 and KI = (YI + 1) ◦ BI , we can
+observe a mutual dependency between the predicted seg-
+mentation map YI and context map KI . One can decouple
+the dependency along the time domain as
+
+Y t+1
+I = Fs(XI , K t
+I )
+K t
+
+I = (Y t
+
+I + 1) ◦ Bt
+
+(2)
+
+where Bt ∼ Fk(XI ⊕ Fe(Y t
+
+I )),
+
+where t is the iteration index. The decoupled dependence
+reveals that the YI and KI can be regarded as a state-action
+pair. Therefore, an inﬁnite-horizon discounted Markov de-
+cision process (MDP) can be naturally deﬁned with the tu-
+ple (S, A, P, r, ρ0, γ), where S is a ﬁnite set of states deﬁned
+as S = {YI }, A is a ﬁnite set of actions deﬁned as A =
+{BI }, P : S × A × S → R is the transition probability dis-
+tribution deﬁned as P (st+1 = Fs(XI , (st +1)◦at)|st) = 1
+
+Conv_3x3_1256GN&ReLUInterpConv_3x3_1256GN&ReLUInterpConv_3x3_1256GN&ReLUInterpConv_3x3_1256GN&ReLUInterpConcatConv_3x3_1512GN&ReLUConv_3x3_1512GN&ReLUConv_3x3_1512GN&ReLUConv_3x3_1512GN&ReLUConv_1x1_1DropoutConv_1x1_1InputPolicyStateValueOne-hotCodingOutput(a)(b)Conv_3x3_1512GN&ReLUFigure 4. Visualized segmentation results of our CiSS-Net. For each input image, we show two segmentation results generated at iteration
+step 0 (Baseline) and 2 (with learned context). Segmentation results shown here are enlarged portions denoted by the green boxes in the
+input images. White areas in the segmentation results show the misclassiﬁed regions. We can observe that objects/stuffs (such as the pot,
+plant, lamp and desk in the ﬁrst row, the fence and the light in the second row, and the car, sidewalk, streetlight in the third row) which are
+misclassiﬁed in the initial stage can be segmented much more accurately at stage 2 by involving the learned context.
+
+and the advantage function AFK
+
+VFk (st) = Eat,st+1..." ∞
+γlrt+l#
+Xl=0
+QFk (st, at) = Est+1,at+1..." ∞
+Xl=0
+
+γlrt+l#
+
+AFk (s, a) = QFk (s, a) − VFk (s), where
+
+at ∼ πFk (at|st), st+1 ∼ P (st+1|st).
+
+where the value function VFk is estimated by a CNN F v
+k (st)
+that shares the same weights as C-Net Fk except for the
+last layer as shown in Fig.3 (b), and the advantage function
+AFk (st, at) is estimated by Pk−1
+l=0 γlrt+l + γkVFk (st+k) −
+VFk (st). The parameters of the C-Net Fk and the value
+function F v
+
+k are updated as
+
+θk = θk + ∇θ log [πFk (at|st; θk)]A(at, st)
+
+θv = θv +
+
+∂(R − F v
+
+k (st; θv))2
+∂θv
+
+, where
+
+(6)
+
+R =
+
+T −1
+
+Xl=0
+
+γlrt+l + γkVFk (st+k).
+
+Note that Eq.(5) and Eq.(6) together only enforce context
+to be beneﬁcial to a ﬁxed S-Net Fs (i.e. ﬁxed the transition
+probability distribution in Eq.(3) and Eq.(5)) by maximiz-
+ing η(Fk) alone, and could lead to only numerical improve-
+ments to p-maps rather than selecting genuinely effective
+context. To tackle this problem, we update the two net-
+works simultaneously and encourage more exploration of
+
+the C-Net. By doing so, the S-Net is promised to experience
+adequately different context conﬁgurations during training
+and thus prevents the local optimum. The ﬁnal loss of the
+scheme is formulated as
+
+(5)
+
+Loss = Lossp + Lossv + λ1Losss + λ2Losse,
+
+(7)
+
+where LossP = log [πFk (at|st; θk)]A(at, st) and Lossv =
+k (st; θv))2 are the policy loss and value loss and
+(R − F v
+the update rules are deﬁned in Eq.(6). Losss is the
+cross-entropy loss of the segment prediction and Losse =
+˙logπFk is the entropy regularization term of Fk to en-
+πFk
+courage adequate exploration.
+
+3. Experiments
+
+3.1. Datasets and Experimental Settings
+
+ADE20K [39] provides more than 20K scene-centric im-
+ages fully annotated with objects and object parts. It is di-
+vided into three subsets containing 20,210, 2,000, and 3,000
+images for training, validation and testing, respectively. It
+has up to 150 classes with 1,038 different image-level labels
+including both objects and stuffs. Evaluations on ADE20K
+are made on both pixel-wise accuracy (pixAcc) and mean
+of the class-wise intersection over union (mIoU).
+
+Cityscapes [8] contains 5,000 frames with pixel-level
+annotation and 20,000 weakly annotated images recorded
+in street scenes from 50 cities.
+It involves 19 categories
+of both objects and stuffs. The data split follows 2,975
+for training, 500 for validation and 1,525 for testing. We
+
+4050
+
+wallfloordoorpersonplantpotlightpaintingceilingwindowpanedeskchiarbookcaselampfensefieldtreeroadbuildingsidewalkcargrasspathsignboardstreetlightImageStep 0 (w/o context)Step 2 (with context)Color MapImageStep 0 (w/o context)Step 2 (with context)vStep Context
+
+Cityscapes(%) Ade20K(%)
+
+0
+2
+4
+6
+
+no
+yes
+yes
+yes
+
+77.59
+79.21
+79.29
+79.29
+
+40.97
+42.56
+42.63
+42.66
+
+Table 1. mIoU of CiSS-Net on test set of Cityscapes and validation
+set of Ade20K at iteration steps 0, 2, 4, and 6.
+
+γ
+
+0.1
+0.3
+0.9
+
+Cityscapes
+
+Ade20K
+
+IoUcls
+
+iIoUcls
+
+mIoU
+
+pixAcc
+
+78.31% 54.39% 41.53% 78.76%
+78.45% 54.61% 41.80% 79.47%
+78.94% 54.97% 42.42% 80.51%
+
+Table 2. Segmentation results (single scale) of our CiSS-Net on
+the validation sets of Cityscapes and Ade20K with different γ.
+
+only use the fully annotated data for training to stimu-
+late the context learning in our CiSS-Net. We use the
+Cityscapes ofﬁcial server to evaluate the performance on
+both class-wise/category-wise intersection over union (IoU
+class/category) and instance-level intersection-over-union
+(iIoU class/category).
+
+Pascal Context [27] provides 4998 fully annotated im-
+ages for training and 5105 images for testing, which are
+re-annotated from Pascal VOC. We use the most commonly
+used 60 classes (59 classes plus the “background” class) in
+our evaluation. The performance is evaluated on both global
+pixel accuracy (GPA) and mIoU.
+
+3.2. Implementation Details
+
+Fig. 3 (b) shows the architecture of the C-Net. We
+generate domain features XI using the ﬁrst four blocks of
+PSPNet [37] pre-trained on the three datasets (PSPNet-101
+for Cityscapes and PSPNet-50 for both Ade20K and Pascal
+Context). In our S-Net, the Base Net has two convolutional
+layers of which the channel, stride and kernel sizes are 512,
+1 and 3, respectively; the Bias Net uses the same architec-
+ture as the C-Net except that the last convolutional layer is
+modiﬁed to ﬁt the input/output dimension. Group Normal-
+ization [33] is used as the normalization layer. The channel
+size in each group is 16.
+
+The CiSS-Net is implemented with Tensorﬂow and six-
+teen Nvidia M40 GPUs. The batch size on each gpu is
+2. The Dropout ratio is 0.1 and random mirroring as well
+as random resizing by a factor between 0.5 and 2.0 are
+adopted. On ADE20K, we randomly crop a 473 × 473 re-
+gion in an image and employ Stochastic Gradient Descent
+(SGD) to train the network with initial learning rates of
+2×10−3 for Base Net and 2×10−4 for both Bias Net and C-
+Net. We randomly crop a 713 × 713 region on CityScapes,
+and we employ SGD to train the network with initial learn-
+ing rates of 5 × 10−4 for Base Net and 5 × 10−5 for Bias
+Net and C-Net on both Cityscapes and Pascal Context.
+
+λ2
+
+0.001
+0.005
+0.01
+0.02
+0.05
+
+Cityscapes
+
+Ade20K
+
+IoUcls
+
+iIoUcls
+
+mIoU pixAcc
+
+77.23% 53.62% 41.31% 78.68%
+78.59% 54.47% 41.90% 79.52%
+78.44% 54.38% 42.19% 80.07%
+78.94% 54.97% 42.42% 80.51%
+79.10% 55.04% 42.56% 80.77%
+
+Table 3. Segmentation results (single scale) with different values
+of λ2 on validation sets of Cityscapes and Ade20K.
+
+3.3. Hyper parameters
+
+We analyze two important hyper-parameters, γ in Eq.
+(3) and λ2 in Eq. (7), in our CiSS-Net. The parameter γ
+rewards long-term beneﬁts and λ2 effects the degree of ex-
+ploration in the context-reinforced learning in the CiSS-Net.
+In all the following tests, parameters β1 and β2 in Eq. (4)
+are set to 0.4 and 0.2, respectively; λ1 = 1.0 in Eq. (7) .
+
+Table 2 exhibits the results with different values of γ.
+The result improves consistently with the increase of γ. It
+demonstrates that the long-term beneﬁt in context learning
+plays an important role in our CiSS-Net. We thus set γ =
+0.9 to encourage long-term beneﬁts.
+
+Table 3 gives the sensitivity analysis on λ2. It shows that
+the performance of our CiSS-Net improves when λ2 runs
+from 0.001 to 0.05 while the training does not converge well
+when λ2 > 0.15. This suggests that a suitable amount of
+exploration is crucial for the learning of effective context.
+In our CiSS-Net, we set λ2 = 0.05 to make a trade-off
+between convergence and exploration.
+
+3.4. Ablation Study
+
+In the ablation study, we ﬁrst investigate the necessity of
+the RL-based learnable module for context generation and
+then discuss the effect of the number of iterations in RL on
+the performance of our CiSS-Net.
+
+RL strategy. There are alternative ways to make use
+of the context information in p-maps under the framework
+of our CiSS-Net. As listed in Table 4, ‘Baseline’ denotes
+the approach without the learned context, i.e., no context
+map is fed to the S-Net in our CiSS-Net; ‘Baseline+p-map’
+shows the performance when the p-map is directly used as
+input to the S-Net as context, which is even lower than that
+of ‘Baseline’; ‘Baseline+gated(p-map)*’ approximates the
+performance of using a gate function to generate context,
+where the approximation is made by assigning a very small
+number 0.001 to λ2 in the RL to greatly suppress the ex-
+ploration. Among all the methods, our CiSS-Net with RL-
+based context learning achieves the best performance.
+
+Furthermore, different from the RNN-based attempts
+which take complete p-maps as inputs [24, 17, 38, 36], we
+seek to explore the p-map to generate another source of
+scene context that can be effectively combined with tradi-
+tional features. Table 5 further signiﬁes the beneﬁts of us-
+
+4051
+
+Method
+
+Baseline
+
+Baseline+p-map
+
+Baseline+gated(p-map) ∗
+
+CiSS-Net
+
+Cityscapes(%) Ade20K(%)
+
+76.36
+75.19
+77.23
+
+79.10
+
+40.97
+39.44
+41.31
+
+42.56
+
+Table 4. Evaluation on the RL strategy in our CiSS-Net on the
+validation sets of Cityscapes and Ade20K. Four alternative ap-
+proaches are tested, i.e. the baseline method, the baseline method
+fed directly with p-map, the baseline method with a gated p-map
+and the CiSS-Net. ∗ indicates that we use the RL approach with
+λ2 = 0.001 as a approximation to the gate function.
+
+[24]
+
+66.8
+
+-
+
+[17]
+
+-
+
+34.6∗
+
+[38]
+
+62.5
+
+-
+
+[36]
+76.2∗
+42.6∗
+
+w/o RL
+75.2∗
+39.4†
+
+Ours
+79.2∗
+42.6†
+
+City.
+Ade.
+
+Table 5. mIoU performance of CiSS-Net and other RNN-based
+methods. w/o RL is our method using complete p-maps. ∗/† de-
+note results achieved based on ResNet101/50
+
+ing our design of context learning to facilitate the p-maps as
+context. It demonstrates that our proposed RL-based con-
+text learning can effectively utilize the context information
+in p-maps to boost the performance of our CiSS-Net.
+
+Iteration steps. Table.1 shows the performance of our
+CiSS-Net with regard to the iteration index t as denoted in
+Eq. (2). Note that the context map K 0
+I is set to all-zero
+and no context information from p-map is involved in the
+Segment-Net when t = 0. It can be observed that the per-
+formance improves noticeably by utilizing the learned con-
+text. Similar to many iterative optimization processes, the
+improvement becomes marginal as the iteration continues.
+Accordingly, we choose t = 2 in the following tests to bal-
+ance the performance and time complexity of inference.
+
+We also visualize the predicted segmentation maps at
+t = 0 and t = 2 in Fig. 4, respectively.
+It can be ob-
+served that the CiSS-Net is able to correct mis-segmented
+objects/regions as the learned context gets involved into
+the segmentation inference. For example, the CiSS-Net
+achieves much better segmentation results on the pot, plant,
+lamp and desk in the ﬁrst row; the fence, light in the second
+row; and the car, sidewalk, streetlight in the third row, rather
+than only reﬁning object boundaries.
+
+3.5. Comparison with the state of the art
+
+We further evaluate the performance of our CiSS-Net by
+comparisons with the state-of-the-art semantic segmenta-
+tion methods. In the following, the results of the Ciss-Net
+are given at t = 2 so that the inference time of our CiSS-Net
+is competitive to the comparison methods.
+
+ADE20K Table 6 shows the comparison results on
+the validation set of ADE20K. ADE20K is a challeng-
+ing dataset with complicated scenes and diverse objects.
+Results show that our CiSS-Net is able to beneﬁt from
+the learned context and achieves the highest performance
+
+Method
+
+SegNet [1]
+FCN [25]
+
+DilatedNet [34]
+
+Cascaded-SegNet [39]
+
+Cascaded-DilatedNet [39]
+
+ReﬁneNet [21]
+
+PSPNet [37]
+
+GRN+LRN(single model) [36]
+
+DSSPN-Softmax [20]
+Global-Context [15]
+
+PSPNet [37]
+EncNet [35]
+
+CiSS-Net (Ours)
+
+Backbone mIoU pixAcc
+
+21.64
+29.39
+32.31
+27.51
+34.90
+40.2
+41.96
+42.60
+42.03
+38.37
+41.68
+41.11
+42.56
+
+71.00
+71.32
+73.55
+71.83
+74.52
+
+-
+
+80.64
+
+-
+
+80.81
+77.76
+80.04
+79.73
+80.77
+
+Res101
+Res101
+Res101
+Res101
+Res101
+Res50
+Res50
+Res50
+
+Table 6. Segmentation results on the validation set of ADE20K.
+Our CiSS-Net achieves the best performance among algorithms
+with the same backbone ResNet-50. It also obtains competitive
+or even better performance in comparison to algorithms with the
+much complicated backbone ResNet-101.
+
+Method
+
+O2P [2]
+CFM [10]
+BoxSup [9]
+
+Context-CRF [22]
+
+FCN [25]
+
+CRF-RNN [38]
+ReﬁneNet [21]
+
+Context-Contrasted [11]
+
+Context-Contrasted (CCL) [11]
+
+Global-Context [15]
+
+PSPNet† [37]
+
+Context-Contrasted [11]
+
+Context-Contrasted (CCL) [11]
+
+CiSS-Net (Ours)
+
+Backbone GPA mIoU
+
+-
+-
+
+VGG16
+VGG16
+FCN-8s
+FCN-8s
+Res101
+Res101
+Res101
+Res101
+Res101
+Res50
+Res50
+Res50
+
+-
+-
+-
+
+71.5
+67.5
+
+-
+-
+
+78.4
+76.6
+73.8
+76.0
+
+-
+-
+
+76.5
+
+18.1
+34.4
+40.5
+43.3
+39.1
+39.3
+47.1
+51.6
+48.3
+46.5
+47.8
+48.1
+46.3
+48.7
+
+Table 7. Segmentation results on Pascal Context. Our CiSS-Net
+achieves the state-of-the-art performance.† indicates the perfor-
+mance is reported in [11].
+
+(42.56%/80.77% mIoU/pixACC) among the algorithms
+with the same backbone, ResNet-50. Moreover, our CiSS-
+Net with ResNet-50 also outperforms algorithms with much
+complicated backbones, e.g. ResNet-100.
+
+Cityscapes Table 8 shows comparison results on the test
+set of Cityscapes. In this test, only the 5,000 ﬁnely anno-
+tated images in Cityscapes are involved in the training of
+CiSS-Net for fair comparison. Among all the compared al-
+gorithms, our CiSS-Net performs the best.
+
+Pascal Context In Table 7, we evaluate the performance
+of our CiSS-Net on Pascal Context without utilizing ad-
+ditional data. This table shows that the CiSS-Net outper-
+forms state-of-the-art methods with the same backbone and
+is comparable with those works with deeper backbone.
+
+4052
+
+Method
+
+SegNet [1]
+
+CRF-RNN [38]
+
+FCN [25]
+DPN [24]
+
+DilatedNet [34]
+
+LRR [12]
+
+DeepLab [5]
+
+Context-CRF [22]
+
+ReﬁneNet [21]
+
+FRRN [29]
+
+GRN+LRN(single model) [36]
+
+DSSPN(Universal) [20]
+
+DepthAware [18]
+
+PSPNet [37]
+
+CiSS-Net (Ours)
+
+IoUcla.
+
+IoUcat.
+
+57.0
+62.5
+65.3
+66.8
+67.1
+69.7
+70.4
+71.6
+73.6
+71.8
+76.2
+76.6
+78.2
+78.4
+79.2
+
+79.1
+82.7
+85.7
+86.0
+86.5
+88.2
+86.4
+87.3
+87.9
+88.9
+
+-
+
+89.6
+89.7
+90.6
+90.7
+
+Table 8. Segmentation results on Cityscapes. Our CiSS-Net
+achieves the best performance by using only the fully annotated
+images in training.
+
+Figure 5. Visualization of the context maps generated at step 2.
+The white color indicates the uncertain regions generated by the
+C-Net. It can be observed that the context tends to progressively
+perceive regions/objects with high reliability while ignoring those
+with large ambiguity, e.g. the details and the far end of the street
+in the second and last columns, as context information.
+
+3.6. Discussion on the Learned Context
+
+First of all, the learned context map is not composed of
+high-conﬁdence pixels of p-maps. The information in the
+learned context map is selected to have long-term beneﬁts to
+the segmentation. Taking Fig. 1 as an example, the region
+containing the reﬂection of trees with a higher probability
+(0.993) is ignored while the water region along the left edge
+with a lower probability (0.870) is selected in step 1 by our
+C-Net. More examples can be found in Fig. 5, e.g.
+the
+right-most grasses (probability=0.929) rather than the left
+most board (0.976) in the 4th image is selected as context.
+Second, we observe that most of the contextual informa-
+tion provided by the context map is background objects and
+stuff, such as the ﬂoor, wall and cabinet in the (a) and (c)
+in Fig. 5, instead of regions/objects with large ambiguity,
+
+such as the details and end of the street in the (b) and (d) in
+Fig. 5. We believe that this kind of contextual information
+contains the overall layout of the scene that has rich seman-
+tic cues, constraints and even location priors of the current
+image. Thus it is very beneﬁcial for the predictions of other
+items in the scene. It also echoes the ﬁrst term of the reward
+function in Eq. (4) which encourages the pursuit of context
+that improves segmentation predictions.
+
+Third, we notice that our RL-based context learning au-
+tomatically provides a unique information, the ‘uncertain
+class’. This information can be very helpful in identify-
+ing the ‘hard’ examples or high ambiguity regions in se-
+mantic segmentation, as illustrated by the white regions in
+Fig. 5. One the other hand, we also ﬁnd that the uncer-
+tain regions contain lots of boundaries and small objects.
+It indicates that the learned context may lack enough sup-
+port for these regions. The iIoU performance on Cityscapes
+that puts more weight on small objects also supports our ob-
+servations, where the class-level and category-level iIoU of
+our methods are 55.6% and 78.0%, respectively, which are
+a little bit lower than the best ones 56.7%/78.6% (full ta-
+ble is provided in supplementary materials). Therefore, we
+will focus more on enhancing the performance of our CiSS-
+Net on boundaries and small objects, e.g. by introducing
+boundary reﬁnement ideas and mining hard examples from
+the ‘uncertain class’ to the context learning, in future work.
+
+4. Conclusion
+
+In this paper, we propose using the p-maps as another
+source of the scene context in addition to the traditional con-
+textual features. The context that has long-term beneﬁts for
+the segmentation inference is selectively and adaptively ex-
+tracted from p-maps via a dedicated module, Context Net,
+by reciprocally interacting with the segmentation network.
+By formulating the above process as MDP, we optimize
+the Context Net through reinforcement learning without in-
+troducing any extra supervision, and we further propose a
+fully end-to-end context-reinforced semantic segmentation
+network to efﬁciently facilitate such learning process. Nu-
+merical and visualization results demonstrate the beneﬁts
+brought by the proposed context-reinforced scheme. In the
+future, we will make effort on enhancing the performance
+of our CiSS-Net for small object and explore the potential
+of the context-reinforced concept for other cognition tasks.
+
+Acknowledgement
+
+This work was supported by the National Key R&D Pro-
+gram of China under Grant 2017YFB1300201, the National
+Natural Science Foundation of China (NSFC) under Grants
+61622211 and 61620106009 as well as the Fundamental
+Research Funds for the Central Universities under Grant
+WK2100100030.
+
+4053
+
+InputsGround-truthContextmap(a)(b)(c)(d)References
+
+[1] V. Badrinarayanan, A. Kendall, , and R. Cipolla. Segnet: A
+deep convolutional encoder-decoder architecture for image
+segmentation.
+IEEE transactions on pattern analysis and
+machine intelligence, 39(12):2481–2495, 2017.
+
+[2] J. Carreira, R. Caseiro, J. Batista, and C. Sminchisescu.
+Semantic segmentation with second-order pooling.
+In Eu-
+ropean Conference on Computer Vision, pages 430–443.
+Springer, 2012.
+
+[3] S. Chandra and I. Kokkinos. Fast, exact and multi-scale in-
+ference for semantic image segmentation with deep gaussian
+crfs.
+In European Conference on Computer Vision, pages
+402–418. Springer, 2016.
+
+[4] L.-C. Chen, G. Papandreou, I. Kokkinos, K. Murphy, and
+A. L. Yuille. Semantic image segmentation with deep con-
+volutional nets and fully connected crfs.
+arXiv preprint
+arXiv:1412.7062, 2014.
+
+[5] L.-C. Chen, G. Papandreou, I. Kokkinos, K. Murphy, and
+A. L. Yuille. Deeplab: Semantic image segmentation with
+deep convolutional nets, atrous convolution, and fully con-
+nected crfs. IEEE transactions on pattern analysis and ma-
+chine intelligence, 40(4):834–848, 2018.
+
+[6] L.-C. Chen, G. Papandreou, F. Schroff, and H. Adam. Re-
+thinking atrous convolution for semantic image segmenta-
+tion. arXiv preprint arXiv:1706.05587, 2017.
+
+[7] L.-C. Chen, Y. Yang, J. Wang, W. Xu, and A. L. Yuille. At-
+tention to scale: Scale-aware semantic image segmentation.
+In Proceedings of the IEEE conference on computer vision
+and pattern recognition, pages 3640–3649, 2016.
+
+[8] M. Cordts, M. Omran, S. Ramos, T. Rehfeld, M. Enzweiler,
+R. Benenson, U. Franke, S. Roth, and B. Schiele. The
+cityscapes dataset for semantic urban scene understanding.
+In Proceedings of the IEEE conference on computer vision
+and pattern recognition, pages 3213–3223, 2016.
+
+[9] J. Dai, K. He, and J. Sun. Boxsup: Exploiting bounding
+boxes to supervise convolutional networks for semantic seg-
+mentation. In Proceedings of the IEEE International Con-
+ference on Computer Vision, pages 1635–1643, 2015.
+
+[10] J. Dai, K. He, and J. Sun. Convolutional feature masking for
+joint object and stuff segmentation.
+In Proceedings of the
+IEEE Conference on Computer Vision and Pattern Recogni-
+tion, pages 3992–4000, 2015.
+
+[11] H. Ding, X. Jiang, B. Shuai, A. Q. Liu, and G. Wang. Con-
+text contrasted feature and gated multi-scale aggregation for
+scene segmentation. In Proceedings of the IEEE Conference
+on Computer Vision and Pattern Recognition, pages 2393–
+2402, 2018.
+
+[12] G. Ghiasi and C. C. Fowlkes. Laplacian pyramid reconstruc-
+tion and reﬁnement for semantic segmentation. In European
+Conference on Computer Vision, pages 519–534. Springer,
+2016.
+
+[13] B. Hariharan, P. Arbel´aez, R. Girshick, and J. Malik. Hy-
+percolumns for object segmentation and ﬁne-grained local-
+ization. In Proceedings of the IEEE conference on computer
+vision and pattern recognition, pages 447–456, 2015.
+
+ference on computer vision and pattern recognition, pages
+770–778, 2016.
+
+[15] W.-C. Hung, Y.-H. Tsai, X. Shen, Z. L. Lin, K. Sunkavalli,
+X. Lu, and M.-H. Yang. Scene parsing with global context
+embedding. In ICCV, pages 2650–2658, 2017.
+
+[16] M. A. Islam, M. Rochan, N. D. Bruce, and Y. Wang. Gated
+feedback reﬁnement network for dense image labeling.
+In
+2017 IEEE Conference on Computer Vision and Pattern
+Recognition (CVPR), pages 4877–4885. IEEE, 2017.
+
+[17] X. Jin, Y. Chen, Z. Jie, J. Feng, and S. Yan. Multi-path feed-
+back recurrent neural networks for scene parsing. In Thirty-
+First AAAI Conference on Artiﬁcial Intelligence, 2017.
+
+[18] S. Kong and C. Fowlkes. Recurrent scene parsing with
+arXiv preprint
+
+perspective understanding in the loop.
+arXiv:1705.07238, 2017.
+
+[19] P. Kr¨ahenb¨uhl and V. Koltun. Efﬁcient inference in fully
+connected crfs with gaussian edge potentials. In Advances
+in neural information processing systems, pages 109–117,
+2011.
+
+[20] X. Liang, H. Zhou, and E. Xing. Dynamic-structured seman-
+tic propagation network. In Proceedings of the IEEE Con-
+ference on Computer Vision and Pattern Recognition, pages
+752–761, 2018.
+
+[21] G. Lin, A. Milan, C. Shen, and I. D. Reid. Reﬁnenet: Multi-
+path reﬁnement networks for high-resolution semantic seg-
+mentation. In Cvpr, volume 1, page 5, 2017.
+
+[22] G. Lin, C. Shen, A. Van Den Hengel, and I. Reid. Efﬁ-
+cient piecewise training of deep structured models for se-
+mantic segmentation.
+In Proceedings of the IEEE Confer-
+ence on Computer Vision and Pattern Recognition, pages
+3194–3203, 2016.
+
+[23] W. Liu, A. Rabinovich, and A. C. Berg. Parsenet: Looking
+wider to see better. arXiv preprint arXiv:1506.04579, 2015.
+[24] Z. Liu, X. Li, P. Luo, C.-C. Loy, and X. Tang. Semantic im-
+age segmentation via deep parsing network. In Computer Vi-
+sion (ICCV), 2015 IEEE International Conference on, pages
+1377–1385. IEEE, 2015.
+
+[25] J. Long, E. Shelhamer, , and T. Darrell. Fully convolutional
+networks for semantic segmentation. In Proceedings of the
+IEEE conference on computer vision and pattern recogni-
+tion, pages 3431–3440, 2015.
+
+[26] V. Mnih, A. P. Badia, M. Mirza, A. Graves, T. Lillicrap,
+T. Harley, D. Silver, and K. Kavukcuoglu. Asynchronous
+methods for deep reinforcement learning.
+In International
+conference on machine learning, pages 1928–1937, 2016.
+
+[27] R. Mottaghi, X. Chen, X. Liu, N.-G. Cho, S.-W. Lee, S. Fi-
+dler, R. Urtasun, and A. Yuille. The role of context for object
+detection and semantic segmentation in the wild. In Proceed-
+ings of the IEEE Conference on Computer Vision and Pattern
+Recognition, pages 891–898, 2014.
+
+[28] P. H. Pinheiro and R. Collobert. Recurrent convolutional
+
+neural networks for scene labeling. Technical report, 2014.
+
+[29] T. Pohlen, A. Hermans, M. Mathias, and B. Leibe. Fullreso-
+lution residual networks for semantic segmentation in street
+scenes. arXiv preprint, 2017.
+
+[14] K. He, X. Zhang, S. Ren, and J. Sun. Deep residual learn-
+ing for image recognition. In Proceedings of the IEEE con-
+
+[30] O. Ronneberger, P. Fischer, and T. Brox. U-net: Convo-
+In
+
+lutional networks for biomedical image segmentation.
+
+4054
+
+International Conference on Medical image computing and
+computer-assisted intervention, pages 234–241. Springer,
+2015.
+
+[31] A. G. Schwing and R. Urtasun. Fully connected deep struc-
+
+tured networks. arXiv preprint arXiv:1503.02351, 2015.
+
+[32] R. Vemulapalli, O. Tuzel, M.-Y. Liu, and R. Chellapa. Gaus-
+sian conditional random ﬁeld network for semantic segmen-
+tation. In CVPR, pages 3224–3233, 2016.
+
+[33] Y. Wu and K. He. Group normalization. arXiv preprint
+
+arXiv:1803.08494, 2018.
+
+[34] F. Yu and V. Koltun. Multi-scale context aggregation by di-
+lated convolutions. arXiv preprint arXiv:1511.07122, 2015.
+[35] H. Zhang, K. Dana, J. Shi, Z. Zhang, X. Wang, A. Tyagi, and
+A. Agrawal. Context encoding for semantic segmentation.
+arXiv preprint arXiv:1803.08904, 2018.
+
+[36] R. Zhang, S. Tang, M. Lin, J. Li, and S. Yan. Global-
+residual and local-boundary reﬁnement networks for rectify-
+ing scene parsing predictions. In Proceedings of the 26th In-
+ternational Joint Conference on Artiﬁcial Intelligence, pages
+3427–3433. AAAI Press, 2017.
+
+[37] H. Zhao, J. Shi, X. Qi, X. Wang, and J. Jia. Pyramid scene
+In IEEE Conf. on Computer Vision and
+
+parsing network.
+Pattern Recognition (CVPR), pages 2881–2890, 2017.
+
+[38] S. Zheng, S. Jayasumana, B. Romera-Paredes, V. Vineet,
+Z. Su, D. Du, C. Huang, and P. H. Torr. Conditional random
+ﬁelds as recurrent neural networks.
+In Proceedings of the
+IEEE International Conference on Computer Vision, pages
+1529–1537, 2015.
+
+[39] B. Zhou, H. Zhao, X. Puig, S. Fidler, A. Barriuso, and A. Tor-
+ralba. Semantic understanding of scenes through the ade20k
+dataset. arXiv preprint arXiv:1608.05442, 2016.
+
+4055
+
+

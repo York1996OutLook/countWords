@@ -1,0 +1,1085 @@
+Large-scale interactive object segmentation with human annotators
+
+Rodrigo Benenson
+
+Stefan Popov
+
+Vittorio Ferrari
+
+Google Research
+
+{benenson, spopov, vittoferrari}@google.com
+
+Abstract
+
+Manually annotating object segmentation masks is very
+time consuming. Interactive object segmentation methods
+offer a more efﬁcient alternative where a human annota-
+tor and a machine segmentation model collaborate. In this
+paper we make several contributions to interactive segmen-
+tation: (1) we systematically explore in simulation the de-
+sign space of deep interactive segmentation models and re-
+port new insights and caveats; (2) we execute a large-scale
+annotation campaign with real human annotators, produc-
+ing masks for 2.5M instances on the OpenImages dataset.
+We released this data publicly, forming the largest exist-
+ing dataset for instance segmentation. Moreover, by re-
+annotating part of the COCO dataset, we show that we can
+produce instance masks 3× faster than traditional polygon
+drawing tools while also providing better quality. (3) We
+present a technique for automatically estimating the quality
+of the produced masks which exploits indirect signals from
+the annotation process.
+
+1. Introduction
+
+Propelled by the increased computing power, the last
+years have seen a dramatic growth in the size of models for
+computer vision tasks. These larger models are evermore
+demanding of larger training sets to reach performance sat-
+uration [32]. This demand for data often becomes a bottle-
+neck for practitioners. While computers become cheaper,
+faster, and able to handle larger models, the cost of humans
+manually annotating data remains very high. Hence, we
+need new strategies to scale-up human annotations.
+
+Amongst the traditional image understanding tasks, in-
+stance segmentation is considered one of the most expen-
+sive to annotate [8, 19, 6, 37]. For each object instance in
+each class of interest, it requires annotating a mask indicat-
+ing which pixels belong to the instance.
+
+In this work we explore an interactive segmentation ap-
+proach to annotate instance masks, where the human an-
+notator focuses on correcting the output of a segmentation
+model, rather than spending time blindly creating full an-
+notations that might be redundant or already captured by
+the model. Across multiple rounds the annotator provides
+corrections to the current segmentation, and then the model
+incorporates them to reﬁne the segmentation.
+
+Albeit the idea of interactive segmentation was estab-
+lished already a decade ago [4, 30], we make two key
+
+Figure 1. Example of corrective clicks and their effect on the seg-
+mentation mask. Starting from a bounding box, the annotator pro-
+vides up to 4 corrective clicks in each round. See section 2.
+
+contributions: (1) through extensive simulations we sys-
+tematically explore the design space of deep interactive
+segmentations models and report new insights and caveats
+(Sec. 3). (2) while most previous works report only sim-
+ulation experiments [36, 35, 17, 20, 10, 22], we execute
+a large-scale annotation campaign with real human anno-
+tators (2.5M instances, Sec. 4), we analyse the annotators
+behavior (Sec. 5.2) and the resulting annotations (Sec. 5.3).
+Our results show that we can make instance segmenta-
+tion 3× faster than traditional polygon drawing tools [19]
+while also providing better quality (Sec. 5.3). Additionally
+our method can produce masks across different time bud-
+gets, and we present a new technique for automatically es-
+timating the quality of the produced masks which exploits
+indirect signals from the annotation process (Sec. 5.4).
+
+To the best of our knowledge this is the ﬁrst work ex-
+ploring interactive annotations at scale. We apply our ap-
+proach to collect 2.5M new masks over 300 categories of
+the OpenImages dataset [14]. We released this data, mak-
+ing it the largest public dataset for instance segmentation (in
+the number of instances).
+
+1.1. Related work
+
+Dataset annotations. A ﬂurry of techniques have been
+explored to annotate the location of objects in images:
+bounding box annotations [8], clicks on the object extremes
+[26, 22], clicks on the object centre [3, 27], bounding box
+followed by edits to a generated segment [4, 30], scribbles
+[3, 18], hierarchical super-pixel annotations [21], polygon
+annotations [8, 9, 19], interactive polygons [1], eye gaze
+[25], and touch interfaces [28], just to name a few.
+Despite many explored ideas,
+the current most popular
+datasets for object instances localization were all obtained
+using purely manual annotations of boxes or (layered) poly-
+gons [8, 31, 9, 19, 6, 24, 11, 37].
+
+111700
+
+Figure 2. High level overview of our interactive annotation system (Mr not shown). See description in section 2.
+
+This work aims at changing the status quo by showing the
+interest of interactive instance segmentation as main anno-
+tation strategy for large scale instance segmentation.
+
+Weakly supervised segmentation. Weakly supervised
+segmentation methods reconstruct approximate segmenta-
+tion masks starting from weaker supervision input. For se-
+mantic/instance segmentation the following sources of su-
+pervision have been explored: image level label only [38],
+point clicks [3, 36], boxes only [7, 12, 35], scribbles only
+[18, 3], boxes plus clicks [4, 30, 35, 26, 22].
+Most
+interactive segmentation techniques build upon
+weakly supervised methods. Our work starts from segments
+generated from boxes, and then moves into an interactive
+mode by adding corrective clicks as additional supervision.
+
+Interactive segmentation. The idea of interactive image
+segmentation is decades old [4, 30].
+It has been revis-
+ited in the recent years under the deep learning umbrella
+[36, 20, 10, 34, 22, 16, 15, 1], focusing on how to best
+use clicks and scribbles corrections. Most of these work
+share structural similarities but diverge in their ﬁner design
+choices (e.g. annotation type, input encoding, etc.). Section
+3 revisits some of these choices in an uniﬁed experimental
+setup and draws new conclusions.
+
+Despite the theme of human-machine interaction, most
+previous work in this area report purely simulation exper-
+iments [35, 17, 20, 22] or only small scale human experi-
+ments (≤ 50 instances [15, 16, 1]). We instead collect 2.5M
+masks over 300 categories using a team of 100 annotators,
+share the learned lessons, and analyse the resulting annota-
+tions when considering interactive segmentation at scale.
+
+2. Overall system design
+
+We propose a design that involves three types of mod-
+els Mb, Mb+c, Mr.
+Starting from existing bounding
+boxes for each instance, we generate initial masks via
+an "image+box→mask" model Mb. We then show these
+masks to human annotators, which indicate corrections.
+These corrections are used as supervision to generate new
+improved masks, via an "image+box+corrections→mask"
+model Mb+c. The annotators iteratively correct the outputs
+of Mb+c over multiple rounds (ﬁgure 2). The ﬁnal instance
+
+segmentation model is thus trained using as privileged in-
+formation the initial bounding boxes and the corrections
+provided throughout the process.
+
+Models Mb and Mb+c are implemented using convnets,
+while Mr is a decision forest. Compared to previous work
+on interactive segmentation such as [20, 16, 1] we use a
+different design for Mb / Mb+c, and introduce the use of a
+ranking model Mr. This ranking model uses the time se-
+quence of annotator corrections on an instance to predict
+the expected quality of the generated mask. This ranking
+can be used to prioritise further corrections on low quality
+instances, or as weighting signal when training an instance
+segmentation model. In section 3 we study the design of Mb
+and Mb+c; and in section 4 we describe a concrete instanti-
+ation of our approach. The ranking model Mr is described
+in section 4.2.
+
+Since annotators spend their time solely on corrections,
+the data collected is directly focused on areas not yet cor-
+rectly captured by the Mb/Mb+c models. Easy instances
+will need zero edits from the get go, while hard instances
+might need multiple revisits.
+
+3. Simulations
+
+The generic system described in section 2 has many
+free design parameters, and previous related works have re-
+ported contradicting results. Section 3.1 describes an imple-
+mentation blueprint of our system, and section 3.2 reports
+simulation results exploring its design space.
+
+3.1. Experiments blueprint
+
+Evaluation set. For these experiments we use COCO [19],
+which is considered the gold standard amongst existing
+instance segmentation datasets. COCO was annotated
+by manually drawing polygons on object instances. Al-
+beit some previous interactive segmentation works report
+COCO results [36, 17, 16, 10], they only consider ≤ 20
+instances per class; here we consider a larger set of ∼ 88k
+instances.
+COCO objects have a median size of 53 × 62 pixels. Small
+objects tend to have blob-like shapes, while larger objects
+show more detail. We thus focus training and evaluation
+only on instances larger than 80 × 80 pixels. We evaluate
+
+11701
+
+Corrective clicksMb+cHumanannotatorMbSegmentationmodelSegmentationmodelresults over the large instances in the COCO 2014 valida-
+tion set (41k images), which we denote as COCOtest
+L .
+
+L
+
+Training set. The training set of Mb and Mb+c will have
+a direct impact on the effectiveness of the interactive an-
+notation system. We train our models over a subset of
+the ADE20k training set [37]. We picked the 255 largest
+classes representing objects (window, leg, lamp, etc.) and
+left out stuff classes (wall, sky, sidewalk, etc.).
+In total
+these have ∼ 400k instances. After ﬁltering by size, we
+are left with ∼134k instances with ground-truth segmenta-
+tions. We name this training set ADEtrain
+. Unless otherwise
+speciﬁed, we train our models on it in a class-agnostic way:
+considering all instances as belonging to a single generic
+object class. We split ADEtrain
+in two halves to train Mb
+over ADEtrain
+Unless otherwise speciﬁed all instances are cropped and
+scaled to ﬁt inside a 193 × 193 pixels box (keeping their
+aspect ratio) centred in a 385 × 385 pixels image (capturing
+some of the instance context, or padding borders with black
+pixels if outside of source image).
+The ranking model Mr is trained over a small set of real
+corrective click annotations and ground-truth masks (§4.2).
+We treat both training and testing on a per-instance basis,
+and ignore class labels (i.e. we average across instances).
+We use the traditional mean intersection-over-union (mIoU)
+as our main evaluation metric.
+
+L 1/2 , and Mb+c over ADEtrain
+L 2/2.
+
+L
+
+Annotator simulation. Training Mb
+requires ground-
+instance segmentations, and training Mb+c additionally re-
+quires annotator corrections. These training corrections can
+be collected by running annotation campaigns over data
+with already available ground-truth segmentations, or can
+be generated by simulating the expected annotator behav-
+ior. In the latter case, the details of the simulations mat-
+ter. The assumptions underlying the simulated corrections
+should match the expected behavior of annotators. More-
+over, depending on how much error we expect from the
+annotators (noise model), the simulation results will have
+higher or lower IoU. This is a confounding factor when
+comparing results amongst related works. Also, if we train
+with a certain annotator noise model, and test with the same
+model, results might be over-optimistic (compared to using
+actual human annotators).
+
+Our simulations include noise both on the boxes and the
+clicks. We generate object bounding boxes by perturbing
+the corners of a perfect bounding box ﬁt to the ground-truth
+segmentation with N (0, 60 pixels) noise. We keep bound-
+ing boxes with IoU ≥ 0.7 with the tight ground-truth box.
+We use such loose boxes because: a) depending on their
+source, not all boxes are expected to be very tight; b) we
+expect to encounter cases where there is a drift between
+the box annotation policies and the segmentation policies
+(section 4.3). Furthermore, we perturb corrective clicks
+with N (0, 3 pixels). The initial click location is also
+
+randomly sampled following a probability distributions
+speciﬁc to the click type (section 3.2.2). Also, some error
+regions might be ignored if deemed too small (section
+3.2.3).
+Unless otherwise stated, each simulation runs for 3 rounds
+of interaction, with the simulated annotator providing up to
+3 clicks per round (which we denote as 3 × 3). Section 3.2.5
+studies how to distribute corrective clicks across rounds.
+
+Models. Both Mb and Mb+c use the same architecture. We
+train Deeplabv2 ResNet101 [5] for per-pixel binary classi-
+ﬁcation (instance foreground/background). See supplemen-
+tary material for training parameters. The Deeplab model
+is augmented to accept N-channels input instead of only an
+RGB image. Mb uses 4 channels, RGB plus a binary bound-
+ing box image (inside/outside). Mb+c uses 5 or more chan-
+nels, RGB + box + corrections. Previous works have used
+different strategies to encode the corrections, which we ex-
+plore in section 3.2.4. Our ranking model Mr is a decision
+forest described in section 4.2.
+By default, we train Mb+c to handle 3 × 3 rounds. We do
+this by training a single model to use as inputs the cropped
+RGB image, the binary bounding box, and a variable num-
+ber of clicks between 1 and 9 (random, uniform discrete dis-
+tribution). Clicks are encoded as small binary disks (section
+3.2.4). We ﬁrst train the Mb model over ADEtrain
+L 1/2. Then we
+train Mb+c using simulated corrective clicks on ADEtrain
+L 2/2
+over masks generated by Mb.
+
+3.2. Simulation results
+
+Most experiments in this section require re-training both
+Mb and Mb+c. Together they represent over 9 GPU-months
+of training time.
+
+3.2.1 Mb baselines
+When training Mb over ADEtrain
+L 1/2 we obtain a mean IoU of
+65% on COCOtest
+L . This is the starting point for our annota-
+tions. For comparison using the raw (noisy) bounding boxes
+as masks, we obtain 50% mIoU. A well-tuned Grabcut im-
+plementation reaches 59% mIoU [26]. Overall our class-
+agnostic transfer from ADE20k to COCO via Mb seems to
+perform well in comparison.
+
+3.2.2 Boundary click or region click?
+
+When considering which corrective clicks should be done
+over a mask, the existing literature is split between clicks
+at the object border [26, 22, 15, 1] or clicks inside the error
+regions [36, 17, 16].
+
+For boundary clicks we train Mb+c with all clicks pasted
+into a single channel, whereas region clicks are encoded in
+two separate channels depending if the click was done in-
+side or outside the current mask.
+
+11702
+
+At test time, we iteratively simulate the clicks by ﬁrst
+adding 3 corrective clicks over the mask created by Mb,
+then applying Mb+c, then adding 3 additional corrective
+clicks, then re-applying Mb+c, etc. The corrective clicks
+are applied simulating either clicks on the boundary of the
+error regions or in their centre. The likelihood of a click in
+a error region is proportional to its area. If multiple clicks
+fall in the same error region, they are spread out to roughly
+partition it in equal areas (or the boundary in equal lengths).
+
+Result. Both type of clicks bring clear improvements in
+every round. After three rounds, region clicks reach
+80% mIoU while boundary clicks reach only 77% mIoU.
+This trend is consistent across different type of input encod-
+ing and number of clicks/rounds. We thus move forward
+with corrective clicks in the centre of error regions as our
+main correction strategy.
+
+This result can be explained via: 1) centre region clicks
+are more robust: after a small perturbation the click is still
+roughly at the region centre, while noisy boundary clicks
+are often off, 2) region clicks provide more explicit infor-
+mation about what needs to be added or removed.
+
+3.2.3 Annotation noise
+
+We report the effect of two aspects of the annotator behavior
+model: (1) how precise is the click of the annotator (click
+noise)?, (2) which error regions will be considered too small
+to be clicked on (minimum region size)? If the goal is to
+get masks annotated as fast as possible, small error regions
+should be ignored by the annotator since they will have mi-
+nor impact on mask quality.
+Result. We consider the mIoU reached at the end of 3 × 3
+simulations. Compared to zero click noise, adding an
+isotropic Gaussian click noise with standard deviation 3 or
+6 pixels causes a 3% and 7% drop in mIoU, respectively.
+Similarly, if the annotator ignores regions smaller than x2
+pixels, we observe a drop of 3% or 8% mIoU at x = 20
+or x = 30, respectively (using click noise 3 pixels). Com-
+pounded, these two effects can easily explain away ∼ 5%
+differences between two reported systems (if the annotation
+noise model is not speciﬁed).
+
+Understanding the sensitivity of the model to annotator
+noise helps decide how much effort should be put into train-
+ing the annotators to be precise versus fast.
+
+3.2.4 Clicks encoding
+
+Multiple choices are available for encoding corrective clicks
+as input to Mb+c. Previous works considered using a dis-
+tance transform from the clicks [36, 35, 17, 10, 34, 16], a
+Gaussian centred on each click [15, 22, 20], or a simple
+binary disk [3] (see supplementary material for examples).
+Compared to a binary disk, the distance transform makes it
+easier for the convnet to reason about relative distances to
+
+Figure 3. Effect of clicks encoding on the resulting masks. Mb
+indicates the masks obtained with zero clicks (bounding box only).
+Simple binary disks behave better than the alternatives.
+
+Figure 4. Effect of varying the number of clicks per round. Each
+curve show three simulated rounds (number of rings = rounds
+done). If ~9 clicks are to be collected, it is better to do 3 × 3,
+4 × 2, or 5 × 2; than to do 1 × 8 or 1 × 9. This highlights the
+beneﬁt of doing clicks that respond to the model error.
+
+the clicks. The Gaussian might make it easier for the conv-
+net to localise the exact click centre and to handle cases
+where two nearby clicks overlap.
+
+Result. The results from ﬁgure 3 indicate that using a
+Gaussian or distance transform, surprisingly, underper-
+forms compared to using a simple binary disk to encode in-
+put clicks. The disk diameter seems make little difference.
+In our setup, simplest is best.
+
+We also tried to add the mask generated from the previ-
+ous round as an additional input channel, however this did
+not improve results.
+
+3.2.5 Number of clicks and rounds
+
+Region clicks provide direct supervision for the clicked pix-
+els with a foreground or background label. The more clicks
+the better the resulting masks (with diminishing returns).
+However it is unclear how to distribute those clicks across
+rounds. As masks are updated inbetween rounds, it might
+be good to gather as many clicks as possible per round.
+However if too many are done before updating the mask
+presented to the annotator, we under-use the extrapolation
+power of Mb+c. One click typically affects the whole re-
+gion around it and can have global corrective effect on the
+generated mask (ﬁgure 1).
+
+We explore here this trade-off by evaluating three an-
+
+11703
+
+Disk3Disk5Disk10Gaussian5DistanceClicks encoding60%65%70%75%80%mean IoUMb3×1 clicks3×2 clicks3×3 clicks1369121518212427Total number of clicks65%70%75%80%85%mean IoU1 clicks per round3 clicks per round4 clicks per round5 clicks per round8 clicks per round9 clicks per roundnotation rounds with different number of clicks per round.
+They all start from the masks generated by the Mb model
+(65% mIoU).
+Result. Figure 4 shows a clear gain in mIoU when increas-
+ing the total number of corrective clicks, reaching dimin-
+ishing returns after ~15 clicks. At that point the limits of
+the Mb+c model start to cap the progress of each click. The
+ﬁgure also shows that if one is, for example, aiming for ~9
+clicks total, it is better to do 3 × 3, 4 × 2, or 5 × 2 clicks;
+than to do 8 or 9 clicks all in one round. This highlights the
+beneﬁts of the interaction between the human annotator and
+the machine generating the masks; rather than having the
+annotator blindly clicking on all errors of the initial mask.
+
+3.2.6 Class-agnostic or class-speciﬁc?
+
+Up to now Mb and Mb+c have been trained in a class-
+agnostic manner. When the target class to annotate is
+known one might that suspect that using class-speciﬁc mod-
+els might result in higher quality masks.
+
+L
+
+L
+
+(in-domain).
+
+We experimented training car- and giraffe-speciﬁc mod-
+els and evaluate them over car/giraffes or over all categories.
+We also trained models from ADEtrain
+(out-of-domain) as
+well as COCOtrain
+Result. As expected class-speciﬁc Mb models generate
+better initial results. Similarly in-domain models perform
+slightly better than out-of-domain models. However, when
+adding annotations the gap between models closes rapidly.
+After three rounds all variants are within 2 percent points
+mIoU. Even training ADE or COCO models without car
+or giraffe seem to have negligible effect after three rounds.
+From these results we conclude that there is no need to have
+class-speciﬁc models. Instead a model trained with a large
+number of instances covering diverse categories performs
+essentially just as well.
+
+4. Large-scale annotation campaign
+
+Beyond the simulations of section 3, to study the beneﬁts
+of corrective clicks we also executed a large-scale annota-
+tion campaign over the recently released OpenImages V4
+dataset [14]. This dataset provides bounding box annota-
+tions for 600 object categories. We selected 300 categories
+for which we make instance masks, based on 1) whether the
+class exhibits one coherent appearance over which a pol-
+icy could be deﬁned (e.g. "hicking equiment" is rather ill-
+deﬁned), 2) whether a clear annotation policy can be deﬁned
+(e.g. which pixels belong to a nose?, see section 4.3), and 3)
+whether we expect current segmentation models to be able
+to capture the shape adequately (e.g. jellyﬁsh contains thin
+structures that are hard for state-of-the-art models). In total,
+we annotate 2.5M instances over the 300 OpenImages cate-
+gories considered. 65 of these overlap with the existing 80
+COCO categories. We also re-annotate COCO images for
+
+Figure 5. The annotation web interface. Left side shows the object
+to annotate, the original bounding box (yellow), the current mask
+(magenta), and the corrective clicks (green and red dots). The right
+side shows the class-speciﬁc policy for the class being annotated.
+
+Figure 6. Example of corrective click masks results (top), and free-
+painting manual annotations (bottom, used as ground-truth refer-
+ence for evaluations). See supp. material for more examples.
+
+these 65 classes, which allow us to compare with COCO’s
+manual polygon drawing.
+
+In addition to the annotations generated via corrective
+clicks, we also make a smaller set of extremely accurate
+masks fully manually with a free-painting tool (~100 in-
+stances per class, for a total of 60k masks). We use these as
+reference for quality evaluation.
+
+Both corrective clicks and the free-painting annotations
+are made by a pool of 100 human annotators. These are ded-
+icated full-time annotators, that have a bias towards quality
+rather than speed.
+
+Section 4.1 describes the exact Mb and Mb+c models
+setup for collecting corrective clicks. Section 4.2 describes
+the ranking model Mr. Section 4.3 discusses the annotation
+policies used, and section 4.4 describes the free-painting an-
+notations. We analyse the collected data in section 5.
+
+4.1. Corrective clicks setup
+
+For each considered class, we annotate instances from
+the OpenImages V4 training set with size ≥ 80×40 (or
+≥40×80) pixels. Based on the simulation results from sec-
+tion 3 we opt to do three rounds of annotations with up to 4
+clicks in each round (i.e. 4 × 3 setup). Each round is sepa-
+rated by multiple days. We use section’s 3.1 blueprint with
+
+11704
+
+region clicks, minimal click region of 102 pixels, and in-
+put clicks encoded in two channels (foreground/background
+clicks) using binary disks of radius 5 pixels.
+To improve the model quality we: (1) increased the resolu-
+tion of the crops fed into Mb and Mb+c to 513×513 pixels
+(object inside 385×385 pixels box); (2) adjusted the clicks
+noise to mimic the observed annotators behaviour (i.e. near-
+uniform clicks inside the error regions); (3) added a bound-
+ary reﬁnement stage based on [2].
+
+Qualiﬁcation test. Before starting the main corrective
+clicks task, each annotator must ﬁrst pass an automated
+qualiﬁcation test to verify the annotator understands the
+task, how to use the web interface (ﬁgure 5), and that he/she
+is able to perform the task in adequate time. In our expe-
+rience, using only detailed documentation without an au-
+tomated qualiﬁcation test leads to a slow ramp-up towards
+producing quality annotations.
+
+4.2. Ranking model Mr
+
+As discussed in section 2, we would like to automati-
+cally rank the generated masks from highest quality to low-
+est quality via a model Mr. We train our Mr model to
+regress to the IoU of the ground-truth masks. We use a ran-
+dom decision forest with ﬁve input features: f1) the number
+of clicks in the last round; f2) the round number; f3) the
+∆IoU between the mask from previous round and the one
+from the current round; f4) the maximum distance between
+any of the clicks made in the current round and the mask
+from previous round; and f5) the average distance between
+the clicks and said mask. The regressor is trained using col-
+lected annotations over 1% of COCOL instances. We ob-
+serve that Mr training is robust to the volume of training
+data and the hyper-parameters of the decision forest. Once
+the ranker Mr is trained, we apply it over the full set of
+COCO and OpenImages corrective click annotations. Ex-
+amples of ranked masks can be seen in the supp. material.
+
+Out of the ﬁve features used, ∆IoU and average click
+distance provide the strongest predictive power. ∆IoU en-
+codes how much change happened in the last round. Small
+changes indicate the mask is already close to its best quality.
+The average click distance to the mask is a loose indication
+of the size of the regions being corrected, since annotator
+are instructed to click near the centre of the error regions.
+The smaller the error region, the higher the mask quality.
+
+Note that our masks ranker relies solely on indirect sig-
+nals from the annotation process itself. Since Mr does not
+use class labels (to avoid capturing class biases) nor image
+features, it generalises well across categories and datasets.
+
+4.3. Annotation policies
+
+An important consideration when dealing with human
+annotators is that the task must be well speciﬁed, oth-
+erwise miscommunication could lead to inconsistent out-
+
+comes. Compared to drawing bounding boxes, labelling
+segmentations has many more ambiguities. Deﬁning an-
+notation policies is difﬁcult because it is subject to the mis-
+match between our self-perceived simplicity of categorisa-
+tion and the complexity of the real world1.
+
+We created three types of documents: 1) a manual
+explaining the task at hand; 2) a class-agnostic policy,
+which discusses how to handle transparency, occlusion,
+fragmented objects, etc.; 3) class-speciﬁc policies, which
+answer questions such as "are belts part of pants?", "is the
+collar part of a cat?", "are ice-cubes in a drink part of it?".
+
+These policies purely specify what the desired segmen-
+tation of an object should include and exclude. They are de-
+ﬁned independently of the annotation technique. The class-
+speciﬁc policies are deﬁned aiming to: a) be feasible for the
+annotators, b) result in masks useful to train models, c) be
+coherent (so annotators can leverage knowledge built across
+classes). The automated qualiﬁcation tests validates that
+documents 1&2 have been understood. The class-speciﬁc
+annotation policy is shown directly in the annotation inter-
+face for fast consulting (ﬁgure 5).
+
+In practice deﬁning annotation policies can become a
+bottleneck for deployment. They are not trivial to deﬁne
+coherently, it takes time to ﬁnd and annotate illustrative ex-
+amples, and to ﬁnd clear concise wording. We thus re-use
+policies across groups of similar looking classes (e.g. cat
+policy for dogs and bears). In total we created 150+ slides
+of policies, deﬁning 42 class-speciﬁc policies covering 200
+classes. The class-agnostic policy was considered sufﬁcient
+for 100 classes such as frisbee, volleyball, etc.
+
+We ran a small scale experiment with 30 novice annota-
+tors. After validating that the task is well understood, we
+presented common but non-trivial cases (e.g. bottle with
+handle, box truck with visible load). Without providing de-
+tailed policies, we observed a near 50/50 split between de-
+cision such as "is the handle part of the bottle?", "is the load
+part of the truck?" (see supplementary material). This anec-
+dotal evidence supports the need for well-deﬁned policies.
+
+4.4. Free painting masks
+
+We also created a smaller set of purely manual anno-
+tations over COCO and OpenImages (~100 per class). We
+use these in order to do evaluations beyond the COCO poly-
+gons (which have known inaccuracies). These annotations
+are made using the same policies as for corrective clicks.
+
+We provide the annotators with a free-painting tool, that
+provides a resizeable circular brush, a "straight lines" mode,
+a "ﬁll closed region" mode, erase, and unlimited undo-redo.
+The free-drawing brush allows to conveniently delineate
+curved objects parts (e.g. on animals), while the "straight
+lines" mode allows to conveniently delineate straight parts
+
+1Simple questions like "what are clothes?" are subject of debate for the
+
+USA Supreme Court [33].
+
+11705
+
+(e.g. on man-made objects). The output of the annotation is
+not a polygon, but rather a binary bitmap image.
+
+Like before, we design an automated qualiﬁcation test,
+and the annotation interface shows the per-class policy. We
+request the annotators to dedicate about 180 seconds (s) per
+instance and aim towards near-perfect quality masks. Ex-
+amples of the produced masks can be seen in ﬁgure 6.
+
+5. Analysis of human annotations
+
+This section investigates the results of the large scale an-
+
+notation campaign described in section 4.
+
+5.1. Free painting annotations
+
+In total we made free-painting manual annotations for
+45k instances of 300 classes on OpenImage, and 15k in-
+stances of 65 classes on COCO (ﬁgure 6).
+Time. For the large instances considered (≥ 80 × 40 pix-
+els) COCO polygons have an average of 33.4 vertices per
+instance (compared to 24.5 overall). Assuming linear time
+in the number of vertices, we estimate the time taken to orig-
+inally annotate COCO with polygons at 108s per large in-
+stance (based on the speed reported in [19]). We requested
+our annotators to spend at least 180s per instance with free-
+paining. In practice they took on average 136s per instance.
+
+Quality. For quality control we double-annotated 5k in-
+stances. The average agreement between two annotations
+of the same instance is very high at 90% mIoU. This is
+well above the ∼ 80% mIoU human agreement previously
+reported for COCO polygons [13]. Moreover, compared
+to polygons, our annotation tool allows to better annotate
+curved objects, our annotators focused on quality rather
+than speed, and the resulting masks appear extremely accu-
+rate (e.g. pointy tips of the axe, ﬁne details of the ﬂower’s
+boundaries, and thin connecting bars in the boat in Fig. 6).
+We conclude from all of the above that our manual free-
+painting annotations are of even higher quality than the
+original COCO annotations, and are thus particularly suited
+for evaluating results of segmentation algorithms.
+
+5.2. Corrective clicks: Annotators behaviour
+
+Our 100 annotators generated 20M+ clicks, spread over
+
+5M+ mask corrections. Let us inspect these.
+
+5.2.1 Annotated clicks
+
+Clicks per round. For each instance visited in a round the
+annotators are allowed to provide 0 to 4 corrective clicks,
+as well as to click a "skip" button to indicate that a mask
+should not be created for that instance (according to policy,
+e.g. because the image is blurry, the object shape is not vis-
+ible, the box covers multiple objects, etc.). Zero clicks in-
+dicate that the mask is already good enough and no further
+corrections are needed. Neither skips nor 0-clicks masks are
+
+sent to the next round. Overall we observe 2.7% of skips,
+2.1% of 0-clicks, and 4.8%, 8.4%, 12.3%, 70.0% of 1, 2,
+3, 4-clicks respectively. By observing the area distribution
+of the regions clicked and the masks IoU (see supp. mate-
+rial) we conclude that annotators under-use the 0-clicks op-
+tion and correct minuscule missing details instead. We also
+observe they become stricter as rounds progress. Besides,
+we attribute the high percentage of 4-clicks to the annota-
+tors’ bias towards quality, and to the fact that it is easier to
+click on anything wrong (albeit small) than to judge whether
+the mask is good enough (see discussion in section 5.2.2).
+Across the three rounds each instance accumulates 3.5, 7.1,
+and 10.7 clicks on average.
+
+Clicks order. We expect annotators in each round to ﬁrst
+click on large error regions, and then on smaller ones. For
+each annotated instance we computed the area of the error
+region corresponding to each click. We observe that 60%
+of the clicks are in approximately large-to-small order (and
+30% are exactly so). Additionally, we observe that the av-
+erage area of the 1st, 2nd, 3rd, and 4th clicked error region
+are in strictly decreasing order (see supplementary mate-
+rial). Overall, annotators click ﬁrst the largest error region
+and then proceed to ﬁner details.
+
+Clicks distribution. Annotators are instructed to do one
+click per error region, unless it is rather big, in which case
+the clicks should be spread across the region. We measure
+the area of the error region as a function of number of re-
+ceived clicks. We observe that indeed only the smallest re-
+gions are left without clicks, and that the number of clicks
+grows almost linearly with the area of the error region (at
+about ~222 pixels per click). About 80% of the clicked re-
+gions received 1 click, 15% 2 clicks, 4% 3 clicks, 1% 4
+clicks. Overall, annotators indeed only do multiple clicks if
+the region to correct is rather large.
+
+5.2.2 Annotation time
+
+Time per instance. The annotation interface shows both
+the instance to annotate as well as the class-speciﬁc policy
+(ﬁgure 5). The motion of the mouse is continuously logged.
+If we measure the time spent on the annotation interface
+we obtain an average of 11.4s per instance (averaged over
+all classes and rounds). We observe a signiﬁcant variance
+across classes: the fastest 0.1 quantile of the classes take
+< 8.7s per round on average, while the slowest 0.9 quantile
+averages > 12.7s per round.
+
+Time vs number of clicks. Figure 7 shows the average
+time as a function of the number of clicks in a round. De-
+ciding if the mask is good enough (0-clicks) takes about
+4s, after which the average time continuously grows until 3
+clicks. Curiously, doing 4 clicks is faster than doing 3. We
+hypothesize this is because masks with large obvious errors
+need all 4 clicks, and these can be done fast, whereas a 3
+click answer requires extra time to decide to withhold the
+
+11706
+
+Figure 7. Mean time in sec-
+onds per answer type. See
+section 5.2.2 for discussion.
+
+Figure 8. mIoU over COCOL for
+fraction of top ranked samples.
+Mr allows to select high quality
+subsets of the data.
+
+4th click. Furthermore, the delay between the moment the
+instance is shown and the ﬁrst action is taken suggests that
+annotation time can be split between "scene parsing" and
+"click actions". After the ﬁrst click is done (8s), it takes
+about 3s per additional click.
+Time vs area. For ﬁrst clicks done under 10s, we see a
+direct relation between speed and the area of the clicked
+error region. Faster ﬁrst clicks are done on larger areas (412
+pixels for a ~3s ﬁrst click), and slower ﬁrst clicks are done
+on smaller areas (332 for a ~8s ﬁrst click). For ﬁrst clicks
+done above 10s there is no clear relation. These are cases
+where annotators wonder what should be clicked.
+
+Time per round. The average time increases over rounds,
+with 10.8, 11.7, and 11.9 seconds for rounds 1, 2, 3, respec-
+tively. This is consistent with the mask errors becoming
+smaller and thus taking more time to ﬁnd.
+
+5.3. Corrective clicks: Time versus quality
+
+Each annotation method presents a different trade-off be-
+tween speed and quality. Fig. 9 summarizes this for our
+corrective clicks, COCO polygon annotations, and our free-
+painted masks. In all cases mIoU is measured w.r.t. the free-
+painted annotations on the COCO dataset (§4.4 and 5.1).
+
+After three rounds of corrective clicks, we obtain masks
+with 84% mIoU in an average human annotation time of
+34s per instance.
+In comparison, COCO polygons reach
+82% mIoU, while taking an estimated 108s per instance
+(section 5.1). For reference, our free-painted masks take
+138s and have a self-agreement of 90% mIoU. We observe a
+similar trend when comparing boundary quality (F-measure
+at 5 pixels [23, 29]): 75% for our corrective click masks
+versus 65% for COCO polygons, and 79% for the reference
+free-painted masks. We thus conclude that our corrective
+click masks are of higher quality than the COCO polygon
+annotations, while being 3× faster to make.
+
+Coincidentally, COCO annotations average 33.4 vertices
+per instance on the instances considered, and our annota-
+tor do an average of 10.7 clicks per instance over all three
+rounds of interactive segmentation. Thus the 3× factor also
+holds in number of clicks. Some examples of our corrective
+click masks can be seen in ﬁgure 6.
+
+Figure 9. Masks quality versus time for different annotation
+schemes (section 5.3). Our corrective click masks reach better
+quality than COCO polygons, while being 3× faster to make.
+
+L
+
+Semantic segmentation training. To further validate the
+utility of the generated corrective click masks, we train from
+them a DeeplabV3 Xception65 model for semantic segmen-
+tation over COCOtrain
+. For comparison, we also train a
+second model from the original COCO polygon annota-
+tions. Since we only annotated large objects (> 80×40 pix-
+els), we ignore small instances during both training and test-
+ing. We then evaluate over COCOtest
+L and observe that both
+models perform comparably (52% mIoU COCO masks,
+versus 53% ours).
+
+5.4. Corrective clicks: Masks ranking
+
+Once all our annotations are produced, the Mr model
+can be used to rank them. We train this model on 1% of
+COCO ground-truth (section 4.2) and then use it to rank all
+corrective click masks.
+
+Fig. 8 shows mIoU over COCOL when selecting the top
+N% ranked masks (bottom N% plot in supp. material). The
+slanted shape indicates that Mr is effective at sorting the
+masks. A random ranker would result in a horizontal line.
+Thanks to Mr we can select a higher quality subset of the
+data (the top 70% masks have 90% mIoU), target annota-
+tion efforts on the lowest ranking instances (the bottom 30%
+have 70% mIoU), or weight training samples based on their
+rank. This self-diagnosing capability is a side-effect of us-
+ing corrective clicks rather than directly drawing the masks.
+
+6. Conclusion
+
+We have shown that interactive segmentation can be a
+compelling approach for instance segmentation at scale. We
+have systematically explored the design space of deep inter-
+active segmentation models. Based on the gained insights,
+we executed a large-scale annotation campaign, producing
+2.5M instance masks on OpenImages. These masks are of
+high quality (84% mIoU, 75% boundary quality). Addition-
+ally, we proposed a technique for automatically estimating
+the quality of individual masks. We publicly released these
+new annotations hoping they will help further develop the
+ﬁeld of instance segmentation.
+
+11707
+
+01234Clicks in a round02468101214mean time in seconds100%70%40%5%Top n% masks84%86%88%90%92%94%96%mean IoU0112234108136Total time in seconds70%72%74%76%78%80%82%84%86%88%90%92%mean intersection-over-union62%64%66%68%70%72%74%76%78%80%82%84%mean boundary qualityIntersection-over-unionFree-paintingCocopolygonsCorrectiveclicksBoundary qualityReferences
+
+[1] D. Acuna, H. Ling, A. Kar, and S. Fidler. Efﬁcient
+interactive annotation of segmentation datasets with
+polygon-rnn++. In CVPR, 2018. 1, 2, 3
+
+[2] J. T. Barron and B. Poole. The fast bilateral solver. In
+
+ECCV. Springer, 2016. 6
+
+[3] A. Bearman, O. Russakovsky, V. Ferrari, and L. Fei-
+Fei. What’s the Point: Semantic Segmentation with
+Point Supervision. In ECCV, 2016. 1, 2, 4
+
+[4] Y. Y. Boykov and M.-P. Jolly. Interactive graph cuts
+for optimal boundary & region segmentation of ob-
+jects in nd images. In ICCV, 2001. 1, 2
+
+[5] L.-C. Chen, G. Papandreou, I. Kokkinos, K. Murphy,
+and A. L. Yuille. Deeplab: Semantic image segmenta-
+tion with deep convolutional nets, atrous convolution,
+and fully connected crfs. PAMI, 2018. 3
+
+[6] M. Cordts, M. Omran, S. Ramos, T. Rehfeld, M. En-
+zweiler, R. Benenson, U. Franke, S. Roth, and
+B. Schiele. The cityscapes dataset for semantic urban
+scene understanding. In CVPR, 2016. 1
+
+[7] J. Dai, K. He, and J. Sun. Boxsup: Exploiting bound-
+ing boxes to supervise convolutional networks for se-
+mantic segmentation. In ICCV, 2015. 2
+
+[8] M. Everingham, S. M. A. Eslami, L. Van Gool, C. K. I.
+Williams, J. Winn, and A. Zisserman. The pascal vi-
+sual object classes challenge: A retrospective. IJCV,
+2015. 1
+
+[9] B. Hariharan, P. Arbelaez, L. Bourdev, S. Maji, and
+J. Malik. Semantic contours from inverse detectors.
+In ICCV, 2011. 1
+
+[10] Y. Hu, A. Soltoggio, R. Lock, and S. Carter. A fully
+convolutional two-stream fusion network for interac-
+tive image segmentation. Neural Networks, 2018. 1,
+2, 4
+
+[11] X. Huang, X. Cheng, Q. Geng, B. Cao, D. Zhou,
+P. Wang, Y. Lin, and R. Yang. The apolloscape
+dataset for autonomous driving.
+arXiv preprint
+arXiv:1803.06184, 2018. 1
+
+[12] A. Khoreva, R. Benenson, J. H. Hosang, M. Hein, and
+B. Schiele. Simple does it: Weakly supervised in-
+stance and semantic segmentation.
+In CVPR, 2017.
+2
+
+[13] A. Kirillov.
+overview. 7
+
+2018 panoptic segmentation dataset
+
+[14] A. Kuznetsova, H. Rom, N. Alldrin, J. Uijlings,
+I. Krasin, J. Pont-Tuset, S. Kamali, S. Popov, M. Mal-
+loci, T. Duerig, and V. Ferrari. The open images
+dataset v4: Uniﬁed image classiﬁcation, object de-
+tection, and visual relationship detection at scale.
+arXiv:1811.00982, 2018. 1, 5
+
+[15] H. Le, L. Mai, B. Price, S. Cohen, H. Jin, and F. Liu.
+Interactive boundary prediction for object selection. In
+ECCV, pages 18–33, 2018. 2, 3, 4
+
+[16] Z. Li, Q. Chen, and V. Koltun. Interactive image seg-
+mentation with latent diversity. In CVPR, 2018. 2, 3,
+4
+
+[17] J. Liew, Y. Wei, W. Xiong, S.-H. Ong, and J. Feng.
+Regional interactive image segmentation networks. In
+ICCV, 2017. 1, 2, 3, 4
+
+[18] D. Lin, J. Dai, J. Jia, K. He, and J. Sun. Scribble-
+sup: Scribble-supervised convolutional networks for
+semantic segmentation. In CVPR, 2016. 1, 2
+
+[19] T.-Y. Lin, M. Maire, S. Belongie, J. Hays, P. Perona,
+D. Ramanan, P. Dollár, and C. L. Zitnick. Microsoft
+coco: Common objects in context. In ECCV, 2014. 1,
+2, 7
+
+[20] S. Mahadevan, P. Voigtlaender, and B. Leibe.
+
+Iter-
+In BMVC,
+
+atively trained interactive segmentation.
+2018. 1, 2, 4
+
+[21] M. Maire, S. X. Yu, and P. Perona. Hierarchical scene
+
+annotation. In BMVC, 2013. 1
+
+[22] K.-K. Maninis, S. Caelles, J. Pont-Tuset, and L. Van
+Gool. Deep extreme cut: From extreme points to ob-
+ject segmentation. In CVPR, 2018. 1, 2, 3, 4
+
+[23] D. R. Martin, C. C. Fowlkes, and J. Malik. Learning
+to detect natural image boundaries using local bright-
+ness, color, and texture cues. PAMI, 2004. 8
+
+[24] G. Neuhold, T. Ollmann, S. Rota Bulò,
+
+and
+P. Kontschieder. The mapillary vistas dataset for se-
+mantic understanding of street scenes. In ICCV, 2017.
+1
+
+[25] D. P. Papadopoulos, A. D. Clarke, F. Keller, and
+V. Ferrari. Training object class detectors from eye
+tracking data. In ECCV. Springer, 2014. 1
+
+[26] D. P. Papadopoulos, J. R. Uijlings, F. Keller, and
+V. Ferrari. Extreme clicking for efﬁcient object an-
+notation. In ICCV, 2017. 1, 2, 3
+
+[27] D. P. Papadopoulos, J. R. R. Uijlings, F. Keller, and
+V. Ferrari. Training object class detectors with click
+supervision. CVPR, 2017. 1
+
+[28] M. Pizenberg, A. Carlier, E. Faure, and V. Charvil-
+lat. Outlining objects for interactive segmentation on
+touch devices.
+In ACM on Multimedia Conference,
+2017. 1
+
+[29] J. Pont-Tuset and F. Marques. Supervised evalua-
+tion of image segmentation and object proposal tech-
+niques. PAMI, 2016. 8
+
+[30] C. Rother, V. Kolmogorov, and A. Blake. "grabcut":
+interactive foreground extraction using iterated graph
+cuts. ACM Trans. Graph., 2004. 1, 2
+
+11708
+
+[31] O. Russakovsky,
+
+J. Deng, H. Su,
+
+J. Krause,
+S. Satheesh, S. Ma, Z. Huang, A. Karpathy, A. Khosla,
+M. Bernstein, A. C. Berg, and L. Fei-Fei. ImageNet
+Large Scale Visual Recognition Challenge.
+IJCV,
+2015. 1
+
+[32] C. Sun, A. Shrivastava, S. Singh, and A. Gupta. Revis-
+iting unreasonable effectiveness of data in deep learn-
+ing era. In ICCV, 2017. 1
+
+[33] The Atlantic. ’what are clothes?’ asks most delightful
+
+supreme court argument in history. 6
+
+[34] G. Wang, M. A. Zuluaga, W. Li, R. Pratt, P. A. Pa-
+tel, M. Aertsen, T. Doel, A. L. Divid, J. Deprest,
+S. Ourselin, et al. Deepigeos: a deep interactive
+geodesic framework for medical image segmentation.
+PAMI, 2018. 2, 4
+
+[35] N. Xu, B. Price, S. Cohen, J. Yang, and T. Huang.
+Deep grabcut for object selection. In BMVC, 2017. 1,
+2, 4
+
+[36] N. Xu, B. Price, S. Cohen, J. Yang, and T. S. Huang.
+Deep interactive object selection. In CVPR, 2016. 1,
+2, 3, 4
+
+[37] B. Zhou, H. Zhao, X. Puig, S. Fidler, A. Barriuso, and
+A. Torralba. Scene parsing through ade20k dataset. In
+CVPR, 2017. 1, 3
+
+[38] Y. Zhou, Y. Zhu, Q. Ye, Q. Qiu, and J. Jiao. Weakly
+supervised instance segmentation using class peak re-
+sponse. In CVPR, 2018. 2
+
+11709
+
+

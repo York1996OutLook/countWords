@@ -1,0 +1,1209 @@
+Overcoming Limitations of Mixture Density Networks:
+
+A Sampling and Fitting Framework for Multimodal Future Prediction
+
+Osama Makansi, Eddy Ilg, ¨Ozg¨un C¸ ic¸ek and Thomas Brox
+
+University of Freiburg
+
+makansio,ilge,cicek,brox@cs.uni-freiburg.de
+
+Abstract
+
+Future prediction is a fundamental principle of intelli-
+gence that helps plan actions and avoid possible dangers.
+As the future is uncertain to a large extent, modeling the
+uncertainty and multimodality of the future states is of great
+relevance. Existing approaches are rather limited in this re-
+gard and mostly yield a single hypothesis of the future or,
+at the best, strongly constrained mixture components that
+suffer from instabilities in training and mode collapse. In
+this work, we present an approach that involves the predic-
+tion of several samples of the future with a winner-takes-all
+loss and iterative grouping of samples to multiple modes.
+Moreover, we discuss how to evaluate predicted multimodal
+distributions, including the common real scenario, where
+only a single sample from the ground-truth distribution is
+available for evaluation. We show on synthetic and real
+data that the proposed approach triggers good estimates of
+multimodal distributions and avoids mode collapse.
+
+1. Introduction
+
+Future prediction at its core is to estimate future states
+of the environment, given its past states. The more complex
+the dynamical system of the environment, the more com-
+plex the prediction of its future. The future trajectory of a
+ball in free fall is almost entirely described by deterministic
+physical laws and can be predicted by a physical formula. If
+the ball hits a wall, an additional dependency is introduced,
+which conditions the ball’s trajectory on the environment,
+but it would still be deterministic.
+
+Outside such restricted physical experiments,
+
+future
+states are typically non-deterministic. Regard the bicycle
+trafﬁc scenario in Figure 1. Each bicyclist has a goal where
+to go, but it is not observable from the outside, thus, mak-
+ing the system non-deterministic. On the other hand, the
+environment restricts the bicyclists to stay on the lanes and
+adhere (mostly) to certain trafﬁc rules. Also statistical in-
+formation on how bicyclists moved in the past in this round-
+
+Figure 1: Given the past images, the past positions of an ob-
+ject (red boxes), and the experience from the training data,
+the approach predicts a multimodal distribution over future
+states of that object (visualized by the overlaid heatmap).
+The bicyclist is most likely to move straight (1), but could
+also continue on the roundabout (2) or turn right (3).
+
+about and potentially subtle cues like the orientation of the
+bicycle and its speed can indicate where a bicyclist is more
+likely to go. A good future prediction must be able to model
+the multimodality and uncertainty of a non-deterministic
+system and, at the same time, take all the available con-
+ditional information into account to shape the predicted dis-
+tribution away from a non-informative uniform distribution.
+
+Existing work on future prediction is mostly restricted to
+predict a single future state, which often corresponds to the
+mean of all possible outcomes [42, 57, 39, 12, 10]. In the
+best case, such system predicts the most likely of all pos-
+sible future states, ignoring the other possibilities. As long
+as the environment stays approximately deterministic, the
+latter is a viable solution. However, it fails to model other
+possibilities in a non-deterministic environment, preventing
+the actor to consider a plan B.
+
+Rupprecht et al. [44] addressed multimodality by pre-
+dicting diverse hypotheses with the Winner-Takes-All
+(WTA) loss [16], but no distribution and no uncertainty.
+Conditional Variational Autoencoders (cVAE) provide a
+
+7144
+
+way to sample multiple futures [56, 4, 24], but also do not
+yield complete distributions. Many works that predict mix-
+ture distributions constrain the mixture components to ﬁxed,
+pre-deﬁned actions or road lanes [26, 18]. Optimizing for
+general, unconstrained mixture distributions requires spe-
+cial initialization and training procedures and suffers from
+mode collapse; see [44, 8, 9, 35, 15, 17]. Their ﬁndings are
+consistent with our experiments.
+
+In this paper, we present a generic deep learning ap-
+proach that yields unconstrained multimodal distribution as
+output and demonstrate its use for future prediction in non-
+deterministic scenarios. In particular, we propose a strategy
+to avoid the inconsistency problems of the Winner-Takes-
+All WTA loss, which we name Evolving WTA (EWTA).
+Second, we present a two-stage network architecture, where
+the ﬁrst stage is based on EWTA, and the second stage ﬁts
+a distribution to the samples from the ﬁrst stage. The ap-
+proach requires only a single forward pass and is simple
+and efﬁcient. In this paper, we apply the approach to fu-
+ture prediction, but it applies to mixture density estimation
+in general.
+
+To evaluate a predicted multimodal distribution, a
+ground-truth distribution is required. To this end, we intro-
+duce the synthetic Car Pedestrian Interaction (CPI) dataset
+and evaluate various algorithms on this dataset using the
+Earth Mover’s Distance. In addition, we evaluate on real
+data, the Standford Drone Dataset (SDD), where ground-
+truth distributions are not available and the evaluation must
+be based on a single ground-truth sample of the true distri-
+bution. We show that the proposed approach outperforms
+all baselines. In particular, it prevents mode collapse and
+leads to more diverse and more accurate distributions than
+prior work.
+
+2. Related Work
+
+Classical Future Prediction. Future prediction goes
+back to works like the Kalman ﬁlter [23], linear regres-
+sion [34], autoregressive models [53, 1, 2], frequency
+domain analysis of time series [37], and Gaussian Pro-
+cesses [36, 55, 40, 32]. These methods are viable base-
+lines, but have problems with high-dimensional data and
+non-determinism.
+
+Future Prediction with CNNs. The possibilities of
+deep learning have attracted increased interest in future pre-
+diction, with examples from various applications: action
+anticipation from dynamic images [42], visual path pre-
+diction from single image [19], future semantic segmenta-
+tion [31], future person localization [57] and future frame
+prediction [28, 52, 33]. Jin et al. [22] exploited learned mo-
+tion features to predict scene parsing into the future. Fan et
+al. [13] and Luc et al. [30] learned feature to feature transla-
+tion to forecast features into the future. To exploit the time
+dependency inherent in future prediction, many works use
+
+RNNs and LSTMs [58, 48, 50, 54, 49]. Liu et al. [29] and
+Rybkin et al. [45] formulated the translation from two con-
+secutive images in a video by an autoencoder to infer the
+next frame. Jayaraman et al. [21] used a VAE to predict
+future frames independent of time.
+
+Due to the uncertain nature of future prediction, many
+works target predicting uncertainty along with the predic-
+tion. Djuric et al. [10] predicted the single future trajecto-
+ries of trafﬁc actors together with their uncertainty as the
+learned variance of the predictions. Radwan et al. [39] pre-
+dicted single trajectories of interacting actors along with
+their uncertainty for the purpose of autonomous street cross-
+ing. Ehrhardt et al. [12] predicted future locations of the
+objects along with their non-parametric uncertainty maps,
+which is theoretically not restricted to a single mode. How-
+ever, it was used and evaluated for a single future outcome.
+Despite the inherent ambiguity and multimodality in future
+states, all approaches mentioned above predict only a single
+future.
+
+Multimodal predictions with CNNs. Some works pro-
+posed methods to obtain multiple solutions from CNNs.
+Guzman-Rivera et al. [16] introduced the Winner-Takes-
+All (WTA) loss for SSVMs with multiple hypotheses as
+output. This loss was applied to CNNs for image classi-
+ﬁcation [25], semantic segmentation [25], image caption-
+ing [25], and synthesis [6]. Firman et al. [14] used the WTA
+loss in the presence of multiple ground truth samples. The
+diversity in the hypotheses also motivated Ilg et al. [20] to
+use the WTA loss for uncertainty estimation of optical ﬂow.
+
+Another option is to estimate a complete mixture distri-
+bution from a network, like the Mixture Density Networks
+(MDNs) by Bishop [5]. Prokudin et al. [38] used MDNs
+with von Mises distributions for pose estimation. Choi et
+al. [7] utilized MDNs for uncertainties in autonomous driv-
+ing by using mixture components as samples alternative to
+dropout [47]. However, optimizing for a general mixture
+distribution comes with problems, such as numerical insta-
+bility, requirement for good initializations, and collapsing
+to a single mode [44, 8, 9, 35, 15, 17]. The Evolving WTA
+loss and two stage approach proposed in this work addresses
+these problems.
+
+Some of the above techniques were used for future pre-
+diction. Vondric et al. [51] learned the number of possible
+actions of objects and humans and the possible outcomes
+with an encoder-decoder architecture. Prediction of a distri-
+bution of future states was approached also with conditional
+variational autoencoders (cVAE). Xue et al. [56] exploited
+cVAEs for estimating multiple optical ﬂows to be used in
+future frame synthesis. Lee et al. [24] built on cVAEs to
+predict multiple long-term futures of interacting agents. Li
+et al. [27] proposed a 3D cVAE for motion encoding. Bhat-
+tacharyya et al. [4] integrated dropout-based Bayesian in-
+ference into cVAE.
+
+7145
+
+The most related work to ours is by Rupprecht et al. [44],
+where they proposed a relaxed version of WTA (RWTA).
+They showed that minimizing the RWTA loss is able to
+capture the possible futures for a car approaching a road
+crossing, i.e., going straight, turning left, and turning right.
+Bhattacharyya et al. [3] set up this optimization within an
+LSTM network for future location prediction. Despite cap-
+turing the future locations, these works do not provide the
+whole distribution over the possible locations.
+
+Few methods predict mixture distributions, but only in a
+constrained setting, where the number of modes is ﬁxed and
+the modes are manually bound according to the particular
+application scenario. Leung et al. [26] proposed a recurrent
+MDN to predict possible driving behaviour constrained to
+human driving actions on a highway. More recent work by
+Hu et al. [18] used MDNs to estimate the probability of a
+car being in another free space in an automated driving sce-
+nario. In our work, neither the exact number of modes has
+to be known a priori (only an upper bound is provided), nor
+does it assume a special problem structure, such as driving
+lanes in a driving scenario. Another drawback of existing
+works is that no evaluation for the quality of multimodality
+is presented other than the performance on the given driving
+task.
+
+3. Multimodal Future Prediction Framework
+
+Figure 2b shows a conceptual overview of the ap-
+proach. The input of the network is the past images
+and object bounding boxes for the object of interest x =
+(It−h, ..., It, Bt−h, ..., Bt), where h is the length of the his-
+tory into the past and the bounding boxes Bi are provided as
+mask images, where pixels inside the box are 1 and others
+are 0. Given x, the goal is to predict a multimodal distri-
+bution p(y|x) of the annotated object’s location y at a ﬁxed
+time instant t + ∆t in the future.
+
+The training data is a set of images, object masks and fu-
+ture ground truth locations: D = {(x1, ˆy1), ..., (xN , ˆyN )},
+where N is the number of samples in the dataset. Note that
+this does not provide the ground-truth conditional distribu-
+tion for p(y|xi), but only a single sample ˆyi from that dis-
+tribution. To have multiple samples of the distribution, the
+dataset must contain multiple samples with the exact same
+input xi, which is very unlikely for high-dimensional in-
+puts. The framework is rather supposed to generalize from
+samples with different input conditions. This makes it an
+interesting and challenging learning problem, which is self-
+supervised by nature.
+
+In general, p(y|x) can be modeled by a parametric or
+non-parametric distribution. The non-parametric distribu-
+tion can be modeled by a histogram over possible future
+locations, where each bin corresponds to a pixel. A para-
+metric model can be based on a mixture density, such as
+a mixture of Gaussians. In Section 6, we show that para-
+
+(a) Direct output of mixture distribution parameters from an encoder.
+
+(b) Our proposed two-stage approach (EWTAD-MDF). The ﬁrst stage
+generates hypotheses trained with EWTA loss and the second part ﬁts
+a mixture distribution by predicting soft assignments of the hypothe-
+ses to mixture components.
+
+Figure 2: Illustration of the normal MDN approach (a) and
+our proposed extension (b).
+
+metric modelling leads to superior results compared to the
+non-parametric model.
+
+3.1. MDN Baseline
+
+A mixture density network (MDN) as in Figure 2a mod-
+els the distribution as a mixture of parametric distributions:
+
+p(y|x) =
+
+M
+
+X
+
+i=1
+
+πiφ(y|θi) ,
+
+(1)
+
+where M is the number of mixture components, φ can be
+any type of parametric distribution with parameters θi, and
+πi is the respective component’s weight. In this work, we
+use Laplace and Gaussian distributions, thus, in the case of
+the Gaussian, θi = (µi, σ2
+i ), with µi = (µi,x, µi,y) be-
+ing the mean, and σ2
+i = (σ2
+i,x, σ2
+i,y) the variance of each
+mixture component. We treat x- and y-components as inde-
+pendent, i.e. φ(x, y) = φ(x) · φ(y), because this is usually
+easier to optimize. Arbitrary distributions can still be ap-
+proximated by using multiple mixture components [5].
+
+The parameters (πi, µi, σi) are all outputs of the net-
+work and depend on the input data x (omitted for brevity).
+When using Laplace distributions for the mixture compo-
+nents, the output becomes the scale parameter bi instead
+of σi. For training the network, we minimize the negative
+log-likelihood (NLL) of (1) [5, 38, 26, 7, 18].
+
+Optimizing all parameters jointly in MDNs is difﬁcult,
+becomes numerically unstable in higher dimensions, and
+suffers from degenerate predictions [44, 8]. Moreover,
+MDNs are usually prone to overﬁtting, which requires
+special regularization techniques and results in mode col-
+lapse [9, 15, 35, 17]. We use methodology similar to [17]
+
+7146
+
+Images+Mixture DistributionCNNBoundig BoxesFuture Object Location...Fullyconnected...Mixture DistributionHypothesesSoftAssignmentsCNNImagesFutureObject LocationBoundigBoxesand sequentially learn ﬁrst the means, then the variances
+and ﬁnally all parameters jointly. Even though applying
+such techniques helps training MDNs, the experiments in
+Section 6.4 show that MDNs still suffer from mode col-
+lapse.
+
+3.2. Sampling and Distribution Fitting Framework
+
+Since direct optimization of MDNs is difﬁcult, we pro-
+pose to split the problem into sub-tasks: sampling and dis-
+tribution ﬁtting; see Figure 2b. The ﬁrst stage implements
+the sampling. Motivated by the diversity of hypotheses ob-
+tained with the WTA loss [16, 25, 6, 44], we propose an
+improved version of this loss and then use it to obtain these
+samples, which we will keep referring to as hypotheses to
+distinguish them from the samples of the training data D.
+
+Given these hypotheses, one would typically proceed
+with the EM-algorithm to ﬁt a mixture distribution. Inspired
+by [59], we rather apply a second network to perform the
+distribution ﬁtting; see Figure 2b. This yields a faster run-
+time and the ability to ﬁnetune the whole network end-to-
+end.
+
+3.2.1 Sampling - EWTA
+
+Let hk be a hypothesis predicted by our network. We inves-
+tigate two versions. In the ﬁrst we model each hypothesis
+as a point estimate hk = µk and use the Euclidean distance
+as a loss function:
+
+lED(hk, ˆy) = ||hk − ˆy|| .
+
+(2)
+
+In the second version, we model hk = (µk, σk) as a uni-
+modal distribution and use the NLL as a loss function [20]:
+
+lN LL(hk, ˆy) = − log(φ(ˆy|hk)) .
+
+(3)
+
+To obtain diverse hypotheses, we apply the WTA meta-
+loss [16, 25, 6, 44, 20]:
+
+LW T A =
+
+K
+
+X
+
+k=1
+
+wkl(hk, ˆy) ,
+
+wi = δ(i = argmin
+
+||µk − ˆy||) ,
+
+k
+
+(4)
+
+(5)
+
+where K is the number of estimated hypotheses and δ(·)
+is the Kronecker delta, returning 1 when the condition is
+true and 0 otherwise. Following [20], we always base the
+winner selection on the Euclidean distance; see (5). We
+denote the WTA loss with l = lED as WTAP (where P
+stands for Point estimates) and the WTA loss with l = lN LL
+as WTAD (where D stands for distribution estimates).
+
+Rupprecht et al. [44] showed that given a ﬁxed input and
+multiple ambiguous ground-truth outputs, the WTA loss
+ideally leads to a Voronoi tessellation of the ground truth.
+
+Comparing to the EM-algorithm, this is equivalent to a per-
+fect k-means clustering. However, in practice, k-means is
+known to depend on the initialization. Moreover, in our
+case, only one hypothesis is updated at a time (compara-
+ble to iterative k-means), the input condition x is constantly
+alternating, and we have a CNN in the loop.
+
+This makes the training process very brittle, as illustrated
+in Figure 3a. The red dots here present ground truths, which
+are iteratively presented one at a time, each time putting a
+loss on one of the hypotheses (black crosses) and thereby at-
+tracting them. When the ground truths iterate, it can happen
+that hypotheses get stuck in an equilibrium (i.e. a hypoth-
+esis is attracted by multiple ground truths). In the case of
+WTA, a ground truth pairs with at most one hypothesis, but
+one hypothesis can pair with multiple ground truths. In the
+example from Figure 3a, this leads to one hypothesis pairing
+with ground truth 3 and one hypothesis pairing with both,
+ground truths 1 and 2. This leads to a very bad distribution
+in the end. For details see caption of Figure 3.
+
+Hence, Rupprecht et al. [44] relaxed the argmin operator
+in (5) and added a small constant ǫ to all wi (RWTA), while
+still ensuring Pi wi = 1. The effect of the relaxation is
+illustrated in Figure 3b. In comparison to WTA, this results
+in more hypotheses to pair with ground truths. However,
+each ground truth also pairs with at most one hypothesis
+and all excess hypotheses move to the equilibrium. RWTA
+therefore alleviates the convergence problem of WTA, but
+still leads to hypotheses generating an artiﬁcial, incorrect
+mode. The resulting distribution also reﬂects the ground
+truth samples very badly. This effect is conﬁrmed by our
+experiments in Section 6.
+
+We therefore propose another strategy, which we name
+Evolving WTA (EWTA). In this version, we update the top-
+k winners. Referring to (5), this means that k weights are
+1, while M − k weights are 0. We start with k = M and
+then decrease k until k = 1. Whenever k is decreased, a hy-
+pothesis previously bound to a ground truth is effectively re-
+leased from an equilibrium and becomes free to pair with a
+ground truth. The process is illustrated in Figure 3c. EWTA
+provides an alternative relaxation, which assures that no
+residual forces remain. While this still does not guarantee
+that in odd cases a hypothesis is left in an equilibrium, it
+leads to much fewer hypotheses being unused than in WTA
+and RWTA and for a much better distribution of hypothe-
+ses in general. The resulting spurious modes are removed
+later, after adding the second stage and a ﬁnal end-to-end
+ﬁnetuning of our pipeline.
+
+3.2.2 Fitting - MDF
+
+In the second stage of the network, we ﬁt a mixture distribu-
+tion to the estimated hypotheses (we call this stage Mixture
+Density Fitting (MDF); see Figure 2b). Similar to Zong et
+
+7147
+
+(a) WTA
+
+(b) RWTA
+
+(c) EWTA
+
+Figure 3: Illustrative example of generating hypotheses with different variants of the WTA loss. Eight hypotheses are
+generated by the sampling network (crosses) with the purpose to cover the three ground truth samples (numbered red circles).
+During training, only some ground truth samples are in the minibatch at each iteration. For each, the WTA loss selects the
+closest hypothesis and the gradient induces an attractive force (indicated by arrows). We also show the distributions that arise
+from applying a Parzen estimator to the ﬁnal set of hypotheses. (a) In the WTA variant, each ground truth sample selects
+one winner, resulting in one hypothesis paired with sample 3, one hypothesis in the equilibrium between samples 1 and 2,
+and the rest never being updated (inconsistent hypotheses). The resulting distribution does not well match the ground truth
+samples. (b) With the relaxed WTA loss, the non-winning hypotheses are attracted slightly by all samples (thin arrows),
+moving them slowly to the equilibrium. This increases the chance of single hypotheses to pair with a sample. The resulting
+distribution contains some probability mass at the ground truth locations, but has a large spurious mode in the center. (c)
+With the proposed evolving WTA loss, all hypotheses ﬁrst match with all ground truth samples, moving all hypotheses to the
+equilibrium (Top 8). Then each ground truth releases 4 hypotheses and pulls only 4 winners, leading to 2 hypotheses pairing
+with samples 1 and 3 respectively, and 2 hypotheses moving to the equilibrium between samples 1/2 and 2/3, respectively
+(Top 4). The process continues until each sample selects only one winner (Top 1). The resulting distribution has three modes,
+reﬂecting the ground truth sample locations well. Only small spurious modes are introduced.
+
+al. [59], we estimate the soft assignments of each hypothesis
+to the mixture components:
+
+γk = softmax(zk) ,
+
+(6)
+
+where k = 1..K and zk is an M -dimensional output vec-
+tor for each hypothesis k. The soft-assignments yield the
+mixture parameters as follows [59]:
+
+πi =
+
+1
+K
+
+K
+
+X
+
+k=1
+
+γk,i ,
+
+µi = PK
+k=1 γk,iµk
+PK
+k=1 γk,i
+i = PK
+k=1 γk,i (cid:2)(µi − µk)2 + σ2
+k(cid:3)
+σ2
+
+,
+
+PK
+
+k=1 γk,i
+
+(7)
+
+(8)
+
+.
+
+(9)
+
+In Equation 9, following the law of total variance, we add
+σ2
+
+k . This only applies to WTAD. For WTAP σ2
+Finally, we insert the estimated parameters from equa-
+tions (7), (8), (9) back into the NLL in (1). First, we
+train the two stages of the network sequentially, i.e., we
+
+k = 0.
+
+train the ﬁtting network after the sampling network. How-
+ever, since EWTA does not ensure hypotheses that follow a
+well-deﬁned distribution in general, we ﬁnally remove the
+EWTA loss and ﬁnetune the full network end-to-end with
+the NLL loss.
+
+4. Car Pedestrian Interaction Dataset
+
+Detailed evaluation of the quality of predicted distribu-
+tions requires a test set with the ground truth distribution.
+Such distribution is typically not available for datasets. Es-
+pecially for real-world datasets, the true underlying distri-
+bution is not available, but only one sample from that dis-
+tribution. Since there exists no future prediction dataset
+with probabilistic multimodal ground truth, we simulated
+a dataset based on a static environment and moving objects
+(a car and a pedestrian) that interact with each other; see
+Figure 4. The objects move according to deﬁned policies
+that ensure realistic behaviour and multimodality. Since the
+policies are known, we can evaluate on the ground-truth dis-
+tributions p(y|x) of this dataset. For details we refer to the
+supplementary material.
+
+7148
+
+5. Evaluation Metrics
+
+Oracle Error. For assessing the diversity of the pre-
+dicted hypotheses, we report the commonly used Oracle
+Error. It is computed by selecting the hypothesis or mode
+closest to the ground truth. This metric uses the ground
+truth to select the best from a set of outputs, thus it prefers
+methods that produce many diverse outputs. Unreasonable
+outputs are not penalized.
+
+NLL. The Negative Log-Likelihood (NLL) measures the
+ﬁt of a ground-truth sample to the predicted distribution and
+allows evaluation on real data, where only a single sam-
+ple from the ground truth distribution is available. Missing
+modes and inconsistent modes are both penalized by NLL
+when being averaged over the whole dataset. In case of syn-
+thetic data with the full ground-truth distribution, we sample
+from this distribution and average the NLL over all samples.
+EMD. If the full ground-truth distribution is avail-
+able for evaluation, we report the Earth Mover’s distance
+(EMD) [43], also known as Wasserstein metric. As a met-
+ric between distributions, it penalizes accurately all differ-
+ences between the predicted and the ground-truth distribu-
+tion. One can interpret it as the energy required to move
+the probability mass of one distribution such that it matches
+the other distribution, i.e. it considers both, the size of the
+modes and the distance they must be shifted. The compu-
+tational complexity of EMD is O(N 3logN ) for an N -bin
+histogram and in our case every pixel is a bin. Thus, we
+use the wavelet approximation WEMD [46], which has a
+complexity of O(N ).
+
+SEMD. To make the degree of multimodality of a mix-
+ture distribution explicit, we use the EMD to measure
+the distance between all secondary modes and the pri-
+mary (MAP) mode, i.e., the EMD to convert a multimodal
+into a unimodal distribution. We name this metric Self-
+EMD (SEMD). Large SEMD indicates strong multimodal-
+ity, while small SEMD indicates unimodality. SEMD is
+only sensible as a secondary metric besides NLL.
+
+6. Experiments
+
+6.1. Training Details
+
+Our sampling stage is the encoder of the FlowNetS ar-
+chitecture by Dosovitskiy et al. [11] followed by two addi-
+tional convolutional layers. The ﬁtting stage is composed
+of two fully connected layers (details in the Supplemental
+Material). We choose the ﬁrst stage to produce K = 40
+hypotheses and the mixture components to be M = 4. For
+the sampling network, we use EWTA and follow a sequen-
+tial training procedure, i.e., we learn σis after we learn
+µis. We train the sampling and the ﬁtting networks one-by-
+one. Finally, we remove the EWTA loss and ﬁnetune every-
+thing end-to-end. The single MDN networks are initialized
+with the same training procedure as mentioned above before
+
+switching to actual training with the NLL loss for a mixture
+distribution.
+
+Since the CPI dataset was generated using Gaussian dis-
+tributions, we use a Gaussian mixture model when training
+models for the CPI dataset. For the SDD dataset, we choose
+the Laplace mixture over a Gaussian mixture, because min-
+imizing its negative log-likelihood corresponds to minimiz-
+ing the L1 distance [20] and is more robust to outliers.
+
+6.2. Datasets
+
+CPI Dataset. The training part consists of 20k random
+samples, while for testing, we randomly pick 54 samples
+from the policy. For the time offset into the future we
+choose ∆t = 20 frames. We evaluated our method and its
+baselines on this dataset ﬁrst, since it allows for quantitative
+evaluation of distributions.
+
+SDD. We use the Stanford Drone Dataset (SDD) [41] to
+validate our methods on real world data. SDD is composed
+of drone images taken at the campus of the Stanford Univer-
+sity to investigate the rules people follow while navigating
+and interacting. It includes different classes of trafﬁc ac-
+tors. We used a split of 50/10 videos for training/testing.
+For this dataset we set ∆t = 5 sec. For more details see
+Supplemental Material.
+
+6.3. Hypotheses prediction
+
+In our two-staged framework, the ﬁtting stage depends
+on the quality of the hypotheses. To this end, we start with
+experiments to compare the techniques for hypotheses gen-
+eration (sampling): WTA, RWTA with ǫ=0.05 and the pro-
+posed EWTA. Alternatively one could use dropout [47] to
+generate multiple hypotheses. Hence, we also compare to
+this baseline.
+
+The predicted hypotheses can be seen as equal point
+probability masses and their density leads to a distribution.
+To assess how well the hypotheses reﬂect the ground-truth
+distribution of the CPI dataset, we treat the hypotheses as
+a uniform mixture of Dirac distributions and compute the
+EMD between this Dirac mixture and the ground truth. The
+results in Table 1 show that the proposed EWTA clearly out-
+performs other variants in terms of EMD, showing that the
+set of hypotheses from EWTA is better distributed than the
+sets from RWTA and WTA. WTA and RWTA are better in
+terms of the oracle error, i.e., the best hypothesis from the
+set ﬁts a little better than the best hypothesis in EWTA.
+Clearly, WTA is very well-suited to produce diverse hy-
+potheses, from which one of them will be very good, but
+it fails on producing hypotheses that represent the samples
+of the true distribution. This problem is ﬁxed with the pro-
+posed Evolving WTA.
+
+The effect is visualized by the example in Figure 4. The
+ﬁgure also shows that dropout fails to produce diverse hy-
+potheses, which results in a very bad oracle error. Its EMD
+
+7149
+
+GT
+
+Dropout
+
+WTA
+
+Relaxed WTA
+
+Evolving WTA
+
+Figure 4: Hypotheses generation on the CPI dataset. The dataset has always the same environment of one crossing area
+(red rectangle) and two objects navigating and interacting (pedestrian and car). In this case, a pedestrian (black rectangle) is
+heading towards the crossing area (indicated by a blue arrow) and a car (pink rectangle) is entering the crossing area. Left
+shows the ground-truth distribution for the future locations (after 20 frames) of the pedestrian (black dots) and the car (pink
+dots). According to the policy to be learned, the pedestrian should wait at the corner until the car passes and the car has three
+options to exit the crossing. Dropout predicts very similar hypotheses (mode-collapse), while all variants of WTA ensure
+diversity. The set of hypotheses generated by our evolving WTA additionally approximates the ground-truth distribution.
+
+Oracle Error
+
+Dropout
+WTA [44]
+Relaxed WTA [44]
+
+Evolving WTA (ours)
+
+41.80
+6.96
+7.94
+9.84
+
+EMD
+3.25
+3.94
+2.82
+1.89
+
+Table 1: Comparison between approaches for hypotheses
+prediction on the CPI dataset. The overall hypotheses dis-
+tribution of EWTA matches the ground truth distribution
+much better, as measured by the Earth Mover’s distance
+(EMD). The high oracle error for Dropout indicates lack-
+ing diversity among the hypotheses.
+
+is better than WTA, but much worse than with the proposed
+EWTA.
+
+Figure 4 shows that only EWTA and dropout learned the
+interaction between the car and the pedestrian. WTA pro-
+vides only the general options for the car (north, east, south
+and west), and both, WTA and RWTA provide only the gen-
+eral options of the pedestrian to be somewhere on the cross-
+ing, regardless of the car. EWTA and dropout learned that
+the pedestrian should stop, given that the car is entering the
+crossing. However, dropout fails to estimate the future of
+the car.
+
+6.4. Mixture Density Estimation
+
+We evaluated the distribution prediction with the full net-
+work and compare it to several prediction baselines includ-
+ing the standard mixture density network (MDN). Details
+about the baseline implementations can be found in the sup-
+plemental material.
+
+Table 2 shows the results for the synthetic CPI dataset,
+where the full ground-truth distribution is available for eval-
+uation. The results conﬁrm the importance of multimodal
+predictions. While standard MDNs perform better than
+single-mode prediction, they frequently suffer from mode
+
+Method
+Kalman-Filter
+Single Point
+Unimodal Distribution
+
+Non-Parametric
+
+MDN
+EWTAD-MDF (ours)
+
+NLL
+25.29
+
+−
+
+26.13
+9.73
+9.20
+8.33
+
+EMD
+7.03
+3.99
+2.43
+2.36
+1.83
+1.57
+
+Table 2: Future prediction on the CPI dataset. The re-
+sults show the importance of multimodality in the predic-
+tion model. Classical mixture density networks suffer from
+frequent mode collapse, which render them inferior to the
+proposed approach based on EWTA.
+
+collapse, even though they were initialized sequentially
+with the proposed EWTAP and then EWTAD. The proposed
+two-stage network avoids this mode collapse and clearly
+outperforms all other methods. An ablation study between
+EWTAD-MDF and EWTAP-MDF is given in the supple-
+mental.
+
+Table 3 shows the same comparison on the real-world
+Stanford Drone dataset. Only a single sample from the
+ground-truth distribution is available here. Thus, we can
+only compute the NLL and not the EMD. The results con-
+ﬁrm the conclusions we obtained for the synthetic dataset:
+Multimodality is important and the proposed two-stage net-
+work outperforms standard MDN. SEMD serves as a mea-
+sure of multimodality and shows that the proposed approach
+avoids the problem of mode collapse inherent in MDNs
+(note that SEMD is only applicable to parametric multi-
+modal distributions). This can be observed also in the ex-
+amples shown in Figure 5.
+
+In the supplemental material we show more qualitative
+examples including failure cases and provide ablation stud-
+ies on some of the design choices. Also a video is provided
+
+7150
+
+Non-Parametric
+
+MDN
+
+EWTAD-MDF
+
+Figure 5: Qualitative examples of different multimodal probabilistic methods on SDD. Given three past locations of the target
+object (red boxes), the task is to predict possible future locations. A heatmap overlay is used to show the predicted distribution
+over future locations, while the ground truth location is indicated with a magenta box. Both variants of the proposed method
+capture the multimodality better, while MDN and non-parametric methods reveal overﬁtting and mode-collapse.
+
+Method
+Kalman-Filter
+Unimodal Distribution
+
+Non-Parametric
+
+MDN
+EWTAD-MDF (ours)
+
+NLL
+13.17
+9.88
+9.35
+9.71
+9.33
+
+SEMD
+
+-
+-
+
+-
+
+2.36
+4.35
+
+Table 3: Future prediction on the Stanford Drone dataset
+(K = 20, M = 4). The two-stage approach yields the best
+distributions (NLL) and suffers less from mode-collapse
+than MDN (SEMD).
+
+works (MDNs), we proposed a two-stage sampling and ﬁt-
+ting framework that avoids the common mode collapse of
+MDNs. The major component of this framework is the new
+way of learning the generation of hypotheses with an evolv-
+ing strategy. The experiments show that the overall frame-
+work can learn interactions between objects and yields very
+reasonable estimates of multiple possible future states. Al-
+though future prediction is a very interesting task, multi-
+modal distribution prediction with deep networks is not re-
+stricted to this task. We assume that this work will have
+impact also in other domains, where distribution estimation
+plays a role.
+
+to show how predictions evolve over time.
+
+8. Acknowledgments
+
+7. Conclusion
+
+In this work we contributed to future prediction by ad-
+dressing the estimation of multimodal distributions. Com-
+bining the Winner-Takes-All (WTA) loss for sampling hy-
+potheses and the general principle of mixture density net-
+
+This work was funded in parts by IMRA Europe S.A.S.,
+the German Ministry for Research and Education (BMBF)
+via the project Deep-PTL and the EU Horizon 2020 project
+Trimbot 2020.
+
+7151
+
+References
+
+[1] Vii. on a method of investigating periodicities disturbed se-
+ries, with special reference to wolfer’s sunspot numbers.
+Philosophical Transactions of the Royal Society of Lon-
+don A: Mathematical, Physical and Engineering Sciences,
+226(636-646):267–298, 1927.
+
+[2] Hirotugu Akaike. Power spectrum estimation through au-
+toregressive model ﬁtting. Annals of the institute of Statisti-
+cal Mathematics, 21(1):407–419, 1969.
+
+[3] Apratim Bhattacharyya, Mario Fritz, and Bernt Schiele. Ac-
+curate and diverse sampling of sequences based on a best of
+many sample objective. In 31st IEEE Conference on Com-
+puter Vision and Pattern Recognition, 2018.
+
+[4] Apratim Bhattacharyya, Mario Fritz, and Bernt Schiele.
+Bayesian prediction of future street scenes using synthetic
+likelihoods. arXiv preprint arXiv:1810.00746, 2018.
+
+[5] Christopher M Bishop. Mixture density networks. Technical
+
+report, Citeseer, 1994.
+
+[6] Qifeng Chen and Vladlen Koltun. Photographic image syn-
+thesis with cascaded reﬁnement networks.
+In IEEE Inter-
+national Conference on Computer Vision (ICCV), volume 1,
+page 3, 2017.
+
+[7] Sungjoon Choi, Kyungjae Lee, Sungbin Lim, and Songhwai
+Oh. Uncertainty-aware learning from demonstration using
+mixture density networks with sampling-free variance mod-
+eling. In 2018 IEEE International Conference on Robotics
+and Automation (ICRA), pages 6915–6922. IEEE, 2018.
+
+[8] Henggang Cui, Vladan Radosavljevic, Fang-Chieh Chou,
+Tsung-Han Lin, Thi Nguyen, Tzu-Kuo Huang, Jeff Schnei-
+der, and Nemanja Djuric. Multimodal trajectory predictions
+for autonomous driving using deep convolutional networks.
+arXiv preprint arXiv:1809.10732, 2018.
+
+[9] J. Curro and J. Raquet. Deriving conﬁdence from artiﬁcial
+neural networks for navigation. In 2018 IEEE/ION Position,
+Location and Navigation Symposium (PLANS), pages 1351–
+1361, April 2018.
+
+[10] Nemanja Djuric, Vladan Radosavljevic, Henggang Cui, Thi
+Nguyen, Fang-Chieh Chou, Tsung-Han Lin, and Jeff Schnei-
+der. Motion prediction of trafﬁc actors for autonomous
+driving using deep convolutional networks. arXiv preprint
+arXiv:1808.05819, 2018.
+
+[11] A. Dosovitskiy, P. Fischer, E. Ilg, P. H¨ausser, C. Hazırbas¸, V.
+Golkov, P. v.d. Smagt, D. Cremers, and T. Brox. Flownet:
+Learning optical ﬂow with convolutional networks. In IEEE
+International Conference on Computer Vision (ICCV), 2015.
+[12] Sebastien Ehrhardt, Aron Monszpart, Niloy J Mitra, and An-
+drea Vedaldi. Learning a physical long-term predictor. arXiv
+preprint arXiv:1703.00247, 2017.
+
+[13] Chenyou Fan, Jangwon Lee, and Michael S. Ryoo. Forecast-
+
+ing hands and objects in future frames, 2017.
+
+[14] Michael Firman, Neill DF Campbell, Lourdes Agapito, and
+Gabriel J Brostow. Diversenet: When one right answer is not
+enough.
+In Proceedings of the IEEE Conference on Com-
+puter Vision and Pattern Recognition, pages 5598–5607,
+2018.
+
+[15] Alex Graves. Generating sequences with recurrent neural
+
+networks. CoRR, abs/1308.0850, 2013.
+
+[16] Abner Guzm´an-Rivera, Dhruv Batra, and Pushmeet Kohli.
+Multiple choice learning: Learning to produce multiple
+structured outputs.
+In F. Pereira, C. J. C. Burges, L. Bot-
+tou, and K. Q. Weinberger, editors, Advances in Neural In-
+formation Processing Systems 25, pages 1799–1807. Curran
+Associates, Inc., 2012.
+
+[17] Lars U. Hjorth and Ian T. Nabney. Regularization of mixture
+density networks, volume 2, pages 521–526. Institution of
+Engineering and Technology (IET), United Kingdom, 470
+edition, 1999.
+
+[18] Yeping Hu, Wei Zhan, and Masayoshi Tomizuka. Proba-
+bilistic prediction of vehicle semantic intention and motion.
+arXiv preprint arXiv:1804.03629, 2018.
+
+[19] S. Huang, X. Li, Z. Zhang, Z. He, F. Wu, W. Liu, J. Tang, and
+Y. Zhuang. Deep learning driven visual path prediction from
+a single image.
+IEEE Transactions on Image Processing,
+25(12):5892–5904, Dec 2016.
+
+[20] E. Ilg,
+
+¨O. C¸ ic¸ek, S. Galesso, A. Klein, O. Makansi,
+Uncertainty estimates and
+F. Hutter, and T. Brox.
+multi-hypotheses networks for optical ﬂow.
+In Eu-
+ropean Conference on Computer Vision (ECCV), 2018.
+https://arxiv.org/abs/1802.07095.
+
+[21] Dinesh Jayaraman, Frederik Ebert, Alexei A Efros, and
+Sergey Levine. Time-agnostic prediction: Predicting pre-
+dictable video frames. arXiv preprint arXiv:1808.07784,
+2018.
+
+[22] Xiaojie Jin, Huaxin Xiao, Xiaohui Shen, Jimei Yang, Zhe
+Lin, Yunpeng Chen, Zequn Jie, Jiashi Feng, and Shuicheng
+Yan. Predicting scene parsing and motion dynamics in the
+future. In Advances in Neural Information Processing Sys-
+tems, pages 6915–6924, 2017.
+
+[23] R. E. Kalman. A new approach to linear ﬁltering and predic-
+
+tion problems. ASME Journal of Basic Engineering, 1960.
+
+[24] Namhoon Lee, Wongun Choi, Paul Vernaza, Christopher B
+Choy, Philip HS Torr, and Manmohan Chandraker. Desire:
+Distant future prediction in dynamic scenes with interacting
+agents. In Proceedings of the IEEE Conference on Computer
+Vision and Pattern Recognition, pages 336–345, 2017.
+
+[25] Stefan Lee, Senthil Purushwalkam Shiva Prakash, Michael
+Cogswell, Viresh Ranjan, David Crandall, and Dhruv Batra.
+Stochastic multiple choice learning for training diverse deep
+ensembles. In Advances in Neural Information Processing
+Systems, pages 2119–2127, 2016.
+
+[26] K. Leung, E. Schmerling, and M. Pavone. Distributional pre-
+diction of human driving behaviours using mixture density
+networks. Technical report, Stanford University, 2016.
+
+[27] Yijun Li, Chen Fang, Jimei Yang, Zhaowen Wang, Xin
+Lu, and Ming-Hsuan Yang. Flow-grounded spatial-temporal
+video prediction from still images. In The European Confer-
+ence on Computer Vision (ECCV), September 2018.
+
+[28] Wen Liu, Weixin Luo, Dongze Lian, and Shenghua Gao. Fu-
+ture frame prediction for anomaly detection a new baseline.
+In The IEEE Conference on Computer Vision and Pattern
+Recognition (CVPR), June 2018.
+
+[29] Wenqian Liu, Abhishek Sharma, Octavia Camps, and Mario
+Sznaier. Dyan: A dynamical atoms-based network for video
+prediction. In Proceedings of the European Conference on
+Computer Vision (ECCV), pages 170–185, 2018.
+
+7152
+
+[30] Pauline Luc, Camille Couprie, Yann Lecun, and Jakob
+segmentations
+arXiv preprint
+
+Verbeek.
+by forecasting convolutional
+arXiv:1803.11496, 2018.
+
+Predicting future
+
+features.
+
+instance
+
+[31] Pauline Luc, Natalia Neverova, Camille Couprie, Jacob Ver-
+beek, and Yann LeCun. Predicting deeper into the future of
+semantic segmentation. ICCV, 2017.
+
+[32] Jack M Wang, David Fleet, and Aaron Hertzmann. Gaussian
+process dynamical models for human motion. 30:283–98, 03
+2008.
+
+[33] Michael Mathieu, Camille Couprie, and Yann LeCun. Deep
+multi-scale video prediction beyond mean square error.
+arXiv preprint arXiv:1511.05440, 2015.
+
+[34] P. McCullagh and J. A. Nelder. Generalized Linear Models.
+
+Chapman Hall / CRC, London, 1989.
+
+[35] Safa Messaoud, David Forsyth, and Alexander G. Schwing.
+Structural consistency andcontrollability for diverse col-
+orization. In Vittorio Ferrari, Martial Hebert, Cristian Smin-
+chisescu, and Yair Weiss, editors, Computer Vision – ECCV
+2018, pages 603–619, Cham, 2018. Springer International
+Publishing.
+
+[36] A. O’Hagan and J. F. C. Kingman. Curve ﬁtting and opti-
+mal design for prediction. Journal of the Royal Statistical
+Society. Series B (Methodological), 40(1):1–42, 1978.
+
+[37] M. B. Priestley. Spectral analysis and time series / M.B.
+
+Priestley. Academic Press, London ; New York :, 1981.
+
+[38] Sergey Prokudin, Peter Gehler, and Sebastian Nowozin.
+Deep directional statistics: Pose estimation with uncertainty
+quantiﬁcation.
+In The European Conference on Computer
+Vision (ECCV), September 2018.
+
+[39] Noha Radwan, Abhinav Valada, and Wolfram Burgard. Mul-
+timodal interaction-aware motion prediction for autonomous
+street crossing. arXiv preprint arXiv:1808.06887, 2018.
+
+[40] Carl Edward Rasmussen. Gaussian processes for machine
+
+learning. MIT Press, 2006.
+
+[41] Alexandre Robicquet, Amir Sadeghian, Alexandre Alahi,
+and Silvio Savarese. Learning social etiquette: Human tra-
+jectory understanding in crowded scenes. In European con-
+ference on computer vision, pages 549–565. Springer, 2016.
+[42] Cristian Rodriguez, Basura Fernando, and Hongdong Li. Ac-
+tion anticipation by predicting future dynamic images.
+In
+ECCV’18 workshop on Anticipating Human Behavior, 2018.
+[43] Y. Rubner, C. Tomasi, and L. J. Guibas. A metric for dis-
+tributions with applications to image databases.
+In Sixth
+International Conference on Computer Vision (IEEE Cat.
+No.98CH36271), pages 59–66, Jan 1998.
+
+[44] Christian Rupprecht, Iro Laina, Robert DiPietro, Maximil-
+ian Baust, Federico Tombari, Nassir Navab, and Gregory D
+Hager. Learning in an uncertain world: Representing ambi-
+guity through multiple hypotheses. In International Confer-
+ence on Computer Vision (ICCV), 2017.
+
+[45] Oleh Rybkin, Karl Pertsch, Andrew Jaegle, Konstantinos G
+Derpanis, and Kostas Daniilidis. Unsupervised learning
+of sensorimotor affordances by stochastic future prediction.
+arXiv preprint arXiv:1806.09655, 2018.
+
+[46] S. Shirdhonkar and D. W. Jacobs. Approximate earth movers
+distance in linear time. In 2008 IEEE Conference on Com-
+puter Vision and Pattern Recognition, pages 1–8, June 2008.
+
+[47] Nitish Srivastava, Geoffrey Hinton, Alex Krizhevsky, Ilya
+Sutskever, and Ruslan Salakhutdinov. Dropout: A simple
+way to prevent neural networks from overﬁtting. Journal of
+Machine Learning Research, 15:1929–1958, 2014.
+
+[48] Nitish Srivastava, Elman Mansimov, and Ruslan Salakhudi-
+nov. Unsupervised learning of video representations using
+lstms.
+In International conference on machine learning,
+pages 843–852, 2015.
+
+[49] Ruben Villegas, Jimei Yang, Seunghoon Hong, Xunyu
+Lin, and Honglak Lee. Decomposing motion and con-
+tent for natural video sequence prediction. arXiv preprint
+arXiv:1706.08033, 2017.
+
+[50] Ruben Villegas, Jimei Yang, Yuliang Zou, Sungryull Sohn,
+Xunyu Lin, and Honglak Lee. Learning to generate long-
+term future via hierarchical prediction.
+arXiv preprint
+arXiv:1704.05831, 2017.
+
+[51] Carl Vondrick, Hamed Pirsiavash, and Antonio Torralba. An-
+ticipating visual representations from unlabeled video.
+In
+Proceedings of the IEEE Conference on Computer Vision
+and Pattern Recognition, pages 98–106, 2016.
+
+[52] Vedran Vukotic, Silvia-Laura Pintea, Christian Raymond,
+Guillaume Gravier, and Jan C Van Gemert. One-Step Time-
+Dependent Future Video Frame Prediction with a Convolu-
+tional Encoder-Decoder Neural Network.
+In International
+Conference of Image Analysis and Processing (ICIAP), Pro-
+ceedings of the 19th International Conference of Image
+Analysis and Processing, Catania, Italy, Sept. 2017.
+
+[53] Gilbert T Walker. On periodicity. Quarterly Journal of the
+
+Royal Meteorological Society, 51(216):337–346, 1925.
+
+[54] Nevan Wichers, Ruben Villegas, Dumitru Erhan, and
+Honglak Lee. Hierarchical long-term video prediction with-
+out supervision. arXiv preprint arXiv:1806.04768, 2018.
+
+[55] C. K. I. Williams. Prediction with gaussian processes: From
+linear regression to linear prediction and beyond. In Learn-
+ing and Inference in Graphical Models, pages 599–621.
+Kluwer, 1997.
+
+[56] Tianfan Xue, Jiajun Wu, Katherine Bouman, and Bill Free-
+man. Visual dynamics: Probabilistic future frame synthesis
+via cross convolutional networks. In Advances in Neural In-
+formation Processing Systems, pages 91–99, 2016.
+
+[57] Takuma Yagi, Karttikeya Mangalam, Ryo Yonetani, and
+Future person localization in ﬁrst-person
+In The IEEE Conference on Computer Vision and
+
+Yoichi Sato.
+videos.
+Pattern Recognition (CVPR), June 2018.
+
+[58] Yu Yao, Mingze Xu, Chiho Choi, David J Crandall, Ella M
+Atkins, and Behzad Dariush. Egocentric vision-based fu-
+ture vehicle localization for intelligent driving assistance sys-
+tems. arXiv preprint arXiv:1809.07408, 2018.
+
+[59] Bo Zong, Qi Song, Martin Renqiang Min, Wei Cheng, Cris-
+tian Lumezanu, Daeki Cho, and Haifeng Chen. Deep autoen-
+coding gaussian mixture model for unsupervised anomaly
+detection. In International Conference on Learning Repre-
+sentations, 2018.
+
+7153
+
+

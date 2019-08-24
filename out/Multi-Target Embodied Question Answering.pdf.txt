@@ -1,0 +1,1639 @@
+Multi-Target Embodied Question Answering
+
+Licheng Yu1, Xinlei Chen3, Georgia Gkioxari3, Mohit Bansal1,
+
+Tamara L. Berg1,3, Dhruv Batra2,3
+
+1University of North Carolina at Chapel Hill
+
+2Georgia Tech 3Facebook AI
+
+Abstract
+
+Embodied Question Answering (EQA) is a relatively new
+task where an agent is asked to answer questions about
+its environment from egocentric perception. EQA as intro-
+duced in [8] makes the fundamental assumption that every
+question, e.g. “what color is the car?”, has exactly one tar-
+get (“car”) being inquired about. This assumption puts a
+direct limitation on the abilities of the agent.
+
+We present a generalization of EQA – Multi-Target EQA
+(MT-EQA). Speciﬁcally, we study questions that have mul-
+tiple targets in them, such as “Is the dresser in the bed-
+room bigger than the oven in the kitchen?”, where the
+agent has to navigate to multiple locations (“dresser in bed-
+room”, “oven in kitchen”) and perform comparative rea-
+soning (“dresser” bigger than “oven”) before it can an-
+swer a question. Such questions require the development of
+entirely new modules or components in the agent. To ad-
+dress this, we propose a modular architecture composed of
+a program generator, a controller, a navigator, and a VQA
+module. The program generator converts the given ques-
+tion into sequential executable sub-programs; the naviga-
+tor guides the agent to multiple locations pertinent to the
+navigation-related sub-programs; and the controller learns
+to select relevant observations along its path. These ob-
+servations are then fed to the VQA module to predict the
+answer. We perform detailed analysis for each of the model
+components and show that our joint model can outperform
+previous methods and strong baselines by a signiﬁcant mar-
+gin. Project page: https://embodiedqa.org.
+
+1. Introduction
+
+One of the grand challenges of AI is to build intelligent
+agents that visually perceive their surroundings, communi-
+cate with humans via natural language, and act in their envi-
+ronments to accomplish tasks. In the vision, language, and
+AI communities, we are witnessing a shift in focus from
+internet vision to embodied AI – with the creation of new
+tasks and benchmarks [7, 2, 14, 35], instantiated on new
+simulation platforms [21, 28, 32, 33, 20, 6].
+
+EQA-v1: What color is the car?
+
+T-1
+
+Answer: Orange
+
+bedroom
+
+bathroom
+
+T-3
+
+T-4
+
+garage
+
+T-2
+
+T-1
+
+MT-EQA: Does the dressing table in the bedroom 
+have same color as the sink in the bathroom?
+
+T-1
+
+T-2
+
+T-3
+
+T-4
+
+T-1
+
+living  room
+
+dining room
+
+kitchen
+
+Answer: No
+
+Figure 1: Difference between EQA-v1 and MT-EQA. While EQA-
+v1’s question asks about a single target “car”, MT-EQA’s question
+involves multiple targets (e.g., bedroom, dressing table, bathroom,
+sink) to be navigated, and attribute comparison between multiple
+targets (e.g., dressing table and sink).
+
+Embodied Question Answering (EQA) [8], which tests an
+agent’s overall ability to jointly perceive its surrounding,
+communicate with humans, and act in a physical environ-
+ment. Speciﬁcally, in EQA, an agent is spawned in a ran-
+dom location within an environment and is asked a question
+about something in that environment, for example “What
+color is the lamp?”. In order to answer the question cor-
+rectly, the agent needs to parse and understand the question,
+navigate to a good location (looking at the “lamp”) based
+on its ﬁrst-person perception of the environment and pre-
+dict the right answer (e.g. “blue”).
+
+However, there is still much left to be done in EQA. In
+its original version, the EQA-v1 dataset only consists of
+single-target question-answer pairs, such as “What color is
+the car?”. The agent just needs to ﬁnd the car then check
+its color based on its last observed frames. However, the
+single target constraint places a direct limitation on the pos-
+sible set of tasks that the AI agent can tackle. For example,
+consider the question “Is the kitchen larger than the bed-
+room?” in EQA-v1; the agent would not be able to answer
+this question because it involves navigating to multiple tar-
+gets –“kitchen” and “bedroom” – and the answer requires
+comparative reasoning between the two rooms, where all of
+these skills are not part of the original EQA task.
+
+The focus of this paper is one such embodied AI task,
+
+In this work, we present a generalization of EQA –
+
+16309
+
+Q: Does the dressing table in the 
+Bedroom have same color as the 
+sink in the bathroom?
+
+Program 
+generator
+
+nav_room (bedroom)
+nav_object (dressing table)
+query (color)
+nav_room (bathroom)
+nav_object (sink)
+query (color)
+equal_color()
+
+Figure 2: Program Generator.
+
+multi-target EQA (MT-EQA). Speciﬁcally, we study ques-
+tions that have multiple implicit targets in them, such as
+“Is the dresser in the bedroom bigger than the oven in the
+kitchen?”. At a high-level, our work is inspired by the vi-
+sual reasoning work of Neural Modular Networks [4] and
+CLEVR [18]. These works study compositional and modu-
+lar reasoning in a fully-observable environment (an image).
+Our work may be viewed as embodied visual reasoning,
+where an agent is asked a question involving multiple mod-
+ules and needs to gather information before it can execute
+them. In MT-EQA, we propose 6 types of compositional
+questions which compare attribute properties (color, size,
+distance) between multiple targets (objects/rooms). Fig. 1
+shows an example from the MT-EQA dataset and contrasts
+it to the original EQA-v1 dataset.
+
+The assumption in EQA-v1 of decoupling navigation
+from question-answering not only makes the task simpler
+but is also reﬂected in the model used – the EQA-v1 model
+simply consists of an LSTM navigator which after stopping,
+hands over frames to a VQA module. In contrast, MT-EQA
+introduces new modeling challenges that we address in this
+work. Consider the MT-EQA question in Fig. 1 – “Does
+the table in the bedroom have same color as the sink in the
+bathroom?”. From this example, it is clear that not only is
+it necessary to have a tighter integration between navigator
+and VQA, but we also need to develop fundamentally new
+modules. An EQA-v1 [8] agent would navigate to the ﬁnal
+target location and run the VQA module based on its last
+sequence of frames along the path. In this case, only the
+“sink” would be observed from the ﬁnal frames but dress-
+ing table would be lost. Instead, we propose a new model
+that consists of 4 components: (a) a program generator, (b) a
+navigator, (c) a controller and (d) a VQA module. The pro-
+gram generator converts the given question into sequential
+executable sub-programs, as shown in Fig. 2. The controller
+executes these sub-programs sequentially and gives control
+to the navigator when the navigation sub-programs are in-
+voked (e.g. nav room(bedroom)). During navigation,
+the controller processes the ﬁrst-person views observed by
+the agent and predicts whether the target of the sub-program
+(e.g. bedroom) has been reached. In addition, the controller
+extracts cues pertinent to the questioned property of the
+sub-target, e.g. query(color). Finally, these cues are
+fed into the VQA module which deals with the comparison
+of different attributes, e.g. executing equal color() by
+comparing the color of dressing table and sink (Fig. 1 ).
+
+Empirically, we show results for our joint model and an-
+alyze the performance of each of our components. Our full
+model outperforms the baselines under almost every navi-
+gation and QA metric by a large margin. We also report
+performance for the navigator, the controller, and the VQA
+module, when executed separately in an effort to isolate and
+better understand the effectiveness of these components.
+Our ablation studies show that our full model is better at
+all sub-tasks, including room navigation, object navigation
+and ﬁnal EQA accuracy. Additionally, we ﬁnd quantita-
+tive evidence that MT-EQA questions on closer targets are
+relatively easier to solve as they require shorter navigation,
+while questions for farther targets are harder.
+
+2. Related Work
+
+Our work relates to research in embodied perception and
+
+modular predictive models for program execution.
+
+Embodied Perception. Visual recognition from images has
+witnessed tremendous success in recent years with the ad-
+vent of deep convolutional neural networks (CNNs) [22,
+31, 15] and large-scale datasets, such as ImageNet [26] and
+COCO [24]. More recently, we are beginning to witness a
+resurgence of active vision. For example, end-to-end learn-
+ing methods successfully predict robotic actions from raw
+pixel data [23]. Gupta et al. [14] learn to navigate via map-
+ping and planning. Sadeghi & Levine [27] teach an agent
+to ﬂy in simulation and show its performance in the real
+world. Gandhi et al. [11] train self-supervised agents to ﬂy
+from examples of drones crashing.
+
+At the intersection of active perception and language
+understanding, several tasks have been proposed, includ-
+ing instruction-based navigation [7, 2], target-driven navi-
+gation [36, 14], embodied question answering [8], interac-
+tive question answering [13], and task planning [35]. While
+these tasks are driven by different goals, they all require
+training agents that can perceive their surroundings, under-
+stand the goal – either presented visually or in language in-
+structions – and act in a virtual environment. Furthermore,
+the agents need to show strong generalization ability when
+deployed in novel unseen environments [14, 32].
+
+Environments. There is an overbearing cost to developing
+real-world interactive benchmarks. Undoubtedly, this cost
+has hindered progress in studying embodied tasks. On the
+contrary, virtual environments that offer rich, efﬁcient simu-
+lations of real-world dynamics, have emerged as promising
+alternatives to potentially overcome many of the challenges
+faced in real-world settings.
+
+Recently there has been an explosion of simulated 3D
+environments in the AI community, all tailored towards
+different skill sets. Examples include ViZDoom [20],
+TorchCraft [30] and DeepMind Lab [5].
+in the
+last year, simulated environments of semantically com-
+plex, realistic 3D scenes have been introduced, such as
+
+Just
+
+26310
+
+HoME [6], House3D [32], MINOS [28], Gibson [33] and
+AI2THOR [21]. In this work, we use House3D, following
+the original EQA task [8]. House3D is a rich, interactive
+3D environment based on human-designed indoor scenes
+sourced from SUNCG [29].
+
+Modular Models. Neural module networks were originally
+introduced for visual question answering [4]. These net-
+works decompose a question into several components and
+dynamically assemble a network to compute the answer,
+dealing with variable compositional linguistic structures.
+Since their introduction, modular networks have been ap-
+plied to several other tasks: visual reasoning [16, 19], rela-
+tionship modeling [17], embodied question answering [9],
+multitask reinforcement learning [3], language grounding
+on images [34] and video understanding [12].
+Inspired
+by [10, 19], we cast EQA as a partially observable version
+of CLEVR and extend the modular idea to this task, which
+we believe requires an increasingly modular model design
+to address visual reasoning within a 3D environment.
+
+3. Multi-Target EQA Dataset
+
+We now describe our proposed Multi-Target Embod-
+ied Question Answering (MT-EQA) task and associated
+dataset, contrasting it against EQA-v1. In v1 [8], the au-
+thors select 750 (out of about 45,000) environments for the
+EQA task. Four types of questions are proposed, each ques-
+tioning a property (color, location, preposition) of a single
+target (room, object), as shown at the top of Table. 1. Our
+proposed MT-EQA task generalizes EQA-v1 and involves
+comparisons of various attributes (color, size, distance) be-
+tween multiple targets, shown at the bottom of Table. 1.
+Next, we describe in detail the generation process, as well
+as useful statistics of MT-EQA.
+
+3.1. Multi Target EQA Generation
+
+We generate question-answer pairs using the annotations
+available on SUNCG. We use the same number of rooms
+and objects as EQA-v1 (see Figure 2 in [8]). Each ques-
+tion in MT-EQA is represented as a series of functional pro-
+grams, which can be executed on the environment to yield
+a ground-truth answer. The functional programs consist
+of some elementary operations, e.g., select(), unique(), ob-
+ject color pair(), query(), etc., that operate on the room and
+object annotations.
+
+Each question type is associated with a question tem-
+plate and a sequence of operations. For example, consider
+the question type in MT-EQA object color compare, whose
+template is “Does <OBJ1> share same color as <OBJ2>
+in <ROOM>?”. Its sequence of elementary operations is:
+select(rooms) → unique(rooms) → select(objects) →
+unique(objects) → pair(objects) → query(color compare).
+
+The ﬁrst function, select(rooms), returns all rooms in the
+environment. The second function, unique(rooms), selects
+
+IOU=0.618
+
+IOU=0.181
+
+IOU=0.431
+
+IOU=0.316
+
+(a) coffee machine
+
+(b) refrigerator
+
+Figure 3: IOU between the target’s mask and the centered rect-
+angle mask. Higher IOU is achieved when the target has larger
+portion in the center of the view.
+
+a single unique room from the list to avoid ambiguity. Simi-
+larly, the third function, select(objects), and fourth function,
+unique(objects), return unique objects in the selected room.
+The ﬁfth function, pair(objects), pairs the objects. The ﬁnal
+function, query(color compare), compares their colors.
+
+We design 6 types of questions comparing different at-
+tributes between objects (inside same room/across different
+rooms), distance comparison, and room size comparison.
+All question types and templates are shown in Table 2.
+
+In some cases, a question instantiation returned from
+the corresponding program, as shown above, might not be
+executable, as rooms might be disconnected or not reach-
+able. To check if a question is feasible, we execute the cor-
+responding nav room() and nav object() programs
+and compute shortest paths connecting the targets in the
+question. If there is no path1, it means the agent would not
+be able to look at all targets starting from its given spawn
+location. We ﬁlter out such impossible questions.
+
+For computing the shortest path connecting the targets,
+we need to ﬁnd the position (x, y, z, yaw) that best views
+each target. In order to do so, we ﬁrst sample 100 positions
+near the target. For each position, we pick the yaw angle
+that looks at the target with the highest Intersection-Over-
+Union (IOU), computed using the target’s mask2 and a cen-
+tered rectangular mask. Fig. 3 shows 4 IOU scores of coffee
+machine and refrigerator from different positions. We sort
+the 100 positions and pick the one with highest IOU as the
+best-view position of the target, which is used to connect
+the shortest-path. For each object, its highest IOU value
+IOUbest is recorded for evaluation purposes (as a reference
+of the target’s best-view).
+
+To minimize the bias in MT-EQA, we perform entropy-
+ﬁltering, similar to [8]. Speciﬁcally for each unique ques-
+tion, we compute its answer distribution across the whole
+dataset. We exclude questions whose normalized answer
+distribution entropy is below 0.93. This prevents the agent
+from memorizing easy question-answer pairs without look-
+ing at the environment. For example, the answer to “is the
+
+1This is a result of noisy annotations in SUNCG and inaccurate occu-
+
+pancy maps due to the axis-aligned assumption returned by House3D.
+
+2House3D returns the the ground-truth semantic segmentation for each
+
+ﬁrst-person view.
+
+3Rather than 0.5 in [8], we set the normalized entropy threshold as 0.9
+
+(maximum is 1) since all of our questions have binary answers.
+
+36311
+
+1
+v
+-
+A
+Q
+E
+
+A
+Q
+E
+-
+T
+M
+
+Question Type
+
+location
+
+color
+
+color room
+
+preposition
+
+object color compare inroom
+
+object color compare xroom
+
+object size compare inroom
+
+object size compare xroom
+
+object dist compare
+
+room size compare
+
+Template
+
+“What room is the <OBJ> located in?”
+
+“What color is the <OBJ>?”
+
+“What color is the <OBJ> in the <ROOM>?”
+
+“What is <on/above/below/next-to> the <OBJ> in the <ROOM>?”
+
+“Does <OBJ1> share same color as <OBJ2> in <ROOM>?”
+
+“Does <OBJ1> in <ROOM1> share same color as <OBJ2> in <ROOM2>?”
+
+“Is <OBJ1> bigger/smaller than <OBJ2> in <ROOM>?”
+
+“Is <OBJ1> in <ROOM1> bigger/smaller than <OBJ2> in <ROOM2>?”
+
+“Is <OBJ1> closer than/farther from <OBJ2> than <OBJ3> in <ROOM>?”
+
+“Is <ROOM1> bigger/smaller than <ROOM2> in the house?”
+
+Table 1: Question types and the associated templates used in EQA-v1 and MT-EQA.
+
+Question Type
+
+Functional Form
+
+object color compare
+object size compare
+object dist compare
+room size compare
+
+select(rooms) → unique(rooms) → select(objects) → unique(objects) → pair(objects) → query(color compare)
+select(rooms) → unique(rooms) → select(objects) → unique(objects) → pair(objects) →query(size compare)
+select(rooms) → unique(rooms) → select(objects) → unique(objects) → triplet(objects) →query(dist compare)
+select(rooms) → unique(rooms) → pair(rooms) → query(size compare)
+
+Table 2: Functional forms of all question types in the MT-EQA dataset. Note that for each object color/size comparison question type,
+inroom and xroom, depending on whether the two objects are in the same room or not. For example, ob-
+there exists two modes:
+ject color compare xroom compares the color of two objects in two different rooms.
+
+random q-LSTM q-NN q-BoW “no”
+
+Test Acc. (%)
+
+49.44
+
+48.24
+
+53.74
+
+49.22
+
+53.28
+
+Table 3: EQA (test) accuracy using questions and priors.
+
+room_dist_comp
+
+3%
+
+Houses
+
+Unique 
+questions
+
+Total 
+
+questions
+
+obj_dist_comp
+
+13%
+
+obj_size_comp_xroom
+
+train
+
+486
+
+2,030
+
+14,495
+
+10%
+
+val
+
+test
+
+50
+
+52
+
+938
+
+1,954
+
+obj_size_comp_inroom
+
+1,246
+
+2,838
+
+5%
+
+obj_color_comp_inroom
+
+24%
+
+obj_color_comp_xroom
+
+45%
+
+Figure 4: Overview of MT-EQA dataset including split statistics
+and question type distribution.
+
+bed in the living room bigger than the cup in the kitchen?” is
+always Yes. Such questions are excluded from our dataset.
+After the two ﬁltering stages, the MT-EQA questions are
+both balanced and feasible.
+
+In addition, we check if MT-EQA is easily addressed by
+question-only or prior-only baselines. For this, we evaluate
+four question-based models: (a) an LSTM-based question-
+to-answer model, (b) a nearest neighbor (NN) baseline that
+ﬁnds the NN question from the training set and uses its
+most frequent answer as the prediction, (c) a bag-of-words
+(BoW) model that encodes a question followed by a learned
+linear classiﬁer to predict the answer and (d) a naive “no”
+only answer model, since “no” is the most frequent answer
+by a slight margin. Table. 3 shows the results. There ex-
+ists very little bias on the “yes/no” distribution (53.28%),
+
+and all question-based models make close to random pre-
+dictions.
+In comparison, and as we empirically show in
+Sec. 5, our results are far better than these baselines, in-
+dicating the necessity to explore the environment in order
+to answer the question. Besides, the results also address the
+concern in [1] where language-only models (BoW and NN)
+already form competitive baselines for EQA-v1.
+In MT-
+EQA, these baselines perform close to chance as a result of
+the balanced binary question-answer pairs in MT-EQA.
+
+Overall, our MT-EQA dataset consists of 19,287 ques-
+tions across 588 environments4, referring to a total of 61
+unique object types in 8 unique room types. Fig. 4 shows
+the question type distribution. Approximately 32 questions
+are asked for each house on average, 209 at most and 1 at
+fewest. There are relatively fewer object size compare and
+room size compare questions as many frequently occurring
+comparisons are too easy to guess without exploring the en-
+vironment and thus fail the entropy ﬁltering. We will release
+the MT-EQA dataset and the generation pipeline.
+
+4. Model
+
+Our model is composed of 4 modules: the question-to-
+program generator, the navigator, the controller, and the
+VQA module. We describe these modules in detail.
+
+4.1. Program Generator
+
+The program generator takes the question as input and
+generates sequential programs for execution. We deﬁne
+
+4The 588 environments are subset of EQA-v1’s. Some environments
+
+are discarded due to entropy ﬁltering and unavailable paths.
+
+46312
+
+Q: Does the bathtub have same color 
+
+as the sink in the bathroom?
+
+Program 
+generator
+
+nav_room (bathroom)
+nav_object (bathtub)
+query (color)
+nav_object (sink)
+query (color)
+equal (color)
+
+attr: color
+
+op: equal
+
+Query (color)
+
+FC
+
+ReLU
+
+Query (color)
+
+FC
+
+ReLU
+
+FC
+
+ReLU
+
+FC
+
+answer
+
+VQA module
+
+bathroom
+
+bathtub
+
+sink
+
+Ctrl
+
+Ctrl
+
+Ctrl
+
+Ctrl
+
+Ctrl
+
+Ctrl
+
+Ctrl
+
+Ctrl
+
+Ctrl
+
+Ctrl
+
+Ctrl
+
+Ctrl
+
+Ctrl
+
+Nav
+
+Nav
+
+Nav
+
+Nav
+
+Nav
+
+Nav
+
+Nav
+
+Nav
+
+Nav
+
+Nav
+
+Nav
+
+Nav
+
+Nav
+
+CNN
+
+CNN
+
+CNN
+
+CNN
+
+CNN
+
+CNN
+
+CNN
+
+CNN
+
+CNN
+
+CNN
+
+CNN
+
+CNN
+
+CNN
+
+Figure 5: Model architecture: our model is composed of a program generator, a navigator, a controller, and a VQA module.
+
+2) nav room(phrase)
+
+1) nav object(phrase)
+3) query(color / size / room size)
+4) equal color()
+5) object size compare(bigger / smaller)
+6) object dist compare(farther / closer)
+7) room size compare(bigger / smaller)
+
+Table 4: MT-EQA executable programs.
+
+7 types of executable programs for the MT-EQA task in
+Table. 4. For example, “Is the bathtub the same color as
+the sink in the bathroom?” is decomposed into a series
+of sequential sub-programs: nav room(bathroom)
+→ nav object(bathtub) → query color()
+→ nav object(sink) → query color() →
+equal color(). Similar to CLEVR [18], the question
+programs are automatically generated in a templated
+manner (Table. 2), making sub-component decomposition
+(converting questions back to programs) simple (Table. 4).
+We use template-based rules by selecting and ﬁlling in the
+arguments in Table. 4 to generate the programs (which
+is always accurate). While a neural model could also be
+applied, a learned program generator is not the focus of our
+work.
+
+4.2. Navigator
+
+The
+
+navigator
+
+the nav room() and
+executes
+nav object() programs.
+As shown in Fig. 6(a),
+we use an LSTM as our core component. At each time
+step, the LSTM takes as inputs the current egocentric (ﬁrst-
+person view) image, an encoding of the target phrase (e.g.
+“bathtub” if the program is nav object(bathtub)),
+and the previous action, in order to predict the next action.
+The navigator uses a CNN feature extractor that takes a
+224x224 RGB image returned from the House3D renderer,
+and transforms it into a visual feature, which is then fed into
+
+action: “turn left”
+
+LSTM
+
+target: bathtub
+
+Prev. action
+
+program
+
+CNN
+
+“Select”
+
+vqa feature
+
+LSTM
+
+CNN
+
+(a) Navigator
+
+(b) Controller
+
+Figure 6: Navigator and Controller.
+
+the LSTM. Similar to [8], the CNN is pre-trained under a
+multi-task framework consisting of three tasks: RGB-value
+reconstruction, semantic segmentation, and depth estima-
+tion. Thus, the extracted feature contains rich information
+about the scene’s appearance, content, and geometry (ob-
+jects, color, texture, shape, and depth). In addition to the
+visual feature, the LSTM is presented with two additional
+inputs. The ﬁrst is the target embedding, where we use the
+average embedding of GloVE vectors [25] over words de-
+scribing the target. The second is previous action, which is
+in the form of a look-up from an action embedding matrix.
+
+We want to note the different perceptual skills required
+for room and object navigation: Room navigation re-
+lies on understanding the overall scene and ﬁnding cross-
+room paths (entry/exit), while object navigation requires
+localizing the target object within a room and ﬁnding a
+path to reach it. To capture the difference, we imple-
+ment two separate navigation modules, nav room() and
+nav object() respectively. These two modules share
+same architecture but are trained separately for different tar-
+gets.
+
+In MT-EQA, the action space for navigation consists of
+3 action types: turning left (30 degrees), turning right (30
+degrees), and moving forward. This is almost the same as
+
+56313
+
+EQA-v1 [8], except we use larger turning angles – as our
+navigation paths are much longer due to the multi-target set-
+ting. We ﬁnd that this change reduces the number of actions
+required for navigation, leading to easier training.
+
+tional VQA (cVQA). The cVQA module in Fig. 5 depicts a
+two-input comparison as an example, but our cVQA module
+also extends to three inputs, for questions like “Is the refrig-
+erator closer to the coffee machine than the microwave?”.
+
+4.3. Controller
+
+The controller is the central module in our model, as it
+connects all of the other modules by: 1) creating a plan from
+the program generator, 2) collecting the necessary observa-
+tions from the navigator, and 3) invoking the VQA module.
+Fig. 6 (b) shows the controller, whose key component
+is another LSTM. Consider the question “Does the bathtub
+have same color as the sink in the bathroom?” with part
+of its program as example – nav room(bathroom) →
+nav object(bathtub). The controller starts by call-
+ing the room navigator to look for “bathroom”. During nav-
+igation, the controller keeps track of the ﬁrst-person views,
+looking for the target. Particularly, it extracts the features
+via CNN which are then fused with the target embedding as
+input to the LSTM. The controller predicts SELECT if the
+target is found, stopping the current navigator, in our exam-
+ple nav room(bathroom), and starting execution of the
+next program, nav object(bathtub).
+
+Finally, after the object target “bathtub” has been found,
+the next program – query color(), is executed. The
+controller extracts attribute features from the ﬁrst-person
+view containing the target. In all, there are three attribute
+types in MT-EQA - object’s color, object’s size, and room’s
+size. Again, we treat object and room differently in our
+model. For object-speciﬁc attributes, we use the hidden
+state of the controller at the location where SELECT was
+predicted. This state should contain semantic information
+for the target, as it is where the controller is conﬁdent the
+target is located. For room-speciﬁc attributes, the controller
+collects a panorama by asking the navigator to rotate 360
+degrees (by performing 12 turning-right actions) at the lo-
+cation where SELECT is predicted. The CNN features from
+this panorama view are concatenated as the representation.
+the ex-
+tracted cues for all the targets are stored, and in the end they
+are used by the VQA module to predict the ﬁnal answer.
+
+During program execution by the controller,
+
+4.4. VQA Module
+
+The ﬁnal
+
+task requires comparative reasoning, e.g.,
+object size compare(bigger), equal color(), etc.
+When the controller has gathered all of the targets for com-
+parison, it invokes the VQA module. As shown in top-right
+of Fig. 5, the VQA module embeds the stored features of
+multiple targets into the question-attribute space, using a
+FC layer followed by ReLU. The transformed features are
+then concatenated and fed into another FC+ReLU which
+is conditioned on the comparison operator (equal, bigger
+than, smaller than, etc.). The output is a binary prediction
+(yes/no) for that attribute comparison. We call it composi-
+
+4.5. Training
+
+Training follows a two-stage approach: First, the full
+model is trained using Imitation Learning (IL); Second, the
+navigator is further ﬁne-tuned with Reinforcement Learning
+(RL) using policy gradients.
+
+First, we jointly train our full model using imitation
+learning. For imitation learning, we treat the shortest paths
+and the key positions containing the targets as our ground-
+truth labels for navigation and for the controller’s SELECT
+classiﬁer, respectively. The objective function consists of a
+navigation objective and a controller objective at every time
+step t, and a VQA objective at the ﬁnal step. For the i-th
+question, let P nav
+i,t,a be action a’s probability at time t, P sel
+i,t
+be the controller’s SELECT probability at time t, and P vqa
+be the answer probability from VQA, then we minimize the
+combined loss:
+
+i
+
+L = Lnav + αLctrl + βLvqa
+
+= −X
+
+X
+
+X
+
+yn
+i,t,a log P nav
+
+i,t,a
+
+i
+
+t
+
+a
+
+Cross-entropy on navigator action
+
+|
+-αX
+
+{z
+i,t log P sel
+
+X
+
+(yc
+
+}
+
+i,t + (1 − yc
+
+i,t) log(1 − P sel
+
+i,t ))
+
+i
+
+t
+
+|
+
+-β X
+
+i
+
+|
+
+Binary cross-entropy on controller’s SELECT
+
+{z
+i ) log(1 − P vqa
+i + (1 − yv
+
+i log P vqa
+
+i
+
+(yv
+
+Binary cross-entropy on VQA’s answer
+
+{z
+
+}
+
+))
+
+.
+
+}
+
+Subsequently, we use RL to ﬁne-tune the room and ob-
+
+ject navigators.
+
+We provide two types of reward signals to the navigators.
+The ﬁrst is a dense reward, corresponding to the agent’s
+progress toward the goal (positive if moving closer to the
+target and negative if moving away). This reward is mea-
+sured by the distance change in the 2D bird-view distance
+space, clipped to lie within [−1.0, 1.0]. The second is a
+sparse reward that quantiﬁes whether the agent is looking at
+the target object when the episode is terminated. For object
+targets, we compute IOUT between the target’s mask and
+the centered rectangle mask at termination. We use the best
+IOU score of the target IOUbest as reference and compute
+the ratio IOUT
+. If the ratio is greater than 0.5, we set the
+IOUbest
+reward to 1.0 otherwise -1.0. For room targets, we assign
+reward 0.2 to the agent if it is inside the target room at ter-
+mination, otherwise -0.2.
+
+66314
+
+Object Navigation
+
+Room Navigation
+
+EQA
+
+Nav+cVQA
+Nav(RL)+cVQA
+Nav+Ctrl+cVQA
+Nav(RL)+Ctrl+cVQA
+
+dT
+
+5.41
+3.80
+5.25
+3.60
+
+d∆
+
+-0.64
+0.10
+-0.56
+0.16
+
+hT
+
+0.19
+0.33
+0.20
+0.33
+
+IOUr
+T
+
+0.15
+0.30
+0.18
+0.29
+
+%stopo %rT
+
+%stopr
+
+ep len %easy %medium %hard %overall
+
+36
+46
+36
+48
+
+34
+40
+37
+43
+
+60
+62
+70
+72
+
+153.13
+144.80
+145.20
+127.71
+
+58.42
+67.57
+59.73
+72.22
+
+53.29
+55.91
+53.48
+59.97
+
+51.46
+53.28
+49.04
+54.92
+
+53.24
+57.40
+54.44
+61.45
+
+Table 5: Quantitative evaluation of object/room navigation and EQA accuracy for different approaches.
+
+object color compare
+
+object size compare
+
+object dist compare
+
+room size compare
+
+inroom
+
+xroom
+
+inroom
+
+xroom
+
+inroom
+
+Nav+cVQA
+Nav(RL)+cVQA
+Nav+Ctrl+cVQA
+Nav(RL)+Ctrl+cVQA
+
+64.15
+71.24
+66.41
+72.68
+
+52.47
+53.92
+52.65
+58.19
+
+57.85
+74.38
+57.85
+76.86
+
+55.68
+60.81
+53.48
+63.37
+
+49.38
+51.23
+49.38
+54.94
+
+xroom
+
+48.37
+46.66
+48.37
+55.57
+
+Table 6: EQA accuracy on each question type for different approaches.
+
+object color compare
+
+object size compare
+
+object dist compare
+
+room size compare
+
+inroom
+
+xroom
+
+inroom
+
+xroom
+
+inroom
+
+[BestView] + attn-VQA (cnn)
+[BestView] + cVQA (cnn)
+[ShortestPath+BestView] + Ctrl + cVQA
+[ShortestPath] + seq-VQA
+[ShortestPath] + Ctrl + cVQA
+
+71.16
+82.92
+90.70
+53.32
+76.09
+
+59.56
+72.70
+85.49
+54.44
+69.11
+
+65.29
+80.99
+82.64
+51.24
+75.21
+
+65.93
+83.88
+88.64
+50.55
+79.49
+
+58.64
+69.75
+68.52
+47.53
+64.20
+
+xroom
+
+49.74
+64.32
+71.87
+49.74
+61.23
+
+%overall
+
+53.24
+57.40
+54.44
+61.45
+
+%overall
+
+60.50
+74.14
+82.88
+52.36
+69.77
+
+1
+2
+3
+4
+
+1
+2
+3
+4
+
+1
+2
+3
+4
+5
+
+Table 7: EQA accuracy of different approaches on each question type in oracle setting (given shortest path or best-view images).
+
+5. Experiments
+
+In this section we describe our experimental results.
+Since MT-EQA is a complex task and our model is mod-
+ular, we will show both the ﬁnal results (QA accuracy) and
+the intermediate performance (for navigation). Speciﬁcally,
+we ﬁrst describe our evaluation setup and metrics for MT-
+EQA. Then, we report the comparison of our model against
+several strong baselines. And ﬁnally, we analyze variants of
+our model and provide ablation results.
+
+5.1. Evaluation Setup and Metrics
+
+Spawn Location. MT-EQA questions involve multiple tar-
+gets (rooms/objects) to be found. To prevent the agent from
+learning biases due to spawn location, we randomly select
+one of the mentioned targets as reference and spawn our
+agent 10 actions (typically 1.9 meters) away.
+EQA Accuracy. We compute overall accuracy as well as
+accuracy for each of the 6 types of questions in our dataset.
+In addition, we also categorize question difﬁculty level into
+easy, medium, and hard by binning the ground-truth action
+length. Easy questions are those with fewer than 25 action
+steps along the shortest path, medium are those with 25-
+70 actions, and hard are those with more than 70 actions.
+We report accuracy for each difﬁculty, %easy, %medium,
+%hard, as well as overall, %overall, in Table 5.
+Navigation Accuracy. We also measure the navigation ac-
+curacy for both objects and rooms in MT-EQA. As each
+question involves several targets, the order of them being
+navigated matters. We consider the ‘ground truth’ ordering
+of targets for navigation as the order in which they are men-
+
+tioned in the question, e.g., given “Does the bathtub have
+same color as the sink?”, the agent is trained and evaluated
+for visiting the “bathtub” ﬁrst and then the “sink”.
+
+For each mentioned target object, we evaluate the agent’s
+navigation performance by computing the distance to the
+target object at navigation termination, dT , and change in
+distance to the target from initial spawned position to ter-
+minal position, d∆. We also compute the stop ratio %stopo
+as in EQA-v1 [8]. Additionally, we propose two new met-
+rics based on the IOU of the target object at its termina-
+tion. When the navigation is done, we compute the IOU
+of the target w.r.t a centered rectangular box (see Fig. 3
+as example). The ﬁrst metric is mean IOU ratio IOUr
+T =
+N Pi
+IOUT (oi)
+1
+IOUbest(oi) ) where IOUbest(oi) is the highest IOU
+score for object oi. The second is hit accuracy hT – we
+compute the percentage of the ratio IOUT (oi)/IOUbest(oi)
+greater than 0.5, i.e., hT = 1
+IOUbest(oi) > 0.5||.
+Both metrics measure to what extent the agent is looking
+at the target at termination.
+
+N Pi || IOUT (oi)
+
+For each mentioned target room, we evaluate the agent’s
+navigation by recording the percentage of agents terminat-
+ing inside the target room %rT and the stop ratio %stopr.
+
+For all the above metrics except for dT , larger is better.
+Additionally, we report the overall number of action steps
+(episode length) executed for each question, i.e., ep len.
+
+5.2. EQA Results
+
+Nav+Ctrl+cVQA is our full model, which is com-
+posed of a program generator, a navigator, a controller
+
+76315
+
+and a comparative VQA module. Another variant of our
+model, the REINFORCE ﬁne-tuned model is denoted as
+Nav(RL)+Ctrl+cVQA. We also train a simpliﬁed version
+of our full model, Nav+cVQA. which does not use a con-
+troller. For this model, we let the navigator predict termi-
+nation whenever a target is detected, then feed its hidden
+states to the VQA model. The training details are similar to
+our full model for both IL and RL. We show comparisons
+of both navigation and EQA accuracy in Table. 5.
+RL helps both navigation and EQA accuracies. Both ob-
+ject and room navigation performance are improved after
+RL ﬁnetuning. We notice without ﬁnetuning d∆ for both
+models (Row 1 &3 ) are negative, which means the agent
+has moved farther away from the target during navigation.
+After RL ﬁnetuning, d∆ jumps from −0.56 to 0.16 (Row
+3 & 4). The hit accuracy also improves from 20% to 33%,
+indicating that the RL-ﬁnetuned agent is more likely to ﬁnd
+the target mentioned in the question. Episode lengths from
+the stronger navigators are shorter, indicating that better
+navigators ﬁnd their target more quickly. And, higher EQA
+accuracy is also achieved with the help of RL ﬁnetuning
+(from 54.44% to 61.45%). After breaking down the EQA
+into different types, we observe the same trend in Table. 6 –
+our full model with RL far outperforms the others.
+Controller is important. Comparing our full model (Row
+4) to the one without a controller (Row 2), we notice that
+the former outperforms the latter across almost all the met-
+rics. One possible reason is that the VQA task and navi-
+gation task are quite different, such that the features (hid-
+den state) from the navigator cannot help improve the VQA
+module. On the contrary, our controller decouples the two
+tasks, letting the navigator and VQA module focus on their
+own roles.
+Questions with shorter ground-truth path are easier. We
+observe that our agent is far better at dealing with easy ques-
+tions than hard ones (72.22% over 54.92% in Table. 5 Row
+4). One reason is that the targets mentioned in the easy
+questions, e.g., sink and toilet in “Does the sink have same
+color as the toilet in the bathroom?”, are typically closer to
+each other, thus are relatively easier to be explored, whereas
+questions like “Is the kitchen bigger than the garage?” re-
+quires a very long trajectory and the risk of missing one
+(kitchen or garage) is increased. The same observation is
+found in Table. 6, where we get higher accuracy for “in-
+room” questions than “cross-room” ones.
+
+5.3. Oracle Comparisons
+
+To better understand each module of our model, we run
+ablation studies. Table. 7 shows EQA accuracy of different
+approaches given the shortest paths or best-view frames.
+Our VQA module helps. We ﬁrst compare the per-
+formance of our VQA module against an attention-based
+VQA. Given the best view of each target, we can directly
+feed the features from those images to the VQA module,
+
+using the CNN features instead of hidden states from con-
+troller side. The attention-based VQA architecture is sim-
+ilar to [8], which uses an LSTM to encode questions and
+then uses its representation to pool image features with at-
+tention. Comparing the two methods in Table. 7, Row 1 &
+2, our VQA module achieves 13.64% higher accuracy. The
+beneﬁt mainly comes from the decomposition of attribute
+representation and comparison in our VQA module.
+Controller’s features help. We compare the controller’s
+features to raw CNN features for VQA. When given both
+shortest path and best-view position, we run our full model
+with these annotations and feed the hidden states from the
+controller’s LSTM to our VQA model. As shown in Ta-
+ble. 7, Row 2 & 3, the controller’s features are far better
+than raw CNN features, especially for object color compare
+and object size compare question types.
+Controller’s SELECT matters. Our controller predicts
+SELECT and extracts the features at that moment. One pos-
+sible question is how important is this moment selection. To
+demonstrate its advantage, we trained another VQA module
+which uses a LSTM to encode the whole sequence of frames
+along the shortest path and uses its ﬁnal hidden state to pre-
+dict the answer, denoted as seq-VQA. The hypothesis is that
+the ﬁnal hidden state might be able to encode all relevant
+information, as the LSTM has gone through the whole se-
+quence of frames. Table. 7, Row 4, shows its results, which
+is nearly random. On the contrary, when controller is used
+to SELECT frames in Row 5, the results are far better. How-
+ever, there is still much space for improvement. Comparing
+Table. 7, Row 3 & 5, the overall accuracy drops 13% when
+using features from the predicted SELECT instead of oracle
+moments, and 20% when using additional navigators (com-
+paring Table. 7, Row 3, & Table. 6, Row 4), indicating the
+necessity of both accurate SELECT and navigation.
+
+6. Conclusion
+
+We proposed MT-EQA, extending the original EQA
+questions from a limited single-target setting to a more chal-
+lenging multi-target setting, which requires the agent to
+perform comparative reasoning before answering questions.
+We collected a MT-EQA dataset as a test benchmark for the
+task, and validated its usefulness with simple baselines from
+just text or prior. We also proposed a new EQA model con-
+sisting of four modular components: a program generator, a
+navigator, a controller, and VQA module for MT-EQA. We
+experimentally demonstrated that our model signiﬁcantly
+outperforms baselines on both question answering and nav-
+igation, and conducted detailed ablative analysis for each
+component in both the embodied and oracle settings.
+
+Acknowledgements: We thank Abhishek Das, Devi Parikh
+and Marcus Rohrbach for helpful discussions. This work is
+supported by NSF Awards #1633295, 1562098, 1405822,
+and Facebook.
+
+86316
+
+References
+
+[1] Ankesh Anand, Eugene Belilovsky, Kyle Kastner, Hugo
+Larochelle, and 1Aaron Courville. Blindfold baselines for
+embodied qa. arXiv preprint arXiv:1811.05013, 2018. 4
+
+[2] Peter Anderson, Qi Wu, Damien Teney, Jake Bruce, Mark
+Johnson, Niko S¨underhauf, Ian Reid, Stephen Gould, and
+Anton van den Hengel. Vision-and-language navigation: In-
+terpreting visually-grounded navigation instructions in real
+environments. In CVPR, 2018. 1, 2
+
+[3] Jacob Andreas, Dan Klein, and Sergey Levine. Modular mul-
+ICML,
+
+titask reinforcement learning with policy sketches.
+2017. 3
+
+[4] Jacob Andreas, Marcus Rohrbach, Trevor Darrell, and Dan
+
+Klein. Neural module networks. In CVPR, 2016. 2, 3
+
+[5] Charles Beattie, Joel Z Leibo, Denis Teplyashin, Tom Ward,
+Marcus Wainwright, Heinrich K¨uttler, Andrew Lefrancq, Si-
+mon Green, V´ıctor Vald´es, Amir Sadik, et al. Deepmind lab.
+arXiv preprint arXiv:1612.03801, 2016. 2
+
+[6] Simon Brodeur, Ethan Perez, Ankesh Anand, Florian
+Golemo, Luca Celotti, Florian Strub, Jean Rouat, Hugo
+Larochelle, and Aaron Courville. Home: A household multi-
+modal environment. arXiv preprint arXiv:1711.11017, 2017.
+1, 3
+
+[7] Devendra Singh Chaplot, Kanthashree Mysore Sathyendra,
+Rama Kumar Pasumarthi, Dheeraj Rajagopal, and Rus-
+lan Salakhutdinov. Gated-attention architectures for task-
+oriented language grounding. In AAAI, 2018. 1, 2
+
+[8] Abhishek Das, Samyak Datta, Georgia Gkioxari, Stefan Lee,
+Devi Parikh, and Dhruv Batra. Embodied question answer-
+ing. CVPR, 2018. 1, 2, 3, 5, 6, 7, 8
+
+[9] Abhishek Das, Georgia Gkioxari, Stefan Lee, Devi Parikh,
+and Dhruv Batra. Neural Modular Control for Embodied
+Question Answering. CoRL, 2018. 3
+
+[10] Abhishek Das, Georgia Gkioxari, Stefan Lee, Devi Parikh,
+and Dhruv Batra. Neural modular control for embodied
+question answering. arXiv preprint arXiv:1810.11181, 2018.
+3
+
+[11] Abhinav Gupta Dhiraj Gandhi, Lerrel Pinto. Learning to ﬂy
+
+by crashing. IROS, 2017. 2
+
+[12] Li Fei-Fei and Juan Carlos Niebles. Temporal modular
+networks for retrieving complex compositional activities in
+videos. In ECCV, 2018. 3
+
+[13] Daniel Gordon, Aniruddha Kembhavi, Mohammad Raste-
+Iqa:
+In
+
+gari, Joseph Redmon, Dieter Fox, and Ali Farhadi.
+Visual question answering in interactive environments.
+CVPR, 2018. 2
+
+[14] Saurabh Gupta, James Davidson, Sergey Levine, Rahul Suk-
+thankar, and Jitendra Malik. Cognitive mapping and plan-
+ning for visual navigation. In CVPR, 2017. 1, 2
+
+[15] Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun.
+In CVPR,
+
+Deep residual learning for image recognition.
+2016. 2
+
+[16] Ronghang Hu, Jacob Andreas, Marcus Rohrbach, Trevor
+Darrell, and Kate Saenko. Learning to reason: End-to-end
+module networks for visual question answering. ICCV, 2017.
+3
+
+[17] Ronghang Hu, Marcus Rohrbacnh, Jacob Andreas, Trevor
+Darrell, and Kate Saenko. Modeling relationship in refer-
+ential expressions with compositional modular networks. In
+CVPR, 2017. 3
+
+[18] Justin Johnson, Bharath Hariharan, Laurens van der Maaten,
+Li Fei-Fei, C Lawrence Zitnick, and Ross Girshick. Clevr:
+A diagnostic dataset for compositional language and elemen-
+tary visual reasoning. In CVPR, 2017. 2, 5
+
+[19] Justin Johnson, Bharath Hariharan, Laurens van der Maaten,
+Judy Hoffman, Li Fei-Fei, C Lawrence Zitnick, and Ross
+Girshick. Inferring and executing programs for visual rea-
+soning. ICCV, 2017. 3
+
+[20] Michał Kempka, Marek Wydmuch, Grzegorz Runc, Jakub
+Toczek, and Wojciech Ja´skowski. Vizdoom: A doom-based
+ai research platform for visual reinforcement learning.
+In
+Computational Intelligence and Games (CIG), 2016 IEEE
+Conference on, 2016. 1, 2
+
+[21] Eric Kolve, Roozbeh Mottaghi, Daniel Gordon, Yuke Zhu,
+Abhinav Gupta, and Ali Farhadi. Ai2-thor: An interactive 3d
+environment for visual ai. arXiv preprint arXiv:1712.05474,
+2017. 1, 3
+
+[22] Alex Krizhevsky, Ilya Sutskever, and Geoffrey E Hinton.
+Imagenet classiﬁcation with deep convolutional neural net-
+works. In NIPS, 2012. 2
+
+[23] Sergey Levine, Chelsea Finn, Trevor Darrell, and Pieter
+Abbeel. End-to-end training of deep visuomotor policies.
+JMLR, 2016. 2
+
+[24] Tsung-Yi Lin, Michael Maire, Serge Belongie, James Hays,
+Pietro Perona, Deva Ramanan, Piotr Doll´ar, and C Lawrence
+Zitnick. Microsoft COCO: Common objects in context. In
+ECCV, 2014. 2
+
+[25] Jeffrey Pennington, Richard Socher, and Christopher Man-
+In
+
+ning. Glove: Global vectors for word representation.
+EMNLP, 2014. 5
+
+[26] Olga Russakovsky, Jia Deng, Hao Su, Jonathan Krause, San-
+jeev Satheesh, Sean Ma, Zhiheng Huang, Andrej Karpathy,
+Aditya Khosla, Michael Bernstein, Alexander C. Berg, and
+Li Fei-Fei. ImageNet Large Scale Visual Recognition Chal-
+lenge. 2015. 2
+
+[27] Fereshteh Sadeghi and Sergey Levine. CAD2RL: Real
+single-image ﬂight without a single real image. RSS, 2017.
+2
+
+[28] Manolis Savva, Angel X. Chang, Alexey Dosovitskiy,
+Thomas Funkhouser, and Vladlen Koltun. MINOS: Multi-
+modal indoor simulator for navigation in complex environ-
+ments. arXiv:1712.03931, 2017. 1, 3
+
+[29] Shuran Song, Fisher Yu, Andy Zeng, Angel X Chang, Mano-
+lis Savva, and Thomas Funkhouser. Semantic scene comple-
+tion from a single depth image. In CVPR, 2017. 3
+
+[30] Gabriel Synnaeve, Nantas Nardelli, Alex Auvolat, Soumith
+Chintala, Timoth´ee Lacroix, Zeming Lin, Florian Richoux,
+and Nicolas Usunier. Torchcraft: a library for machine learn-
+ing research on real-time strategy games. arXiv preprint
+arXiv:1611.00625, 2016. 2
+
+[31] Christian Szegedy, Wei Liu, Yangqing Jia, Pierre Sermanet,
+Scott Reed, Dragomir Anguelov, Dumitru Erhan, Vincent
+Vanhoucke, and Andrew Rabinovich. Going deeper with
+convolutions. In CVPR, 2015. 2
+
+96317
+
+[32] Yi Wu, Yuxin Wu, Georgia Gkioxari, and Yuandong Tian.
+Building generalizable agents with a realistic and rich 3d en-
+vironment. ICLR workshop, 2018. 1, 2, 3
+
+[33] Fei Xia, Amir R Zamir, Zhiyang He, Alexander Sax, Jitendra
+Malik, and Silvio Savarese. Gibson env: Real-world percep-
+tion for embodied agents. In CVPR, 2018. 1, 3
+
+[34] Licheng Yu, Zhe Lin, Xiaohui Shen, Jimei Yang, Xin Lu,
+Mohit Bansal, and Tamara L Berg. Mattnet: Modular at-
+tention network for referring expression comprehension. In
+CVPR, 2018. 3
+
+[35] Yuke Zhu, Daniel Gordon, Eric Kolve, Dieter Fox, Li Fei-
+Fei, Abhinav Gupta, Roozbeh Mottaghi, and Ali Farhadi. Vi-
+sual semantic planning using deep successor representations.
+In ICCV, 2017. 1, 2
+
+[36] Yuke Zhu, Roozbeh Mottaghi, Eric Kolve, Joseph J Lim, Ab-
+hinav Gupta, Li Fei-Fei, and Ali Farhadi. Target-driven vi-
+sual navigation in indoor scenes using deep reinforcement
+learning. In ICRA, 2017. 2
+
+106318
+
+

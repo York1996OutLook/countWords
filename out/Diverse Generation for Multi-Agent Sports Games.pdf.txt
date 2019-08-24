@@ -1,0 +1,1547 @@
+Diverse Generation for Multi-agent Sports Games
+
+Raymond A. Yeh Alexander G. Schwing
+
+Jonathan Huang† Kevin Murphy†
+
+University of Illinois at Urbana-Champaign
+
+†Google Research
+
+yeh17@illinois.edu, aschwing@illinois.edu, jonathanhuang@google.com, kpmurphy@google.com
+
+Abstract
+
+In this paper, we propose a new generative model for
+multi-agent trajectory data, focusing on the case of multi-
+player sports games. Our model leverages graph neu-
+ral networks (GNNs) and variational recurrent neural net-
+works (VRNNs) to achieve a permutation equivariant model
+suitable for sports. On two challenging datasets (basketball
+and soccer), we show that we are able to produce more ac-
+curate forecasts than previous methods. We assess accuracy
+using various metrics, such as log-likelihood and “best of
+N ” loss, based on N different samples of the future. We
+also measure the distribution of statistics of interest, such
+as player location or velocity, and show that the distribu-
+tion induced by our generative model better matches the
+empirical distribution of the test set. Finally, we show that
+our model can perform conditional prediction, which lets
+us answer counterfactual questions such as “how will the
+players move if A passes the ball to B instead of C?”
+
+1. Introduction
+
+Multi-agent systems are widespread in the real world. In
+many applications, we would like to learn a model of the
+interaction between the agents, which we can use to predict
+plausible future behaviors. The challenges involve model-
+ing the interactions in a parsimonious way, and coping with
+the inherent multi-modality of future prediction.
+
+In this paper, we focus on the case of modeling trajec-
+tory data collected from multi-player sports games, namely
+basketball [41] and soccer [23]. Our model uses graph-
+structured variational RNNs, which are based off methods
+from graph neural networks (reviewed in [3]) with varia-
+tional recurrent neural networks [7]. The use of a graph,
+with one node per agent, ensures the model is permutation
+equivariant, which is necessary since each game segment
+corresponds to an unordered set of K trajectories, where
+K is the number of players in the game. Previous works,
+such as [10, 44], use various heuristics to assign players to
+roles, thereby ﬁxing an agent ordering across games, but
+
+Ground truth
+
+Possible futures for the blue player
+
+Figure 1. Illustration of basketball (top) and soccer (bottom) data.
+We visualize possible futures, predicted from our model, for the
+blue player given ground truth locations of the other agents. The
+black point indicates the starting position for each agent; the gray-
+highlight indicates which of the locations are given.
+
+we show that our approach produces better results, since
+roles can change dynamically. We also show that the use
+of a variational RNN, as opposed to a deterministic RNN,
+is helpful (at least in the case of basketball) since there is
+often stochasticity in the latent dynamics of the players be-
+yond the kind of short-term variation one can capture with
+observation-level noise.
+
+In addition to improving the basic model, we propose
+a variety of metrics for evaluating the quality of generative
+forecasting models (cf . [35]). In particular, beyond the stan-
+dard use of log-likelihood and “best of K” loss [5, 26, 31],
+we propose to evaluate the marginal distributions of features
+of interest, such as the player locations and speeds, based
+on ground truth trajectories as well as generated trajecto-
+ries. We show that simple models, such as constant veloc-
+ity, can outperform more complex models, such as RNNs,
+when judged by the standard metrics, but not when judged
+by these distributional similarity metrics.
+
+Finally, we consider the case of conditional prediction, in
+which some aspects of the future are observed (and poten-
+tially manipulated), and some are predicted. For example,
+Fig. 1 shows the predicted trajectory of the blue player given
+the other players, and Fig. 6 shows the predicted trajectories
+of all the players if we “intervene” and modify the trajectory
+of the ball. This is a step towards answering counter-factual
+
+14610
+
+Shared Weights
+
+Recurrence
+
+Sampling
+
++
+
+ 
+
+ 
+
+11/15/2018
+
+pipeline_v7
+
+11/15/2018
+
+Shared Weights
+
+pipeline_v7
+
+Shared Weights
+
+Sampling
+
++
+
+Sampling
+
++
+
+Recurrence
+
+Recurrence
+
+(a)
+
+ 
+
+(b)
+
+(c)
+
+Figure 2.
+(a): Illustration of the overall approach. Each agents’ trajectory is processed through a GRU with shared parameters, while
+keeping its own individual recurrent state. The graph encoder and decoder models the relationship between agents, and ﬁnally outputting
+the predicted movement of each agent. (b,c): Detailed illustration of the GNNenc and GNNdecoder on two agents; We use a diamond shape
+to indicate the value is deterministic, and use a circle to indicate the variable is stochastic. e represent edge states and o represent updated
+node (output) states.
+
+ 
+
+queries, such as “What would happen if player A passed the
+ball to player B instead of player C?”
+
+In summary, we propose an improved generative model
+for multi-player sports data. Moreover, we perform exten-
+sive quantitative and qualitative analysis of this model and
+compare to prior work on two challenging datasets, namely
+basketball and soccer. 1 2
+
+ 
+
+2. Graph Variational RNN for Sports
+
+1/1
+
+k, . . . , xT
+
+k ∈ R2 denote the 2-
+Problem formulation: Let xt
+dimensional location of agent k at time t, and let xk =
+(x1
+k ) be a corresponding trajectory. Finally, let
+x = {x1, . . . , xK} be an unordered set of trajectories, cor-
+responding to one segment of a game, i.e., a play, where K
+is the number of agents in this segment, and let D = {x}
+subsume all the segments. Our goal is to learn a model of
+the trajectories, i.e., p(x1:T
+VRNNs: Our model builds on the Variational RNN
+(VRNN) [7]. VRNNs have three types of variables:
+the
+observed output xt = xt
+1:K , the stochastic variational auto-
+encoder (VAE) state zt = zt
+1:K , and the deterministic RNN
+hidden state ht = ht
+1:K , which summarizes the past history
+of observations x≤t and stochastic choices z≤t. At a high
+level, a VRNN is a VAE at every time step, characterized by
+the following distributions and the RNN update equation:
+
+1:K).
+
+pθ(zt|x<t, z<t) = N (zt|µ
+qφ(zt|x≤t, z<t) = N (zt|µ
+pθ(xt|x<t, z≤t) = N (xt|µ
+
+t
+
+t
+pri, (σ
+t
+enc, (σ
+t
+dec, (σ
+
+pri)2)
+enc)2)
+dec)2)
+
+t
+
+t
+
+ht = frnn(xt, zt, ht−1)
+
+(prior),
+
+(inference),
+
+(generation),
+
+(recurrence),
+
+where
+
+1Data Source: STATS, copyright 2019. Available: https://www.
+
+stats.com/data-science/.
+
+2 We note that, as far as we know, our paper is the ﬁrst to actually model
+the dynamics of the ball in basketball. Previous methods ignored the ball
+and focused only on the players.
+
+[µ
+
+t
+
+t
+pri, σ
+t
+t
+enc, σ
+t
+dec, σ
+
+pri] = fpri(ht−1; θ),
+enc] = fenc(xt, ht−1; φ),
+dec] = fdec(zt, ht−1; θ),
+
+t
+
+[µ
+
+[µ
+
+2) denotes a multivariate normal distribu-
+and N (·|µ, σ
+2). Here,
+tion with mean µ and covariance matrix diag(σ
+fpri, fenc, and fdec are deep nets corresponding to the prior
+network, encoder and decoder with learnable parameters φ
+and θ.
+
+VRNNs are trained by maximizing the evidence lower
+
+bound (ELBO):
+
+Xx∈DXt
+
+E
+
+qφ(zt|x≤t,z<t)" log pθ(xt|x<t, z≤t) −
+DKL(qφ(zt|x≤t, z<t)||pθ(zt|x<t, z<t))#.
+
+1/1
+
+(1)
+
+With Gaussians for the prior and posterior, we can leverage
+the reparameterization trick to optimize this objective with
+stochastic gradient descent (SGD), as discussed in [19].
+Consistent representation: This standard VRNN formula-
+tion implicitly encapsulates the ordering of the agents in the
+index k. However our data consists of unordered sets of tra-
+jectories, and so does not contain this information. In this
+section, we discuss the importance of having a consistent
+ordering.
+
+Consider a dataset with two plays, each with two agents
+
+in an “arbitrary agent order”:
+1 ], [2, x(1)
+
+D1 =(cid:26){[1, x(1)
+
+2 ]}, {[1, x(2)
+
+1 ], [2, x(2)
+
+2 ]}(cid:27).
+
+The superscript in parenthesis indicates the play number,
+and the ordering index is paired together with the agent lo-
+cation in brackets, i.e., x1 is index 1 and x2 is index 2 for
+both examples. We also consider another agent order:
+
+D2 =(cid:26){[1, x(1)
+
+1 ], [2, x(1)
+
+2 ]}, {[2, x(2)
+
+1 ], [1, x(2)
+
+2 ]}(cid:27).
+
+4611
+
+Typically, in a deep net, the representation of x is the con-
+catenation of x1 and x2 along the agent dimension. Ob-
+serve that the representation for D1 and D2 is different and
+nothing encourages the same model probabilities.
+
+In order to build a consistent model, i.e., the modeled
+probability is the same for D1 and D2, we need to handle
+this ordering discrepancy. Prior works [10, 27, 34] have
+proposed to solve this consistency problem by “sorting” the
+agents. At a high level, similar behaving agents are placed
+at the same agent index. Instead, here, we advocate for a
+permutation-equivariant representation, i.e., a permutation
+at the input leads to the same permutation at the output.
+Consequently, the change in agent ordering does not impact
+the modeled probability. One family of models that satisfy
+this permutation equivariance property are graph networks,
+introduced in the following section.
+
+Graph networks: The basic idea of graph neural nets, sum-
+marized in [3], is as follows: we start with a feature vector
+for each node vi. We then derive a feature vector for each
+edge eij based on the nodes it is connected to. Afterwards
+we send the edge feature vectors as “messages” to each of
+the connected nodes to compute their new output state oi.
+More formally, a single round of message passing opera-
+tions of a graph net are characterized below:
+
+v → e :
+
+e(i,j) = fe([vi, vj]),
+
+e → v :
+
+oi
+
+= fv(cid:18) Xj∈N (i)
+
+e(i,j)(cid:19),
+
+(2)
+
+(3)
+
+where vi is the initial state of node i, oi is the updated (out-
+put) representation for node i, N (i) is the set of neighbors
+of node i, e(i,j) is the representation for edge (i, j), and
+lastly fe and fv are deep networks.
+
+In summary, a GNN takes in feature vectors v1:K , and
+an adjacency matrix, A, and outputs a vector for each node,
+o1:K , that is, o1:K = GNN(v1:K). Here, we consider fully
+connected graphs only, and thus drop A for simplicity.
+
+Observe that the operations of the GNN satisfy the per-
+mutation equivariance property as the edge construction is
+symmetric between pairs of nodes and the summation oper-
+ator ignores the ordering of the edges (cf . [42]).
+
+Graph VRNNs: We now describe our proposed Graph
+Variational RNN (GVRNN) model. An overview of the
+proposed model is illustrated in Fig. 2. Our model has inde-
+pendent RNNs and observations for each agent. We model
+interactions between them at each step using GNNs, where
+each node is an agent, and the graph is fully connected.3
+
+date are deﬁne as follows:
+
+pθ(zt|x<t, z<t) =Yk
+qφ(zt|x≤t, z<t) =Yk
+pθ(xt|x<t, z≤t) =Yk
+
+N (zt|µ
+
+t
+pri,k, (σ
+
+t
+
+pri,k)2),
+
+N (zt|µ
+
+t
+enc,k, (σ
+
+t
+
+enc,k)2),
+
+N (xt|µ
+
+t
+dec,k, (σ
+
+t
+
+dec,k)2),
+
+ht
+k = frnn(xt
+
+k, zt
+
+k, ht−1
+
+k
+
+),
+
+where
+
+[µ
+
+t
+
+t
+pri,1:K , σ
+t
+t
+enc,1:K , σ
+t
+dec,1:K , σ
+
+pri,1:K] = GNNpri(ht−1
+enc,1:K] = GNNenc([xt
+dec,1:K] = GNNdec([zt
+
+1:K),
+1:K , ht−1
+1:K , ht−1
+
+1:K]),
+1:K]).
+
+t
+
+[µ
+
+[µ
+
+In Fig. 2 (b,c) we illustrate the computation of the en-
+coder and decoder for a two agent case. Here, the prior net-
+work, encoder, and decoder are chosen to be GNNs. Note
+that, while the RNN state for agent k, ht
+k, only depends di-
+rectly on quantities related to k (i.e., ht
+k, zt
+k), these
+quantities do depend indirectly on the other agents through
+the GNNs.
+
+k and xt
+
+k = xt−1
+
+k, and then computes xt
+
+In practice, the model generates the change in coordi-
+nates at each step, ∆xt
+k +
+∆xt
+k. Also, we use as input to the GNNs the previous ob-
+1:K , as well as the previous RNN states, ht−1
+servations, xt−1
+1:K .
+This is a form of “skip connection,” which we found to
+slightly improve performance. We have also tried adding a
+GNN to model direct interaction between the ht
+k nodes, but
+this did not improve performance, and slowed down train-
+ing, so we omit this.
+Adding type information: The graph network is com-
+pletely exchangeable between agents, but sometimes this is
+too strong an assumption. For example, players and balls
+often move very differently. One way to achieve partial ex-
+changeability is to use type information. Speciﬁcally, we
+can use a different kind of node function fv for each type of
+node, and a different kind of edge function fe for every pair
+of node type. However, to avoid the quadratic explosion in
+the number of parameters, we choose instead to use a single
+edge function. But to make it “type aware” we add an em-
+bedding ti,j depending on the edge type and node type ti,
+e.g., a one-hot vector. Consequently, our message passing
+operations are:
+
+v → e :
+
+e(i,j) = fe([vi, vj, ti,j]),
+
+= fv(cid:18)(cid:20) Xj∈N (i)
+
+e(i,j), ti(cid:21)(cid:19).
+
+(4)
+
+(5)
+
+More precisely, the distributions in Eq. (1) and RNN up-
+
+e → v :
+
+oi
+
+3 Although the graph is fully connected, the “effective strength” of each
+edge is computed dynamically, which is similar to the approach of graph
+attention networks [36].
+
+In the experiments, we show that adding type information
+improves the performance.
+
+4612
+
+Approach
+Velocity
+
+RNN
+RNN
+RNN
+
+GRNN-Diag
+GRNN-Full
+GRNNT-Diag
+GRNNT-Full
+
+VRNN
+VRNN
+VRNN
+
+GVRNN-Diag
+GVRNN-Full
+GVRNNT-Diag
+GVRNNT-Full
+
+Order
+
+-
+
+Random
+Template
+
+Tree
+
+Equivariant
+Equivariant
+Equivariant
+Equivariant
+
+NLL
+
+-
+
+-2171
+-2308
+-2318
+-2252
+-2363
+-2374
+-2264
+
+Tree
+
+Random
+Template
+
+≤ -2667
+≤ -2750
+≤ -2748
+Equivariant ≤ -2814
+Equivariant ≤ -2814
+Equivariant ≤ -2818
+Equivariant ≤ -2832
+
+L2 (Avg)
+
+L2 (Best)
+
+Max-L2 (Best) Miss Rate (%)
+
+Cond. L2 (Best)
+
+10.40 ± .03
+13.72 ± .04
+11.46 ± .05
+11.55 ± .05
+10.75 ± .02
+12.33 ± .03
+09.70 ± .02
+11.24 ± .03
+10.52 ± .12
+09.44 ± .01
+09.88 ± .01
+11.09 ± .01
+10.71 ± .01
+09.51 ± .01
+10.37 ± .01
+
+10.40 ± .03
+13.72 ± .04
+11.46 ± .05
+11.55 ± .05
+10.75 ± .02
+12.33 ± .03
+09.70 ± .02
+11.24 ± .03
+09.59 ± .06
+09.02 ± .02
+09.40 ± .02
+08.86 ± .02
+08.39 ± .02
+08.87 ± .02
+08.26 ± .02
+
+17.20 ± .04
+25.21 ± .09
+20.93 ± .12
+21.03 ± .12
+16.97 ± .04
+19.53 ± .05
+16.73 ± .05
+19.07 ± .07
+16.44 ± .21
+15.51 ± .06
+16.05 ± .05
+14.26 ± .03
+13.46 ± .03
+15.17 ± .06
+13.46 ± .04
+
+74.2 ± .10
+82.8 ± .04
+79.7 ± .05
+80.2 ± .05
+82.7 ± .05
+86.8 ± .05
+75.9 ± .05
+79.6 ± .06
+76.0 ± .05
+71.5 ± .08
+72.8 ± .05
+72.4 ± .08
+69.1 ± .08
+70.6 ± .08
+68.6 ± .06
+
+13.87 ± .06
+14.23 ± .06
+12.04 ± .04
+11.69 ± .04
+13.10 ± .05
+13.65 ± .05
+12.18 ± .05
+12.20 ± .04
+11.36 ± .05
+09.79 ± .04
+09.83 ± .04
+09.02 ± .03
+08.63 ± .03
+10.63 ± .04
+07.88 ± .03
+
+Table 1. Quantitative results on basketball dataset modeling offensive players and ball. We report mean and standard deviation of the mean
+(sample size is 13,845). Lower numbers are better. Bold is the best and italics is second best. For conditional generation (last column), the
+task is to predict the ball’s trajectory conditioned on the offensive players. The L2 metrics have the units of feet.
+
+3. Related Work
+
+Multi-agent modeling for sports: Learning based meth-
+ods have demonstrated success in predictive modeling for
+a variety of sports, including basketball, soccer, Ameri-
+can football, water-polo, etc. Commonly employed for-
+mulations are regression, e.g., predicting future trajecto-
+ries [9, 23, 25, 44], and classiﬁcation, e.g., event detec-
+tion [38], most of which leverage deep nets. More specif-
+ically, for basketball, [10] proposed to use a conditional
+variational autoencoder, which personalizes the agent’s be-
+havior by conditioning on player and team identity. How-
+ever, a different network architecture is necessary for each
+time horizon prediction. A recurrent network solves this
+issue. In [43, 44] the challenge of modeling long sequen-
+tial data is addressed by decomposing the task into “micro”
+and “macro” goals, capturing short-term and long-term be-
+havior separately via a recurrent net. In [10, 43, 44], the
+agents are ﬁrst pre-processed into a speciﬁc “order,” using
+template-based or tree-based methods [27, 34]. The idea is
+to sort “similarly” behaving agents into the same bin so as
+to obtain a consistent representation.
+In contrast, we use
+a permutation-equivariant representation based on graphs,
+that avoids the needs for such preprocessing. We show be-
+low that this results in improved performance.
+Pedestrian trajectory forecasting: There is a large lit-
+erature on modeling of pedestrian movements. Most re-
+cent works, e.g., [1, 15, 24, 30, 40] focus on effectively
+aggregating information across a large number of people.
+For aggregation, specialized pooling modules are often
+used [1, 15, 24, 40]. Interestingly, [4] showed that a sim-
+ple baseline of an RNN with an MLP decoder outperformed
+many of these prior works on the TrajNet benchmark [32].
+Generative and time series models:
+In [11], auto-
+regressive RNNs have shown good forecasting performance
+
+for simple 1d time series, such as sales data. However,
+for multi-dimensional data, the use of latent variables often
+gives improved performance, as shown in [7]. Various other
+time series models have been proposed. For example, [22]
+and [12] propose nonlinear stochastic state space models,
+where the latent states at each time step do not depend on
+past model outputs, unlike an RNN. In [17], a sequence-
+to-sequence model is presented, where there is only one la-
+tent sample per sequence. Similarly, [37] uses a conditional
+VAE, which predicts future pixel trajectories given a sin-
+gle image. In contrast, in our model, we have a latent state
+per time step with dependencies on the past model output,
+which follows the structure of a variational RNN in [7].
+
+Graph neural networks: To model interactions between
+variables, graph neural networks (GNN) [33] have been pro-
+posed. A plethora of variants exist, including Interaction
+Network [2], Message Passing Network [13], Graph Con-
+volutional Network [21] and others [16, 28, 36, 42]. A sum-
+mary is provided in [3]. GNNs have recently been applied
+to many datasets, including sports trajectory data. In par-
+ticular, [20] modeled pick-and-roll basketball data using a
+latent graph. However, the focus of their approach is to dis-
+cover the underlying latent graph. Another relevant work
+is [16], who applied GNNs to soccer data. However, their
+model predicts from a single frame and does not model past
+trajectories, whereas we use temporal history and a stochas-
+tic model of the future.
+
+4. Experimental Evaluation
+
+In this section, we compare our model to various base-
+lines on two datasets: modeling of basketball and soccer
+game trajectories.
+
+4613
+
+Figure 3. Quantitative results for basketball dataset with the distributional metrics evaluated on the offensive players and ball model
+visualized in box-plot, the dashed-line indicates the mean. Refer to the y-axis for the speciﬁc statistic being visualized. The barplots are
+ordered as follows: Ground truth, GVRNNT-Full, GVRNNT-Diag, VRNN with template ordering.
+
+4.1. Models
+
+We compare our approach to several deep learning base-
+lines. For the non-permutation equivariant models, we eval-
+uate on two ordering methods, a template-based method and
+a tree-based method [34].
+Velocity: As a sanity check, we used velocity extrapolation
+as a simple baseline, i.e., each of the agent’s predictions is
+linearly extrapolated using its past observed velocity.
+RNN: A recurrent neural net baseline implemented using a
+gated recurrent unit [6]. The model uses an MLP-decoder
+for prediction, rather than the output-gate of the RNN. This
+is a simple, yet effective baseline shown in [4].
+VRNN: A variational version of the above RNN.
+GVRNN (Ours): A graph variational recurrent neural net,
+either with a fully connected graph (Full) or a graph con-
+taining only self-loops, i.e., a diagonal adjacency matrix
+(Diag). In the latter case, we do not model interaction be-
+tween the agents; the model is still permutation-equivariant.
+GVRNNT (Ours): GVRNN extended with agent types.
+Training Details:We train all the models using the Adam
+optimizer [18] with default parameters. The initial learning
+rate is 0.0005. We decay the learning rate exponentially by
+a factor of 0.999 per epoch. All models are trained using
+teacher forcing [39], and the reparameterization-trick with
+random sample size of 1 is used. All fully connected layers
+are initialized using Xavier initialization [14]. To prevent
+over-ﬁtting, we select the best performing model using log-
+likelihood on the validation set.
+
+4.2. Evaluation Metrics:
+
+Due to the difﬁcult nature of evaluating a generative
+model, we evaluate on several different metrics to demon-
+strate the efﬁcacy of our approach.
+Negative Log-Likelihood (NLL): We report the negative
+t=2 log p(xt|x1:t−1). For
+the deterministic baselines the NLL is exact. For the varia-
+tional models, we report the negative ELBO, which is an up-
+per bound on the NLL (indicated by the ≤ symbol). Unfor-
+
+log-likelihood on the test set, −PT
+
+Ground truth GVRNNT-Full GVRNNT-Diag VRNN-Template
+
+Figure 4. Top: Average location of players sampled from leave-
+one-out generation for each model. Bottom: Average location
+of the ball sampled conditioned on the players from each model.
+At a glance, GVRNNT-Full’s map matches the ground truth more
+closely for both player and ball, which is conﬁrmed with the quan-
+titative evaluation in Tab. 2.
+
+Approach
+
+VRNN-Template
+GVRNNT-Diag
+GVRNNT-Full
+
+Player-SKL Player-JS Ball-SKL Ball-JS
+0.0954
+0.1080
+0.0713
+
+0.0068
+0.0084
+0.0036
+
+0.0017
+0.0020
+0.0009
+
+0.3556
+0.3985
+0.2658
+
+Table 2. Basketball’s quantitative comparison of each models’
+heatmap in Fig. 4 with the ground truth. We evaluate on two differ-
+ent divergences, where SKL refers to Symmetric KL-divergence,
+and JSD refers to Jensen-Shannon divergence.
+
+tunately, such bounds are not directly comparable between
+methods, and tighter bounds do not necessarily lead to bet-
+ter performance [29], so we also report several other more
+informative metrics detailed below.
+Mean and best L2-error: We evaluate the models on the
+task of future prediction, i.e., conditioned on the ﬁrst 10
+frames of all agents’ trajectories we predict an additional 40
+frames. We report the L2-error (in feet or meters) between
+the predicted and the ground truth. Due to the multimodal
+nature of the system, for each test case, we randomly sample
+N = 10 trajectories and report the average or the best of the
+samples. More precisely, we compute the L2-error between
+the ground truth and the n’th generated sample ˆxn using:
+
+Ln
+
+2 =
+
+1
+
+T · K
+
+T
+
+K
+
+Xt=1
+
+Xk=1
+
+4614
+
+||ˆxn,t
+
+k − xt
+
+k||2.
+
+GT’s ﬁrst 10 frames
+
+Complete GT
+
+GVRNNT-Full
+
+GVRNNT-Full GVRNNT-Diag VRNN-Template
+
+Figure 5. First row: We visualize the ﬁrst 10 and 50 frames
+of the trajectory (ball is in orange). Second row: negative log
+posterior predictive for ball location at t = 11 for for GVRNNT-
+Full, GVRNNT-Diag and VRNN-Template. Third row: Bayesian
+surprise for ball location at t = 11 for GVRNNT-Full, GVRNNT-
+Diag and VRNN-Template.
+
+1
+
+the average,
+
+2 , as is standard practice [5, 26, 31].
+
+We then report
+minn Ln
+Max L2-error (Best): We also compute the average, over
+agents, maximum L2-error between the prediction and the
+ground truth trajectory:
+
+N Pn Ln
+
+2 , and the best,
+
+M n =
+
+1
+K
+
+K
+
+Xk=1
+
+T
+
+max
+t=1
+
+||ˆxn,t
+
+k − xt
+
+k||2.
+
+For each test case, we sample N = 10 random trajectories
+from the model and report the best, minn M n.
+Miss rate: This denotes the percentage of predictions hav-
+ing an L2-error greater than 3 feet for basketball and 1 me-
+ter for soccer. This is reported on the best out of 10 random
+samples per example.
+Conditional L2-error (Best): We evaluate on conditional
+generation. For example, we condition on all the players’
+trajectories and predict the ball trajectory. We report the
+lowest L2 error out of 10 random samples for each test case.
+This metric is used to evaluate whether the model learned
+relations among the agents in the system.
+Distributional metrics: To measure properties of the over-
+all distribution of trajectories x = x1:T
+1:K , we compute the
+marginal distributions of 8 univariate statistics, denoted
+φ1(x), . . . , φ8(x) namely: linear/ angular velocity/ accel-
+eration of player/ ball; we also compute the marginal distri-
+bution over agent locations, φl(x) ∈ R2. We then compare
+the distribution of these statistics induced by various gen-
+erative models to the true (empirical) distribution induced
+by the test set. We do this informally via boxplots of the
+distributions pθ(φi(x)) and p∗(φi(x)) for each of the 8 uni-
+
+GT
+
+GT-modiﬁed
+
+GVRNNT-Diag
+
+VRNN-Template
+
+Figure 6. Illustration of a “counter-factual” experiment. Solid ”va-
+por trails” correspond to past trajectories until the time when we
+perform an intervention by modifying ball trajectory (orange), col-
+ored trails correspond to subsequent trajectories. We then compute
+3 different future trajectories for all the players for each model.
+See text for details.
+
+variate statistics, where pθ is a learned model and p∗ is the
+true (empirical) test distribution. For the 2d location dis-
+tributions, we use heatmaps as a visualization method, and
+quantitatively compare the distributions using two similar-
+ity metrics, namely symmetric Kullback-Leibler (KL) di-
+vergence and Jensen-Shannon divergence.
+
+4.3. Modeling Basketball Dynamics
+
+We use the basketball dataset from [41, 43], which con-
+tains tracking trajectories of professional basketball play-
+ers and the ball. We use the pre-processed version of the
+dataset. Each example is sampled at 6Hz for 50 frames
+(roughly 8 seconds), with the offense team always going
+towards the left-side of the court. In total the dataset con-
+tains 107,146 training and 13,845 test examples. The data
+is centered and normalized to be within [−1, 1].
+Trajectory metrics: In Tab. 1, we report the quantitative
+results for modeling the offensive players and the ball. It
+can be observed that our GVRNNT-Full model outperforms
+all the others on all metrics except for average L2. However,
+that metric is not particularly informative, since it does not
+measure sample diversity. We also observe that the constant
+velocity baseline outperforms the simple RNN with ﬁxed
+ordering (template or tree based) on all metrics except for
+predicting the ball.
+
+We performed several ablation studies verifying the ne-
+cessity of each of the components. For the non-graph
+models, we observed that random ordering performs the
+worst, then tree-based ordering, then template-based or-
+dering. Graph-based models outperform all of these non-
+
+4615
+
+Approach
+Velocity
+
+RNN
+RNN
+RNN
+
+GRNN-Diag
+GRNN-Full
+GRNNT-Diag
+GRNNT-Full
+
+VRNN
+VRNN
+VRNN
+
+GVRNN-Diag
+GVRNN-Full
+GVRNNT-Diag
+GVRNNT-Full
+
+Order
+
+-
+
+Random
+Template
+
+Tree
+
+Equivariant
+Equivariant
+Equivariant
+Equivariant
+
+NLL
+
+-
+
+-5244
+-5350
+-5353
+-5221
+-5292
+-5333
+-5349
+
+Tree
+
+Random
+Template
+
+≤ -5238
+≤ -5579
+≤ -5569
+Equivariant ≤ -5207
+Equivariant ≤ -5369
+Equivariant ≤ -5438
+Equivariant ≤ -5325
+
+L2 (Avg)
+4.58 ± .02
+3.33 ± .01
+3.17 ± .01
+3.20 ± .01
+4.37 ± .02
+4.55 ± .03
+3.16 ± .01
+3.05 ± .01
+3.98 ± .01
+4.36 ± .09
+3.57 ± .01
+3.35 ± .01
+3.25 ± .01
+3.60 ± .01
+3.17 ± .01
+
+L2 (Best) Max-L2 (Best) Miss Rate (%)
+4.58 ± .02
+3.33 ± .01
+3.17 ± .01
+3.20 ± .01
+4.37 ± .01
+4.55 ± .02
+3.16 ± .03
+3.05 ± .01
+3.97 ± .01
+3.38 ± .02
+3.42 ± .02
+3.11 ± .01
+3.25 ± .01
+3.11 ± .01
+3.07 ± .02
+
+8.72 ± .05
+7.05 ± .03
+6.68 ± .04
+6.74 ± .03
+8.40 ± .06
+8.34 ± .05
+6.54 ± .03
+6.32 ± .03
+8.95 ± .04
+7.43 ± .11
+7.46 ± .04
+6.47 ± .03
+6.80 ± .03
+6.39 ± .04
+6.49 ± .08
+
+80.0 ± .13
+69.5 ± .08
+67.6 ± .08
+68.5 ± .08
+79.7 ± .09
+78.9 ± .11
+67.9 ± .09
+67.3 ± .09
+72.6 ± .07
+65.1 ± .09
+65.8 ± .09
+
+66.9 ± .09
+64.5 ± .08
+66.8 ± .09
+
+65.2 .09
+
+Cond. L2 (Best)
+
+10.74 ± .09
+09.10 ± .09
+08.58 ± .09
+08.18 ± .08
+10.99 ± .13
+11.79 ± .13
+08.77 ± .09
+08.02 ± .07
+09.17 ± .09
+12.10 ± .14
+12.41 ± .14
+8.95 ± .08
+8.55 ± .10
+7.77 ± .10
+7.61 ± .13
+
+Table 3. Quantitative results on soccer dataset modeling offensive players (without the goal keeper) and ball. For conditional generation,
+the task is to predict the ball’s trajectory conditioned on the offensive players. The L2 metrics are measured in meters.
+
+equivariant models. Furthermore, by comparing GVRNNT-
+Full and GVRNNT-Diag, we observed that the graph net-
+work is indeed learning relations between the agents. By
+comparing GVRNNT-Full and GVRNN-Full, we demon-
+strate that including agent types leads to further improve-
+ment in performance. Finally, we see that variational mod-
+els outperform ones that only have stochasticity at the out-
+put nodes.
+
+Distributional metrics: Next, we report the distributional
+metrics. Fig. 3 shows boxplots illustrating the distribution
+of the 8 statistics of interest. In general, our GVRNNT-Full
+model (orange) better matches the true distribution (blue)
+than GVRNNT-Diag (green), which is comparable in per-
+formance to a vanilla VRNN (red). Note that although the
+constant velocity baseline performs well for the metrics in
+Tab. 1, it performs poorly in terms of boxplots for certain
+statistics, such as the acceleration of an agent (results not
+shown). This illustrates the importance of using multiple
+performance metrics.
+
+Location heatmaps: Fig. 4 shows the 2d marginal distri-
+bution of the agent locations as a heatmap. These distri-
+butions are generated from the averages of leave-one-out
+conditional generation, i.e., predict an agent’s trajectory
+conditioned on all other agents. Visually it appears that
+GVRNNT-Full better matches the true marginal distribution
+than GVRNNT-Diag and VRNN-Template. We quantify
+this in Tab. 2 where we report on two different divergence
+metrics, symmetric KL and Jensen-Shannon, applied to the
+heatmaps.
+
+Qualitative samples: In Fig. 1, we visualize random sam-
+ples generated from our model. We observe that our ap-
+proach successfully generates a variety of possible trajecto-
+ries, consistent with our expectation that the trajectories are
+multimodal in nature.
+
+Predicting the ball location: Most prior works on bas-
+ketball modeling, such as [10, 43, 44], only predict player
+
+b|x1:t−1
+
+locations. Here we assess the model’s ability to predict
+future ball locations, which is much harder. To visual-
+ize this, we plot the negative log posterior predictive, i.e.,
+− log p(xt
+1:K ), where b is the ball index, for each pos-
+sible ball location (value of xt
+b). This is shown in Fig. 5
+for 3 different models: GVRNNT-Full, GVRNNT-Diag and
+VRNN. Unfortunately these plots are not particularly infor-
+mative, due to the Gaussian assumption of p(xt
+1:K ). A
+more insightful way to measure the predictive ability of la-
+tent variable models is to use the “Bayesian surprise” metric
+of [8], deﬁned as follows:
+
+b|x1:t−1
+
+DKL(qφ(zt|x≤t, z<t)||pθ(zt|x<t, z<t)).
+
+b, xt
+
+This indicates how “surprised” the model is at observing
+xt given past observations x<t. We use xt = (xt
+1:P )
+where we clamp xt
+b to all possible ball locations, and us-
+ing the ground truth locations for the K players. The re-
+sults are shown in Fig. 5 (third row). Without modeling the
+interactions (middle), the surprise as a function of future
+ball location behaves like a Gaussian decay, with a higher
+density along the current velocity direction. However, the
+GVRNNT-full model (left) takes into account the player po-
+sition and models a higher density towards the players. This
+demonstrates that the graph component successfully models
+the agents’ relations.
+
+Counter-factual predictions: Lastly, we assess the abili-
+ties for “counter-factual” reasoning by modifying the ball
+trajectory. In particular, in Fig. 6, we modiﬁed the ground
+truth so that instead of passing the ball (dotted orange tra-
+jectory) to the blue player (top), the pass goes to the green
+player (bottom). We observe that with the GVRNNT-Full
+model, the green player runs towards the ball. Instead, in the
+GVRNNT-Diag and VRNN model, the green player simply
+follows the original trajectory.
+
+4616
+
+Figure 7. Quantitative results for soccer dataset with the distributional metrics evaluated on the offensive players and ball model visualized
+in box-plot, the dashed-line indicates the mean. Refer to the y-axis for the speciﬁc statistic being visualized. The barplots are ordered as
+follows: Ground truth, GVRNNT-Full, GVRNNT-Diag, RNN with template ordering.
+
+Ground truth GVRNNT-Full GRNNT-Full RNN-Template
+Figure 8. Top: Average location of soccer players sampled from
+leave-one-out generation for each model. Bottom: Average lo-
+cation of the ball sampled conditioned on the players from each
+model. We provide quantitative comparisons in Tab. 4.
+
+Approach
+
+RNN-Template
+GRNNT-Full
+GVRNNT-Full
+
+Player-SKL Player-JS Ball-SKL Ball-JS
+0.0708
+0.0571
+0.0535
+
+0.00049
+0.00045
+0.00044
+
+0.2136
+0.1910
+0.1853
+
+0.0018
+0.0016
+0.0017
+
+Table 4. Soccer’s quantitative comparison of each models’
+heatmap with the ground truth evaluated on the offensive players
+and the ball.
+
+4.4. Modelling Soccer Dynamics
+
+To demonstrate the generality of our approach, we apply
+it to the soccer dataset [23]. It contains trajectories of soc-
+cer players and the ball from a professional soccer league’s
+game play. A total of 7500 sequences are in the training and
+the test set. As the split does not contain a validation set, we
+randomly sampled 10% of the training set to be the valida-
+tion set. The sequences are of variable length sampled at
+10Hz. We preprocess the data into segments of length 50
+by using a sliding window with 50% overlap on both the
+training and test set. The trajectories are centered and nor-
+malized to be in the range of [−1, 1]. We do not model the
+goal-keeper as the goal keepers tend to move little.
+Trajectory metrics: We evaluate the predictions for the
+offensive players and the ball. The results are shown in
+Tab. 3. We observe that tree-based ordering performs on
+par with template-based ordering, and permutation equiv-
+ariant models with edge types outperform all baselines.
+Surprisingly, variational models did not outperform non-
+
+variational models on all metrics, unlike for basketball. We
+hypothesize that soccer dynamics, due to the bigger ﬁeld
+and higher sampling rate, contain less stochasticity. Play-
+ers tend to run more linearly compared to basketball, see
+Fig. 1. This is also supported by the results in Tab. 4,
+where we show that the variational model does better than
+the non-variational model at representing the distribution of
+ball locations, which is quite complex, but the two methods
+perform similarly when representing the player locations,
+which is much simpler.
+Distributional metrics: In Fig. 7, we show the boxplots
+of the 8 statistics for the soccer dataset. In general, all 3
+models perform similarly. None of them properly model
+the player’s acceleration, perhaps because rapid accelera-
+tion is a sparse and bursty phenomenon not well captured
+by a Gaussian likelihood.
+Location Heatmaps: In Fig. 8, we show the marginal dis-
+tributions of agent locations as 2d heatmaps. We see that the
+ball is much less predictable than the players. We also see
+that all models capture the player distribution, but the ball
+is best modeled using GVRNNT-Full. This is quantiﬁed in
+Tab. 4.
+
+5. Conclusion
+
+We address the problem of generative modeling for
+multi-agent systems, focusing on sports applications. Mo-
+tivated by the challenges in role-based approaches, we in-
+vestigate permutation-equivariant (graph-based) stochastic
+temporal models. Empirically, we demonstrate the ef-
+fectiveness of each of the proposed components in our
+GVRNNT model. Additionally, we propose several new
+evaluation metrics that quantify the quality of the generated
+samples at a distribution level. These metrics provide addi-
+tional insights beyond the average prediction error in player
+locations and pave the way for future research.
+Acknowledgments: This work is supported in part by NSF under
+Grant No. 1718221, Samsung, 3M and a Google PhD Fellowship
+to RY. We thank NVIDIA for providing GPUs used for this work.
+
+4617
+
+References
+
+[1] A. Alahi, K. Goel, V. Ramanathan, A. Robicquet, L. Fei-Fei,
+and S. Savarese. Social lstm: Human trajectory prediction in
+crowded spaces. In Proc. CVPR, 2016. 4
+
+[2] P. Battaglia, R. Pascanu, M. Lai, D. J. Rezende, et al.
+
+In-
+teraction networks for learning about objects, relations and
+physics. In Proc. NeurIPS, 2016. 4
+
+[3] P. W. Battaglia, J. B. Hamrick, V. Bapst, A. Sanchez-
+Gonzalez, V. Zambaldi, M. Malinowski, A. Tacchetti, D. Ra-
+poso, A. Santoro, R. Faulkner, et al. Relational inductive
+biases, deep learning, and graph networks. arXiv preprint
+arXiv:1806.01261, 2018. 1, 3, 4
+
+[4] S. Becker, R. Hug, W. H¨ubner, and M. Arens. Red: A simple
+but effective baseline predictor for the trajnet benchmark. In
+Proc. ECCV Workshop, 2019. 4, 5
+
+[5] A. Bhattacharyya, B. Schiele, and M. Fritz. Accurate and di-
+verse sampling of sequences based on a best of many sample
+objective. In Proc. CVPR, 2018. 1, 6
+
+[6] K. Cho, B. Van Merri¨enboer, C. Gulcehre, D. Bahdanau,
+F. Bougares, H. Schwenk, and Y. Bengio. Learning phrase
+representations using RNN encoder-decoder for statistical
+machine translation. arXiv preprint arXiv:1406.1078, 2014.
+5
+
+[7] J. Chung, K. Kastner, L. Dinh, K. Goel, A. C. Courville, and
+Y. Bengio. A recurrent latent variable model for sequential
+data. In Proc. NeurIPS, 2015. 1, 2, 4
+
+[8] S. A. Eslami, D. J. Rezende, F. Besse, F. Viola, A. S. Mor-
+cos, M. Garnelo, A. Ruderman, A. A. Rusu, I. Danihelka,
+K. Gregor, et al. Neural scene representation and rendering.
+Science, 2018. 7
+
+[9] P. Felsen, P. Agrawal, and J. Malik. What will happen next?
+forecasting player moves in sports videos. In Proc. ICCV,
+2017. 4
+
+[10] P. Felsen, P. Lucey, and S. Ganguly. Where will they go?
+predicting ﬁne-grained adversarial multi-agent motion using
+conditional variational autoencoders. In Proc. ECCV, 2018.
+1, 3, 4, 7
+
+[11] V. Flunkert, D. Salinas, and J. Gasthaus. DeepAR: Prob-
+abilistic forecasting with autoregressive recurrent networks.
+Apr. 2017. 4
+
+[12] M. Fraccaro, S. K. Sønderby, U. Paquet, and O. Winther.
+In Proc.
+
+Sequential neural models with stochastic layers.
+NeurIPS, 2016. 4
+
+[13] J. Gilmer, S. S. Schoenholz, P. F. Riley, O. Vinyals, and G. E.
+In
+
+Dahl. Neural message passing for quantum chemistry.
+Proc. ICML, 2017. 4
+
+[14] X. Glorot and Y. Bengio. Understanding the difﬁculty of
+In Proc. AIS-
+
+training deep feedforward neural networks.
+TATS, 2010. 5
+
+[15] A. Gupta, J. Johnson, L. Fei-Fei, S. Savarese, and A. Alahi.
+Social gan: Socially acceptable trajectories with generative
+adversarial networks. In Proc. CVPR, 2018. 4
+
+[16] Y. Hoshen. Vain: Attentional multi-agent predictive model-
+
+ing. In Proc. NeurIPS, 2017. 4
+
+[17] W.-N. Hsu, Y. Zhang, and J. Glass. Unsupervised learning of
+disentangled and interpretable representations from sequen-
+tial data. In Proc. NeurIPS, 2017. 4
+
+[18] D. P. Kingma and J. Ba. Adam: A method for stochastic
+
+optimization. In Proc. ICLR, 2015. 5
+
+[19] D. P. Kingma and M. Welling. Auto-Encoding Variational
+
+Bayes. In Proc. ICLR, 2014. 2
+
+[20] T. Kipf, E. Fetaya, K.-C. Wang, M. Welling, and R. Zemel.
+Neural relational inference for interacting systems. In Proc.
+ICML, 2018. 4
+
+[21] T. N. Kipf and M. Welling. Semi-supervised classiﬁcation
+with graph convolutional networks. In Proc. ICLR, 2017. 4
+[22] R. G. Krishnan, U. Shalit, and D. Sontag. Structured infer-
+In Proc.
+
+ence networks for nonlinear state space models.
+AAAI, 2017. 4
+
+[23] H. M. Le, Y. Yue, and P. Carr. Coordinated multi-agent imi-
+
+tation learning. In Proc. ICML, 2017. 1, 4, 8
+
+[24] N. Lee, W. Choi, P. Vernaza, C. B. Choy, P. H. Torr, and
+M. Chandraker. Desire: Distant future prediction in dynamic
+scenes with interacting agents. In Proc. CVPR, 2017. 4
+
+[25] N. Lee and K. M. Kitani. Predicting wide receiver trajecto-
+
+ries in american football. In Proc. WACV, 2016. 4
+
+[26] S. Lee, S. Purushwalkam Shiva Prakash, M. Cogswell,
+V. Ranjan, D. Crandall, and D. Batra. Stochastic multiple
+choice learning for training diverse deep ensembles. In Proc.
+NeurIPS. 1, 6
+
+[27] P. Lucey, A. Bialkowski, P. Carr, S. Morgan, I. Matthews,
+and Y. Sheikh. Representing and discovering adversarial
+team behaviors using player roles.
+In Proc. CVPR, 2013.
+3, 4
+
+[28] C. R. Qi, H. Su, K. Mo, and L. J. Guibas. Pointnet: Deep
+learning on point sets for 3d classiﬁcation and segmentation.
+In Proc. CVPR, 2017. 4
+
+[29] T. Rainforth, A. R. Kosiorek, T. A. Le, C. J. Maddison,
+M. Igl, F. Wood, and Y. W. Teh. Tighter variational bounds
+are not necessarily better. In Proc. ICML, 2018. 5
+
+[30] A. Robicquet, A. Sadeghian, A. Alahi, and S. Savarese.
+Learning social etiquette: Human trajectory understanding
+in crowded scenes. In Proc. ECCV, 2016. 4
+
+[31] C. Rupprecht, I. Laina, R. DiPietro, M. Baust, F. Tombari,
+N. Navab, and G. D. Hager. Learning in an uncertain world:
+Representing ambiguity through multiple hypotheses.
+In
+Proc. ICCV, 2017. 1, 6
+
+[32] A. Sadeghian, V. Kosaraju, A. Gupta, S. Savarese, and
+A. Alahi. Trajnet: Towards a benchmark for human trajec-
+tory prediction. arXiv preprint, 2018. 4
+
+[33] F. Scarselli, M. Gori, A. C. Tsoi, M. Hagenbuchner, and
+G. Monfardini. The graph neural network model. Trans.
+on Neural Networks, 2009. 4
+
+[34] L. Sha, P. Lucey, S. Zheng, T. Kim, Y. Yue, and S. Sridha-
+ran. Fine-grained retrieval of sports plays using tree-based
+alignment of trajectories. arXiv preprint arXiv:1710.02255,
+2017. 3, 4, 5
+
+[35] L. Theis, A. van den Oord, and M. Bethge. A note on the
+
+evaluation of generative models. In ICLR, 2016. 1
+
+[36] P. Velickovic, G. Cucurull, A. Casanova, A. Romero, P. Lio,
+and Y. Bengio. Graph attention networks. In Proc. ICLR,
+2018. 3, 4
+
+[37] J. Walker, C. Doersch, A. Gupta, and M. Hebert. An uncer-
+tain future: Forecasting from static images using variational
+autoencoders. In ECCV, 2016. 4
+
+[38] K.-C. Wang and R. Zemel. Classifying nba offensive plays
+using neural networks. In Proceedings of MIT Sloan Sports
+Analytics Conference, 2016. 4
+
+[39] R. J. Williams and D. Zipser. A learning algorithm for con-
+
+4618
+
+tinually running fully recurrent neural networks. Neural
+computation, 1989. 5
+
+[40] Y. Xu, Z. Piao, and S. Gao. Encoding crowd interaction with
+deep neural network for pedestrian trajectory prediction. In
+Proc. CVPR, 2018. 4
+
+[41] Y. Yue, P. Lucey, P. Carr, A. Bialkowski, and I. Matthews.
+Learning ﬁne-grained spatial models for dynamic sports play
+prediction. In Proc. ICDM, 2014. 1, 6
+
+[42] M. Zaheer, S. Kottur, S. Ravanbakhsh, B. Poczos, R. R.
+In Proc.
+
+Salakhutdinov, and A. J. Smola. Deep sets.
+NeurIPS, 2017. 3, 4
+
+[43] E. Zhan, S. Zheng, Y. Yue, and P. Lucey. Generative multi-
+agent behavioral cloning. arXiv preprint arXiv:1803.07612,
+2018. 4, 6, 7
+
+[44] S. Zheng, Y. Yue, and J. Hobbs. Generating long-term trajec-
+tories using deep hierarchical networks. In Proc. NeurIPS,
+2016. 1, 4, 7
+
+4619
+
+

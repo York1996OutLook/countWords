@@ -1,0 +1,1359 @@
+Scene Graph Generation with External Knowledge and Image Reconstruction
+
+Jiuxiang Gu1 ∗, Handong Zhao2, Zhe Lin2, Sheng Li3, Jianfei Cai1, Mingyang Ling4
+
+1 ROSE Lab, Interdisciplinary Graduate School, Nanyang Technological University, Singapore
+
+2 Adobe Research, USA 3 University of Georgia, USA 4 Google Cloud AI, USA
+
+{jgu004, asjfcai}@ntu.edu.sg, {hazhao, zlin}@adobe.com
+
+sheng.li@uga.edu, mingyangling@google.com
+
+Abstract
+
+Scene graph generation has received growing atten-
+tion with the advancements in image understanding tasks
+such as object detection, attributes and relationship predic-
+tion, etc. However, existing datasets are biased in terms
+of object and relationship labels, or often come with noisy
+and missing annotations, which makes the development of
+a reliable scene graph prediction model very challenging.
+In this paper, we propose a novel scene graph generation
+algorithm with external knowledge and image reconstruc-
+tion loss to overcome these dataset issues. In particular, we
+extract commonsense knowledge from the external knowl-
+edge base to reﬁne object and phrase features for improving
+generalizability in scene graph generation. To address the
+bias of noisy object annotations, we introduce an auxiliary
+image reconstruction path to regularize the scene graph
+generation network. Extensive experiments show that our
+framework can generate better scene graphs, achieving the
+state-of-the-art performance on two benchmark datasets:
+Visual Relationship Detection and Visual Genome datasets.
+
+1. Introduction
+
+With recent breakthroughs in deep learning and image
+recognition, higher-level visual understanding tasks, such
+as visual relationship detection, has been a popular research
+topic [9, 19, 15, 40, 44]. Scene graph, as an abstraction of
+objects and their complex relationships, provides rich se-
+mantic information of an image. It involves the detection
+of all hsubject-predicate-objecti triplets in an image and the
+localization of all objects. Scene graph provides a struc-
+tured representation of an image that can support a wide
+range of high-level visual tasks, including image caption-
+ing [12, 14, 13, 43], visual question answering [36, 38, 47],
+image retrieval [11, 21], and image generation [20]. How-
+
+∗This work was done during the author’s internship at Adobe Research.
+
+Figure 1: Conceptual illustration of our scene graph learn-
+ing model. The left (green) part illustrates the image to
+scene graph generation, the right (blue) part illustrates the
+image-level regularizer that reconstructs the image based
+on object labels and bounding boxes. The commonsense
+knowledge reasoning (top) is introduced to the scene graph
+generation process.
+
+ever, it is not easy to extract scene graphs from images,
+since it involves not only detecting and localizing pairs of
+interacting objects but also recognizing their pairwise rela-
+tionships. Currently, there are two categories of approaches
+for scene graph generation. Both categories group object
+proposals into pairs and use the phrase features (features of
+their union area) for predicate inference. The difference of
+the two categories lies in the different procedures. The ﬁrst
+category detects the objects ﬁrst and then recognizes the re-
+lationships between those objects [5, 28, 29]. The second
+category jointly identiﬁes the objects and their relationships
+based on the object and relationship proposals [27, 25, 37].
+
+Despite the promising progress introduced by these ap-
+proaches, most of them suffer from the limitations of ex-
+isting scene graph datasets. First, to comprehensively de-
+pict an image using the scene graph, it requires a wide
+variety of relation triplets hsubject-predicate-objecti. Un-
+fortunately, current datasets only capture a small portion
+of the knowledge [29], e.g., Visual Relationship Detection
+(VRD) dataset. Training on such a dataset with long-tail
+
+1969
+
+distributions will cause the prediction model bias towards
+those most-frequent relationships. Second, predicate la-
+bels are highly determined by the identiﬁcation of object
+pairs [46]. However, due to the difﬁculty of exhaustively
+labeling bounding boxes of all instances of each object,
+the current large-scale crowd-sourced datasets like Visual
+Genome (VG) [22] are contaminated by noises (e.g., miss-
+ing annotations and meaningless proposals). Such a noisy
+dataset will inevitably result in a poor performance of the
+trained object detector [3], which further hinders the perfor-
+mance of predicate detection.
+
+For human beings, we are capable of reasoning over
+visual elements of an image based on our commonsense
+knowledge. For example, in Figure 1, humans have the
+background knowledge:
+the subject (woman) appears /
+stands on something; the object (snow) enhances the evi-
+dence of the predicate (skiing). Commonsense knowledge
+can also help correct object detection. For example, the spe-
+ciﬁc external knowledge for skiing beneﬁts inference of the
+object (snow) as well. This motivates us to leverage com-
+monsense knowledge to help scene graph generation.
+
+Meanwhile, despite the crucial role of object labels for
+relationship prediction, existing datasets are very noisy due
+to the signiﬁcant amount of missing object annotations.
+However, our goal is to obtain scene graphs with more com-
+plete scene representation. Motivated by this goal, we regu-
+larize our scene graph generation network by reconstructing
+the image from detected objects. Considering the case in
+Figure 1, a method might recognize snow as grass by mis-
+take. If we generate an image based on the falsely predicted
+scene graph, this minor error would be heavily penalized,
+even though most of the snow’s relationships might be cor-
+rectly identiﬁed.
+
+The contributions of this paper are threefold. 1) We
+propose a knowledge-based feature reﬁnement module to
+incorporate commonsense knowledge from an external
+knowledge base. Speciﬁcally, the module extracts useful in-
+formation from ConceptNet [35] to reﬁne object and phrase
+features before scene graph generation. We exploit Dy-
+namic Memory Network (DMN) [23] to implement multi-
+hop reasoning over the retrieved facts and infer the most
+probable relations accordingly. 2) We introduce image-level
+supervision module by reconstructing the image to regular-
+ize our scene graph generation model. We view this aux-
+iliary branch as a regularizer, which is only present dur-
+ing training. 3) We conduct extensive experiments on two
+benchmark datasets: VRD and VG datasets. Our empiri-
+cal results demonstrate that our approach can signiﬁcantly
+improve the state-of-the-art on scene graph generation.
+
+2. Related Works
+
+Incorporating Knowledge in Neural Networks. There
+has been growing interest in improving data-driven mod-
+
+els with external Knowledge Bases (KBs) in natural lan-
+guage processing [17, 4] and computer vision communi-
+ties [24, 1, 6]. Large-scale structured KBs are constructed
+either by manual effort (e.g., Wikipedia, DBpedia [2]), or by
+automatic extraction from unstructured or semi-structured
+data (e.g., ConceptNet). One direction to improve the data-
+driven model is to distill external knowledge into Deep Neu-
+ral Networks [39, 45, 18]. Wu et al. [38] encode the mined
+knowledge from DBpedia [2] into a vector and combine
+it with visual features to predict answers.
+Instead of ag-
+gregating the textual vectors with average-pooling opera-
+tion [38], Li et al. [24] distill the retrieved context-relevant
+external knowledge triplet through a DMN for open-domain
+visual question answering. Unlike [38, 24], Yu et al. [45]
+extract linguistic knowledge from training annotations and
+Wikipedia, and distill knowledge to regularize training and
+provide extra cues for inference. A teacher-student frame-
+work is adopted to minimize the KL-divergence of the pre-
+diction distributions of teacher and student.
+
+Visual Relationship Detection. Visual relationship de-
+tection has been investigated by many works in the last
+decade [21, 8, 7, 31]. Lu et al. [29] introduce generic vi-
+sual relationship detection as a visual task, where they de-
+tect objects ﬁrst, and then recognize predicates between ob-
+ject pairs. Recently, some works have explored the mes-
+sage passing for context propagation and feature reﬁne-
+ment [41, 27]. Xu et al. [41] construct the scene graph by re-
+ﬁning the object and relationship features jointly with mes-
+sage passing. Dai et al. [5] exploit the statistical dependen-
+cies between objects and their relationships and reﬁne the
+posterior probabilities iteratively with a Conditional Ran-
+dom Field (CRF) network. More recently, Zeller et al. [46]
+achieve a strong baseline by predicting relationships with
+frequency priors. To deal with the large number of poten-
+tial relations between objects, Yang et al. [42] propose a re-
+lation proposal network that prunes out uncorrelated object
+pairs, and captures the contextual information with an atten-
+tional graph convolutional network. In [25], they propose a
+clustering method which factorizes the full graph into sub-
+graphs, where each subgraph is composed of several objects
+and a subset of their relationships.
+
+Most related to our work are the approaches proposed
+by Li et al. [25] and Yu et al. [45]. Unlike [25], which fo-
+cuses on the efﬁcient scene graph generation, our approach
+addresses the long tail distribution of relationships by com-
+monsense cues along with visual cues. Unlike [45], which
+leverages linguistic knowledge to regularize the network,
+our knowledge-based module improves the feature reﬁn-
+ing procedure by reasoning over a basket of commonsense
+knowledge retrieved from ConceptNet.
+
+1970
+
+Figure 2: Overview of the proposed scene graph generation framework. The left part generates a scene graph from the input
+image. The right part is an auxiliary image-level regularizer which reconstructs the image based on the detected object labels
+and bounding boxes. After training, we discard the image reconstruction branch.
+
+3. Methodology
+
+Figure 2 gives an overview of our proposed scene graph
+generation framework. The entire framework can be di-
+vided into the following steps: (1) generate object and sub-
+graph proposals for a given image; (2) reﬁne object and
+subgraph features with external knowledge; (3) generate
+the scene graph by recognizing object categories with ob-
+ject features and recognizing object relations by fusing sub-
+graph features and object feature pairs; (4) reconstruct the
+input image via an additional generative path. During train-
+ing, we use two types of supervisions: scene graph level
+supervision and image-level supervision. For scene graph
+level supervision, we optimize our model by guiding the
+generated scene graph with the ground truth object and
+predicate categories. The image-level supervision is intro-
+duced to overcome the aforementioned missing annotations
+by reconstructing the image from objects and enforcing the
+reconstructed image close to the original image.
+
+3.1. Proposal Generation
+
+Object Proposal Generation. Given an image I, we
+ﬁrst use the Region Proposal Network (RPN) [33] to extract
+a set of object proposals:
+
+[o0, · · · , oN −1] = fRPN(I)
+
+(1)
+
+where fRPN(·) stands for the RPN module, and oi is the
+i-th object proposal represented by a bounding box ri =
+[xi, yi, wi, hi] with (xi, yi) being the coordinates of the top
+left corner and wi and hi being the width and the height
+of the bounding box, respectively. For any two different
+objects hoi, oji, there are two possible relationships in op-
+posite directions. Thus, for N object proposals, there are
+totally N (N − 1) potential relations. Although more ob-
+ject proposals lead to a bigger scene graph, the number of
+potential relations will increase dramatically, which signiﬁ-
+cantly increases the computational cost and deteriorates the
+
+inference speed. To address this issue, subgraph is intro-
+duced in [25] to reduce the number of potential relations by
+clustering.
+
+Subgraph Proposal Construction. We adopt the clus-
+tering approach proposed in [25]. In particular, for a pair of
+object proposals, a subgraph proposal is constructed as the
+union box with the conﬁdence score being the product of the
+scores of the two object proposals. Then, subgraph propos-
+als are suppressed by non-maximum-suppression (NMS).
+In this way, a candidate relation can be represented by two
+objects and one subgraph: hoi, oj, si
+ki, where i 6= j and
+si
+k is the k-th subgraph of all the subgraphs associated with
+oi, which contains oj as well as some other object propos-
+als. Following [25], we represent a subgraph and an object
+as a feature map, si
+k ∈ RD×Ks×Ks , and a feature vector,
+oi ∈ RD, respectively, where D and Ks are the dimensions.
+
+3.2. Feature Reﬁnement with External Knowledge
+
+Object and Subgraph Inter-reﬁnement. Considering
+that each object oi is connected to a set of subgraphs Si and
+each subgraph sk is associated with a set of objects Ok, we
+reﬁne the object vector (resp.
+the subgraph) by attending
+the associated subgraph feature maps (resp. the associated
+object vectors):
+
+¯oi =oi + fs→o
+
+¯sk =sk + fo→s
+
+si
+k∈Si
+
+
+ X
+
+ X
+
+ok
+
+i ∈Ok
+
+αs→o
+
+k
+
+· si
+k
+
+αo→s
+
+i
+
+· ok
+i
+
+
+
+
+
+
+(2)
+
+(3)
+
+i
+
+k
+
+(resp. αo→s
+
+where αs→o
+) is the output of a softmax layer
+indicating the weight for passing si
+i ) to oi (resp.
+sk), and fs→o and fo→s are non-linear mapping functions.
+This part is similar to [25]. Note that due to different di-
+mensions of oi and sk, pooling or spatial location based at-
+tention needs to be respectively applied for s → o or o → s
+
+k (resp. ok
+
+1971
+
+sentation for the k-th retrieved sentence or fact, denoted as
+f i
+k for object oi.
+
+Attention-based Knowledge Fusion. The knowledge
+units are stored in memory slots for reasoning and updating.
+Our target is to incorporate the external knowledge into the
+procedure of feature reﬁning. However, for N objects, we
+have N × K relevant fact vectors in memory slots. This
+makes it difﬁcult to distill the useful information from the
+candidate knowledge when N × K is large. DMN [23] pro-
+vides a mechanism to pick out the most relevant facts by us-
+ing an episodic memory module. Inspired by this, we adopt
+the improved DMN [39] to reason over the retrieved facts
+F, where F denotes the set of fact embedding {fk}. It con-
+sists of an attention component which generates a contex-
+tual vector using the episode memory mt−1. Speciﬁcally,
+we feed the object vector ¯o to a non-linear fully-connected
+layer and attend the facts as follows:
+
+q = tanh(Wq¯o + bq)
+zt =[F ◦ q; F ◦ mt−1; |F − q|; |F − mt−1|]
+gt =softmax(W1 tanh(W2zt + b2) + b1)
+et =AGRU(F, gt)
+
+(6)
+
+(7)
+
+(8)
+
+(9)
+
+where zt is the interactions between the facts F, the episode
+memory mt−1 and the mapped object vector q, gt is the
+output of a softmax layer, ◦ is the element-wise product, | · |
+is the element-wise absolute value, and [ ; ] is the concate-
+nation operation. Note that q and m need to be expanded
+via duplication in order to have the same dimension as F
+for the interactions. In (9), AGRU(·) refers to the Attention
+based GRU [39] which replaces the update gate in GRU
+with the output attention weight gt
+
+k for fact k:
+
+et
+k =gt
+
+kGRU(fk, et
+
+k−1) + (1 − gt
+
+k)et
+
+k−1
+
+(10)
+
+where et
+of the GRU after all the K sentences have been seen.
+
+K is the ﬁnal state of the episode which is the state
+
+After one pass of the attention mechanism, the memory
+is updated using the current episode state and the previous
+memory state:
+
+mt = ReLU(Wm[mt−1; et
+
+K; q] + bm).
+
+(11)
+
+where mt is the new episode memory state. By the ﬁnal
+pass Tm, the episodic memory mTm−1 can memorizes use-
+ful knowledge information for relationship prediction.
+
+The ﬁnal episodic memory mTm−1 is passed to reﬁne
+
+the object feature ¯o as
+
+Figure 3: Illustration of our proposed knowledge-based fea-
+ture reﬁnement module. Given the object labels, we retrieve
+the facts (or symbolic triplets) from the ConceptNet (bot-
+tom), and then reason those facts with dynamic memory
+network using two passes (top right).
+
+reﬁnement. Interested readers are referred to [25] for de-
+tails.
+
+Knowledge Retrieval and Embedding. To address the
+relationship distribution bias of the current visual relation-
+ship datasets, we propose a novel feature reﬁnement net-
+work to further improve the feature representation by tak-
+ing advantage of the commonsense relationships in external
+knowledge base (KB). In particular, we predict the object
+label ai from the reﬁned object vector ¯oi, and match ai with
+the corresponding semantic entities in KB. Afterwards, we
+retrieve the corresponding commonsense relationships from
+KB using the object label ai:
+
+ai
+
+retrieve−→ hai, ar
+
+i,j, ao
+
+j , wi,ji, j ∈ [0, K − 1]
+
+(4)
+
+i,j , ao
+
+where ar
+j and wi,j are the top-K corresponding re-
+lationships, the object entity and the weight, respectively.
+Note that the weight wi,j is provided by KB (i.e., Concept-
+Net [35]), indicating how common a triplet hai, ar
+j i is.
+Based on the weight wi,j , we can identify the top-K most
+common relationships for ai. Figure 3 illustrates the pro-
+cess of our proposed knowledge-based feature reﬁnement
+module.
+
+i,j, ao
+
+To encode the retrieved commonsense relationships, we
+ﬁrst transform each symbolic triplet hai, ar
+j i into a se-
+[X 0, · · · , X Ta−1], and then map each
+quence of words:
+word in the sentence into a continuous vector space with
+word embedding xt = WeX t. The embedded vectors are
+then fed into an RNN-based encoder [39] as
+
+i,j, ao
+
+ht
+k = RNNfact(xt
+
+k, ht−1
+
+k
+
+), t ∈ [0, Ta − 1]
+
+(5)
+
+˜o = ReLU(Wc[¯o; mTm−1] + bc)
+
+(12)
+
+where xt
+k is the t-th word embedding of the k-th sentence,
+and ht
+k is the hidden state of the encoder. We use a bi-
+directional Gated Recurrent Unit (GRU) for RNNfact and
+the ﬁnal hidden state hTa−1
+is treated as the vector repre-
+
+k
+
+where Wc and bc are parameters to be learned. In partic-
+ular, we reﬁne objects with KB via (12) as well as jointly
+reﬁning objects and subgraphs by replacing {oi, si} with
+{˜oi, ¯si} in (2) and (3), in an iterative fashion (see Alg. 1).
+
+1972
+
+3.4. Image Generation
+
+To better regularize the networks, an object-to-image
+generative path is added. Figure 4 depicts our proposed
+object-to-image generation module Geno2i.
+In particular,
+we ﬁrst compute a scene layout based on the object labels
+and their corresponding locations. For each object i, we
+expand the object embedding vectors oi ∈ RD to shape
+D × 8 × 8, and then wrap it to the position of the bounding
+box ri using bilinear interpolation to give an object layout
+olayout
+∈ RD×H×W , where D is the dimension of the em-
+i
+bedding vectors for objects and H × W = 64 × 64 is the
+output image resolution. We sum all object layouts to obtain
+
+the scene layout Slayout = Pi olayout
+
+i
+
+.
+
+Given the scene layout, we synthesize an image that re-
+spects the object positions with an image generator G. Here,
+we adopt a cascaded reﬁnement network [20] which con-
+sists of a series of convolutional reﬁnement modules to gen-
+erate the image. The spatial resolution doubles between the
+convolutional reﬁnement modules. This allows the genera-
+tion to proceed in a coarse-to-ﬁne manner. For each mod-
+ule, it takes two inputs. One is the output from the pre-
+vious module (the ﬁrst module takes Gaussian noise), and
+the other one is the scene layout Slayout, which is downsam-
+pled to the input resolution of the module. These inputs are
+concatenated channel-wisely and passed to a pair of 3 × 3
+convolution layers. The outputs are then upsampled using
+nearest-neighbor interpolation before being passed to the
+next module. The output from the last module is passed
+to two ﬁnal convolution layers to produce the output image.
+In addition to the common
+pixel reconstruction loss Lpixel, we also adopt a conditional
+GAN loss [32], considering the image is generated based
+on the objects. In particular, we train the discriminator Di
+and the generator Gi by alternatively maximizing LDi in
+Eq. (16) and LGi in Eq. (17):
+
+Image-level Supervision.
+
+LDi =EI∼preal[log Di(I)]
+LGi =E ˆI∼pG
+
+[log(1 − Di(ˆI)] + λpLpixel
+
+(16)
+
+(17)
+
+where λp is the tuning parameter. For the generator loss,
+we maximize log Di(Gi(z|Slayout)) rather than minimizing
+the original log(1 − Di(Gi(z|Slayout))) for better gradient
+behavior. For the pixel reconstruction loss, we calculate the
+ℓ1 distance between the real image I and a corresponding
+synthetic image ˆI as ||I − ˆI||1.
+
+As shown in Figure 2, we view the object-to-image gen-
+eration branch as a regularizer. It can be seen as a corrective
+model for scene graph generation by improving the perfor-
+mance of object detection. During training, backpropaga-
+tion from losses (15), (16), and (17) inﬂuences the model
+parameter updates. This image-level supervision can be
+seen as a corrective model for scene graph generation by
+improving the performance of object detection. The gradi-
+
+1973
+
+Figure 4: Illustration of our proposed object-to-image gen-
+eration module Geno2i.
+
+3.3. Scene Graph Generation
+
+Relation Prediction. After the feature reﬁnement, we
+can predict object labels as well as predicate labels with the
+reﬁned object and subgraph features. For object label, we
+can predict it directly with the object features. For rela-
+tionship label, as the subgraph feature is related to several
+object pairs, we predict the label based on subject and ob-
+ject feature vectors along with their corresponding subgraph
+feature map. We formulate the inference process as
+
+Pi,j ∼softmax(frel([˜oi ⊗ ¯sk; ˜oj ⊗ ¯sk; ¯sk]))
+
+Vi ∼softmax(fnode(˜oi))
+
+(13)
+
+(14)
+
+where frel(·) and fnode(·) denote the mapping layers for
+predicate and object recognition, respectively, and ⊗ de-
+notes the convolution operation [25]. Then, we can con-
+struct the scene graph as: G = hVi, Pi,j, Vji, i 6= j.
+
+Scene Graph Level Supervision.
+
+Like other ap-
+proaches [26, 25, 37], during training we want the gener-
+ated scene graph close to the ground-truth scene graph by
+optimizing the scene graph generation process with object
+detection loss and relationship classiﬁcation loss
+
+Lim2sg = λpredLpred + λobjLobj + λreg1u≥1Lreg
+
+(15)
+
+where Lpred, Lobj and Lreg are the predicate classiﬁcation
+loss, the object classiﬁcation loss and the bounding box re-
+gression loss, respectively, λobj, λpred and λreg are hyper-
+parameters, and 1 is the indicator function with u being the
+object label, u ≥ 1 for object categories and u = 0 for
+background.
+
+For the predicate detection, the output is the probability
+over all the candidate predicates. Lpred is deﬁned as the
+softmax loss. Like the predicate classiﬁcation, the output
+of the object detection is the probability over all the object
+categories. Lcls is also deﬁned as the softmax loss. For
+the bounding box regression loss Lreg, we use smooth L1
+loss [33].
+
+4:
+
+5:
+
+6:
+
+7:
+
+8:
+
+9:
+
+10:
+
+11:
+
+12:
+
+ents back-propagated from the object-to-image branch up-
+date the parameters of our object detector and the feature
+reﬁnement module which is followed by the relation pre-
+diction.
+
+Alg. 1 summarizes the entire training procedure.
+
+Algorithm 1 Training procedure.
+
+Input: Image I, number of training steps Ts.
+
+1: Pretrain image generation module Geno2i (GT objects)
+2: for t = 0 : Tm − 1 do
+3:
+
+Get objects and relationship triples.
+Proposal Generation: (O, S) ← I {RPN}
+/*Knowledge-based Feature Reﬁning*/
+for r = 0 : Tr − 1 do
+
+¯oi ← {oi, Si} /*Reﬁning using (2)*/
+¯sk ← {sk, Ok} /*Reﬁning using (3)*/
+˜oi ← {F, ¯oi} /*Reﬁning using (12)*/
+oi ← ˜oi, si ← ¯si
+
+end for
+Update parameters with Geno2i (predicted objects)
+Update parameters with (15)
+
+13:
+14: end for
+Function: Geno2i
+Input: Real image I, objects (GT / predicted).
+1: Object Layout Generation: olayout
+i ← {oi, ri}
+2: Scene Layout Generation: Slayout = Pi olayout
+3: Image Reconstruction: ˆI = Gi(z, Slayout)
+4: Update image generator Gi parameters using (17).
+5: Update image discriminator Di parameters using (16).
+
+i
+
+4. Experiments
+
+4.1. Datasets
+
+We evaluate our approach on two datasets: VRD [29]
+and VG [26]. VRD is the most widely used benchmark
+dataset for visual relationship detection. Compared with
+VRD, the raw VG [22] contains a large number of noisy
+labels. In our experiment, we use a cleansed-version VG-
+MSDN in [26]. Detailed statistics of both datasets are
+shown in Table 1.
+
+For the external KB, we employ the English subgraph
+of ConceptNet [35] as our knowledge graph. ConceptNet
+is a large-scale graph of general knowledge which aims to
+align its knowledge resources on its core set of 40 relations.
+A large portion of these relation types can be considered
+as visual relations, such as, spatial co-occurrence (e.g., At-
+Location, LocatedNear), visual properties of objects (e.g.,
+HasProperty, PartOf ), and actions (e.g., CapableOf, Used-
+For).
+
+4.2. Implementation Details
+
+As shown in Alg. 1, we train our model in two phrases.
+The initial phase looks only at the object annotations of
+
+Table 1: Dataset statistics. #Img and #Rel denote the num-
+ber of images and relation pairs respectively, #Obj denotes
+the number of object categories, and #Pred denotes the
+number of predicate categories.
+
+Training Set
+
+Testing Set
+
+Dataset
+
+#Rel
+
+#Img
+#Rel
+4,000 30,355 1,000 7,638
+
+#Img
+
+VRD [29]
+100 70
+VG-MSDN [26] 46,164 507,296 10,000 111,396 150 50
+
+#Obj #Pred
+
+the training set, ignoring the relationship triplets. For each
+dataset, we ﬁlter the objects according to the category and
+relation vocabularies in Table 1. We then learn an image-
+level regularizer that reconstructs the image based on the
+object labels and bounding boxes. The output size of the
+image generator is 64 × 64 × 3, and the real image is resized
+before inputting to the discriminator. We train the regular-
+izer with learning rate 10−4 and batch size 32. For each
+mini-batch we ﬁrst update Gi, and then update Di.
+
+The second phase jointly trains the scene graph gener-
+ation model and the auxiliary reconstruction branch. We
+adopt the Faster R-CNN [33] associated with VGG-16 [34]
+as the backbone. During training, the number of object pro-
+posals is 256. For each proposal, we use ROI align [16]
+pooling to generate object and subgraph features. The sub-
+graph regions are pooled to 5 × 5 feature maps. The dimen-
+sion D of the pooled object vector and the subgraph fea-
+ture map is set to 512. For the knowledge-based reﬁnement
+module, we set the dimension of word embedding to 300
+and initialize it with the GloVe 6B pre-trained word vec-
+tors [30]. We keep the top-8 commonsense relationships.
+The number of hidden units of the fact encoder is set to 300,
+and the dimension of episodic memory is set to 512. The it-
+eration number Tm of DMN update is set to 2. For the rela-
+tion inference module, we adopt the same bottleneck layer
+as [25]. All the newly introduced layers are randomly ini-
+tialized except the auxiliary regularizer. We set λpred = 2.0,
+λcls = 1.0, and λreg = 0.5 in Eq (15). The hyperparam-
+eter λp in Eq (17) is set to 1.0. The iteration number Tr
+of the feature reﬁnement is set to 2. We ﬁrst train RPNs
+and then jointly train the entire network. The initial learn-
+ing rate is 0.01, decay rate is 0.1, and stochastic gradient
+descent (SGD) is used as the optimizer. We deploy weight
+decay and dropout to prevent over-ﬁtting.
+
+During testing, the image reconstruction branch will be
+discarded. We respectively set the RPN non-maximum sup-
+pression (NMS) [33] threshold to 0.6 and subgraph cluster-
+ing [25] threshold to 0.5. We output all the predicates and
+use the top-1 category as the prediction for objects and re-
+lations. Models are evaluated on two tasks: Visual Phrase
+Detection (PhrDet) and Scene Graph Generation (SGGen).
+PhrDet is to detect the hsubject-predicate-objecti phrases.
+SGGen is to detect the objects within the image and rec-
+ognize their pairwise relationships. Following [29, 25],
+
+1974
+
+the Top-K Recall (denoted as Rec@K) is used as the per-
+formance metric; it calculates how many labeled relation-
+ships are hit in the top K predictions. In our experiments,
+Rec@50 and Rec@100 are reported. Note that, Li et al. [26]
+and Yang et al. [42] reported the results on two more met-
+rics: Predicate Recognition and Phrase Recognition. These
+two evaluation metrics are based on ground-truth object lo-
+cations, which is not the case we consider. In our setting,
+we use detected objects for image reconstruction and scene
+graph generation. To be consistent with the training, we
+choose PhrDet and SGGen as the evaluation metrics, which
+is also more practical.
+
+4.3. Baseline Approaches for Comparisons
+
+Baseline. This baseline model is the re-implementation of
+Factorizable Net [25]. We re-train it based on our backbone.
+Speciﬁcally, we use the same RPN model, and jointly train
+the scene graph generator until convergence.
+KB. This model is a KB-enhanced version of the base-
+line model. External knowledge triples are incorporated in
+DMN. The explicit knowledge-based reasoning is incorpo-
+rated in the feature reﬁning procedure.
+GAN. This model improves the baseline model by attaching
+an auxiliary branch that generates the image from objects
+with GAN. We train this model in two phases. The ﬁrst
+phase trains the image reconstruction branch only with the
+object annotations. Then we reﬁne the model jointly with
+the scene graph generation model.
+KB-GAN. This is our full model containing both KB and
+GAN. It is initialized with the trained parameters from KB
+and GAN, and ﬁne-tuned with Alg. 1.
+
+4.4. Quantitative Results
+
+In this section, we present our quantitative results and
+analysis. To verify the effectiveness of our approach and an-
+alyze the contribution of each component, we ﬁrst compare
+different baselines in Table 2, and investigate the improve-
+ment in recognizing objects in Table 3. Then, we conduct a
+simulation experiment on VRD to investigate the effective-
+ness of our auxiliary regularizer in Table 4. The comparison
+of our approach with the state-of-the-art methods is reported
+in Table 5.
+Component Analysis. In our framework, we proposed two
+novel modules – KB-based feature reﬁnement (KB) and
+auxiliary image generation (GAN). To get a clear sense of
+how these components affect the ﬁnal performance, we per-
+form ablation studies in Table 2. The left-most columns in
+Table 2 indicate whether or not we use KB and GAN in
+our approach. To further investigate the improvement of
+our approach on recognizing objects, we also report object
+detection performance mAP [10] in Table 3.
+
+In Table 2, we observe that KB boosts PhrDet and
+SGGen signiﬁcantly. This indicates our knowledge-based
+
+Table 2: Ablation studies of individual components of our
+method on VRD.
+
+KB GAN
+
+-
+-
+X -
+-
+X X
+
+X
+
+PhrDet
+
+SGGen
+
+Rec@50
+25.57
+27.02
+26.65
+27.39
+
+Rec@100 Rec@50
+31.09
+34.04
+34.06
+34.38
+
+18.16
+19.85
+19.56
+20.31
+
+Rec@100
+22.30
+24.58
+24.64
+25.01
+
+Table 3: Ablation study of the object detection on VRD.
+
+Model
+
+Faster
+R-CNN [33]
+
+ViP-
+CNN [27]
+
+Baseline KB
+
+GAN
+
+KB-
+GAN
+
+mAP
+
+14.35
+
+20.56
+
+20.70
+
+22.26 22.10 22.49
+
+feature reﬁnement can effectively learn the commonsense
+knowledge of objects to achieve high recall for the cor-
+rect relationships. By adding the image-level supervision
+to the baseline model, the performance is further improved.
+This improvement demonstrates that the proposed image-
+level supervision is capable of capturing meaningful con-
+text across the objects. These results align with our intu-
+itions discussed in the introduction. With KB and GAN,
+our model can generate scene graphs with high recall.
+
+Table 3 demonstrates the improvement in recognizing
+objects. We can see that our full model (KB-GAN) out-
+performs Faster R-CNN [33], ViP-CNN [27] measured by
+mAP. It is worth noticing that the huge gain of KB illustrates
+that the introduction of commonsense knowledge substan-
+tially contributes to the object detection task.
+
+Table 4: Ablation study of image-level supervision on sub-
+sampled VRD.
+
+KB GAN
+
+-
+X
+
+-
+-
+X X
+
+PhrDet
+
+SGGen
+
+Rec@50
+15.44
+24.07
+26.62
+
+Rec@100 Rec@50
+20.96
+30.89
+31.13
+
+10.94
+17.50
+19.78
+
+Rec@100
+14.53
+22.31
+24.17
+
+Investigation on Image-level Supervision. As aforemen-
+tioned, our image-level supervision can exploit the in-
+stances of rare categories. To demonstrate that our intro-
+duced image-level supervision can help on this issue, we ex-
+aggerate the problem by randomly removing 20% object in-
+stances as well as their corresponding relationships from the
+dataset. In Table 4, we can see that training on such a sub-
+sampled dataset (with only 80% object instances), Rec@50
+of the baseline model drops from 25.57 (resp. 18.16) to
+15.44 (resp. 10.94) for PhrDet and SGGen. However, with
+the help of GAN, Rec@50 of our ﬁnal model decreases only
+slightly from 27.39 (resp. 20.31) to 26.62 (resp. 19.78) for
+PhrDet and SGGen, respectively.
+
+We give our explanation on this signiﬁcant performance
+improvement as below. Too many low-frequency categories
+deteriorate the training gain when only utilizing the class la-
+
+1975
+
+Table 5: Comparison with existing methods on PhrDet and SGGen.
+
+Dataset
+
+Model
+
+PhrDet
+
+SGGen
+
+Rec@50
+
+Rec@100
+
+Rec@50
+
+Rec@100
+
+VRD [29]
+
+VG-MSDN [26]
+
+ViP-CNN [27]
+DR-Net [5]
+U+W+SF+LK: T+S [45]
+Factorizable Net [25]
+KB-GAN
+
+ISGG [41]
+MSDN [26]
+Graph R-CNN [42]
+Factorizable Net [25]
+KB-GAN
+
+22.78
+19.93
+26.32
+26.03
+27.39
+
+15.87
+19.95
+–
+22.84
+23.51
+
+27.91
+23.45
+29.43
+30.77
+34.38
+
+19.45
+24.93
+–
+28.57
+30.04
+
+17.32
+17.73
+19.17
+18.32
+20.31
+
+8.23
+10.72
+11.40
+13.06
+13.65
+
+20.01
+20.88
+21.34
+21.20
+25.01
+
+10.88
+14.22
+13.70
+16.47
+17.57
+
+Figure 5: Qualitative results from KB-GAN. In each example, the left image is the original input image; the scene graph is
+generated by KB-GAN; and the right image is reconstructed from the detected objects.
+
+bel as training targets. With the explicit image-level super-
+vision, the proposed image reconstruction path can utilize
+the large quantities of instances of rare classes. This image-
+level supervision idea is generic, which can apply to many
+potential applications such as object detection.
+
+Comparison with Existing Methods. Table 5 shows the
+comparison of our approach with the existing methods. We
+can see that our proposed method outperforms all the exist-
+ing methods in the recall on both datasets. Compared with
+these methods, our model recognizes the objects and their
+relationships not only in the graph domain but also in the
+image domain.
+
+4.5. Qualitative Results
+
+Figure 5 visualizes some examples of our full-model. We
+show the generated scene graph as well as the reconstructed
+image for each sample. It is clear that our method can gen-
+erate high-quality relationship predictions in the generated
+scene graph. Also notable is that our auxiliary output im-
+ages are reasonable. This demonstrates our model’s capa-
+
+bility to generate rich scene graph by learning with both
+external KB and auxiliary image-level regularizer.
+
+5. Conclusion
+
+In this work, we have introduced a new model for scene
+graph generation which includes a novel knowledge-base
+feature reﬁnement network that effectively propagates con-
+textual information across the graph, and an image-level su-
+pervision that regularizes the scene graph generation from
+image domain. Our framework outperforms state-of-the-
+art methods for scene graph generation on VRD and VG
+datasets. Our experiments show that it is fruitful to incor-
+porate the commonsense knowledge as well as the image-
+level supervision into the scene graph generation. Our work
+shows a promising way to improve high-level image under-
+standing via scene graph.
+
+Acknowledgments
+
+This work was supported in part by Adobe Research,
+
+NTU-IGS, NTU-Alibaba Lab, and NTU ROSE Lab.
+
+1976
+
+References
+
+[1] Somak Aditya, Yezhou Yang, and Chitta Baral. Ex-
+plicit reasoning over end-to-end neural architectures
+for visual question answering. In AAAI, 2018. 2
+
+[2] S¨oren Auer, Christian Bizer, Georgi Kobilarov, Jens
+Lehmann, Richard Cyganiak, and Zachary Ives. Db-
+pedia: A nucleus for a web of open data. In The se-
+mantic web, pages 722–735. 2007. 2
+
+[3] Ankan Bansal, Karan Sikka, Gaurav Sharma, Rama
+Chellappa, and Ajay Divakaran. Zero-shot object de-
+tection. In ECCV, 2018. 2
+
+[4] Junwei Bao, Nan Duan, Ming Zhou, and Tiejun
+Zhao. Knowledge-based question answering as ma-
+chine translation. In ACL, 2014. 2
+
+[5] Bo Dai, Yuqi Zhang, and Dahua Lin. Detecting visual
+relationships with deep relational networks. In CVPR,
+2017. 1, 2, 8
+
+[6] Jia Deng, Nan Ding, Yangqing Jia, Andrea Frome,
+Kevin Murphy, Samy Bengio, Yuan Li, Hartmut
+Neven, and Hartwig Adam. Large-scale object clas-
+siﬁcation using label relation graphs. In ECCV, 2014.
+2
+
+[7] Henghui Ding, Xudong Jiang, Bing Shuai, Ai Qun
+Liu, and Gang Wang. Context contrasted feature and
+gated multi-scale aggregation for scene segmentation.
+In CVPR, 2018. 2
+
+[8] Henghui Ding, Xudong Jiang, Bing Shuai, Ai Qun
+Liu, and Gang Wang. Semantic correlation promoted
+shape-variant context for segmentation.
+In CVPR,
+2019. 2
+
+[9] Desmond Elliott and Frank Keller. Image description
+using visual dependency representations. In EMNLP,
+2013. 1
+
+[10] Mark Everingham, Luc Van Gool, Christopher KI
+Williams, John Winn, and Andrew Zisserman. The
+pascal visual object classes (voc) challenge.
+IJCV,
+2010. 7
+
+[11] Jiuxiang Gu, Jianfei Cai, Shaﬁq Joty, Li Niu, and
+Gang Wang. Look, imagine and match:
+Improv-
+ing textual-visual cross-modal retrieval with genera-
+tive models. In CVPR, 2018. 1
+
+[12] Jiuxiang Gu, Jianfei Cai, Gang Wang, and Tsuhan
+Chen. Stack-captioning: Coarse-to-ﬁne learning for
+image captioning. In AAAI, 2018. 1
+
+[13] Jiuxiang Gu, Shaﬁq Joty, Jianfei Cai, and Gang Wang.
+Unpaired image captioning by language pivoting. In
+ECCV, 2018. 1
+
+[14] Jiuxiang Gu, Gang Wang, Jianfei Cai, and Tsuhan
+Chen. An empirical study of language cnn for image
+captioning. In ICCV, 2017. 1
+
+[15] Jiuxiang Gu, Zhenhua Wang, Jason Kuen, Lianyang
+Ma, Amir Shahroudy, Bing Shuai, Ting Liu, Xingxing
+Wang, Gang Wang, Jianfei Cai, et al. Recent advances
+in convolutional neural networks. Pattern Recogni-
+tion, 2017. 1
+
+[16] Kaiming He, Georgia Gkioxari, Piotr Doll´ar, and Ross
+
+Girshick. Mask r-cnn. In ICCV, 2017. 6
+
+[17] Geoffrey Hinton, Oriol Vinyals, and Jeff Dean. Dis-
+In NIPS
+
+tilling the knowledge in a neural network.
+Workshop, 2015. 2
+
+[18] Zhiting Hu, Zichao Yang, Ruslan Salakhutdinov, and
+Eric Xing. Deep neural networks with massive learned
+knowledge. In EMNLP, 2016. 2
+
+[19] Hamid Izadinia, Fereshteh Sadeghi, and Ali Farhadi.
+Incorporating scene context and object layout into ap-
+pearance modeling. In CVPR, 2014. 1
+
+[20] Justin Johnson, Agrim Gupta, and Li Fei-Fei. Image
+
+generation from scene graphs. In CVPR, 2018. 1, 5
+
+[21] Justin Johnson, Ranjay Krishna, Michael Stark, Li-Jia
+Li, David Shamma, Michael Bernstein, and Li Fei-Fei.
+Image retrieval using scene graphs. In CVPR, 2015. 1,
+2
+
+[22] Ranjay Krishna, Yuke Zhu, Oliver Groth, Justin John-
+son, Kenji Hata, Joshua Kravitz, Stephanie Chen, Yan-
+nis Kalantidis, Li-Jia Li, David A Shamma, et al.
+Visual genome: Connecting language and vision us-
+ing crowdsourced dense image annotations. In ICCV,
+2017. 2, 6
+
+[23] Ankit Kumar, Ozan Irsoy, Peter Ondruska, Mo-
+hit Iyyer, James Bradbury, Ishaan Gulrajani, Victor
+Zhong, Romain Paulus, and Richard Socher. Ask me
+anything: Dynamic memory networks for natural lan-
+guage processing. In ICML, 2016. 2, 4
+
+[24] Guohao Li, Hang Su, and Wenwu Zhu.
+
+Incorporat-
+ing external knowledge to answer open-domain visual
+questions with dynamic memory networks. In CVPR,
+2018. 2
+
+[25] Yikang Li, Wanli Ouyang, Bolei Zhou, Yawen Cui,
+Factorizable
+Jianping Shi, and Xiaogang Wang.
+net: An efﬁcient subgraph-based framework for scene
+graph generation. In ECCV, 2018. 1, 2, 3, 4, 5, 6, 7, 8
+
+[26] Yikang Li, Wanli Ouyang, Bolei Zhou, Kun Wang,
+and Xiaogang Wang. Scene graph generation from
+objects, phrases and region captions. In ICCV, 2017.
+5, 6, 7, 8
+
+[27] Yikang Li, Wanli Ouyang, Bolei Zhou, Kun Wang,
+and Xiaogang Wang. Vip-cnn: Visual phrase guided
+convolutional neural network. In CVPR, 2017. 1, 2, 7,
+8
+
+1977
+
+[28] Wentong Liao, Lin Shuai, Bodo Rosenhahn, and
+language guided
+arXiv preprint
+
+relationship detection.
+
+Michael Ying Yang.
+visual
+arXiv:1711.06032, 2017. 1
+
+Natural
+
+[29] Cewu Lu, Ranjay Krishna, Michael Bernstein, and Li
+Fei-Fei. Visual relationship detection with language
+priors. In ECCV, 2016. 1, 2, 6, 8
+
+[30] Jeffrey Pennington, Richard Socher, and Christopher
+Manning. Glove: Global vectors for word representa-
+tion. In EMNLP, 2014. 6
+
+[31] Bryan A Plummer, Arun Mallya, Christopher M Cer-
+vantes, Julia Hockenmaier, and Svetlana Lazebnik.
+Phrase localization and visual relationship detection
+with comprehensive image-language cues. In ICCV,
+2017. 2
+
+[32] Scott Reed, Zeynep Akata, Xinchen Yan, Lajanugen
+Logeswaran, Bernt Schiele, and Honglak Lee. Gen-
+erative adversarial text to image synthesis. In ICML,
+2016. 5
+
+[33] Shaoqing Ren, Kaiming He, Ross Girshick, and Jian
+Sun. Faster r-cnn: Towards real-time object detection
+with region proposal networks. In NIPS, 2015. 3, 5,
+6, 7
+
+[34] Karen Simonyan and Andrew Zisserman. Very deep
+convolutional networks for large-scale image recogni-
+tion. In ICLR, 2015. 6
+
+[35] Robert Speer and Catherine Havasi. Conceptnet 5: A
+large semantic network for relational knowledge. In
+The People’s Web Meets NLP, pages 161–176. 2013.
+2, 4, 6
+
+[36] Peng Wang, Qi Wu, Chunhua Shen, Anthony Dick,
+and Anton van den Hengel. Fvqa: Fact-based visual
+question answering. PAMI, 2018. 1
+
+[37] Yu-Siang Wang, Chenxi Liu, Xiaohui Zeng, and Alan
+Yuille. Scene graph parsing as dependency parsing. In
+ACL, 2018. 1, 5
+
+[38] Qi Wu, Chunhua Shen, Peng Wang, Anthony Dick,
+and Anton van den Hengel. Image captioning and vi-
+sual question answering based on attributes and exter-
+nal knowledge. PAMI, 2018. 1, 2
+
+[39] Caiming Xiong, Stephen Merity, and Richard Socher.
+Dynamic memory networks for visual and textual
+question answering. In ICML, 2016. 2, 4
+
+[40] Yuanjun Xiong, Kai Zhu, Dahua Lin, and Xiaoou
+Tang. Recognize complex events from static images
+by fusing deep channels. In CVPR, 2015. 1
+
+[41] Danfei Xu, Yuke Zhu, Christopher B Choy, and Li Fei-
+Fei. Scene graph generation by iterative message pass-
+ing. In CVPR, 2017. 2, 8
+
+[42] Jianwei Yang, Jiasen Lu, Stefan Lee, Dhruv Batra, and
+Devi Parikh. Graph r-cnn for scene graph generation.
+ECCV, 2018. 2, 7, 8
+
+[43] Xu Yang, Kaihua Tang, Hanwang Zhang Zhang, and
+Jianfei Cai. Auto-encoding scene graphs for image
+captioning. In CVPR, 2019. 1
+
+[44] Xu Yang, Hanwang Zhang, and Jianfei Cai. Shufﬂe-
+then-assemble: Learning object-agnostic visual rela-
+tionship features. In ECCV, 2018. 1
+
+[45] Ruichi Yu, Ang Li, Vlad I Morariu, and Larry S Davis.
+Visual relationship detection with internal and exter-
+nal linguistic knowledge distillation. In ICCV, 2017.
+2, 8
+
+[46] Rowan Zellers, Mark Yatskar, Sam Thomson, and
+Yejin Choi. Neural motifs: Scene graph parsing with
+global context. In CVPR, 2018. 2
+
+[47] Handong Zhao, Quanfu Fan, Dan Gutfreund, and Yun
+Fu. Semantically guided visual question answering.
+In WACV, 2018. 1
+
+1978
+
+

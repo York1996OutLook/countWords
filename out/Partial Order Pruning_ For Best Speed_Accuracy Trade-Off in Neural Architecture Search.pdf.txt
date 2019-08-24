@@ -1,0 +1,1364 @@
+Partial Order Pruning: for Best Speed/Accuracy Trade-off in
+
+Neural Architecture Search
+
+Xin Li1 Yiming Zhou1,3
+
+Zheng Pan1
+
+Jiashi Feng2
+
+1UISEE Technology Inc.
+
+2 Department of ECE, National University of Singapore
+
+3 National Key Lab. of Communications, UESTC
+
+{xin.li, yiming.zhou, zheng.pan}@uisee.com elefjia@nus.edu.sg
+
+Abstract
+
+Achieving good speed and accuracy trade-off on a target
+platform is very important in deploying deep neural net-
+works in real world scenarios. However, most existing au-
+tomatic architecture search approaches only concentrate on
+high performance. In this work, we propose an algorithm
+that can offer better speed/accuracy trade-off of searched
+networks, which is termed “Partial Order Pruning”.
+It
+prunes the architecture search space with a partial order as-
+sumption to automatically search for the architectures with
+the best speed and accuracy trade-off. Our algorithm ex-
+plicitly takes proﬁle information about the inference speed
+on the target platform into consideration. With the proposed
+algorithm, we present several Dongfeng (DF) networks that
+provide high accuracy and fast inference speed on various
+application GPU platforms. By further searching decoder
+architectures, our DF-Seg real-time segmentation networks
+yield state-of-the-art speed/accuracy trade-off on both the
+target embedded device and the high-end GPU.
+
+1. Introduction
+
+Deploying deep convolutional neural networks (CNNs)
+on real-world embedded devices is attracting increasing
+research interest. Different from high-end GPUs, these
+devices usually offer rather limited computation capacity,
+leading to low efﬁciency when deploying popular high ac-
+curacy CNN models [12, 4] on them. Despite the consid-
+erable efforts on accelerating inference of CNNs such as
+pruning [11], quantization [29] and factorization [17], fast
+inference speed1 is usually achieved at the cost of degraded
+performance [22, 15]. In this paper, we address such a prac-
+tical problem: Given a target platform, what is the best
+speed/accuracy trade-off boundary curve by varying CNN
+architecture? Or more speciﬁcally, we aim to answer two
+
+1Inference speed is measured by inference latency, which is deﬁned as
+
+inference time with batch size 1 in a CNN.
+
+Figure 1. Speed (frames per second) and segmentation accuracy
+(mIoUclass) comparison on the Cityscapes [6] validataion set. DF-
+Seg networks yield state-of-the-art speed/accuracy trade-off. The
+compared models include PSPNet [34], Deeplabv2 [4], ENet [22],
+SegNet [1], ICNet [33], BiSeNet [31] and our DF-Seg networks.
+
+questions: 1) Given the maximum acceptable latency, what
+is the best accuracy one can get? 2) To meet certain accu-
+racy requirements, what is the lowest inference latency one
+can expect?
+
+Some existing works manually design high accuracy net-
+work architectures [33, 31, 13, 25]. They usually adopt an
+indirect metric, i.e. FLOP, to estimate the network com-
+plexity, but the FLOP count does not truly reveal the actual
+inference speed. For example, for a 3 × 3 convolution on
+Nvidia GPUs which is highly optimized in terms of both
+hardware and software design [16], one can assume it is 9
+times slower than a 1 × 1 convolution on GPUs since it has
+9 times more FLOPs, which is not true actually. Besides,
+another important factor that affects the inference speed,
+the memory access, is not covered by measuring FLOPs.
+Considering the diversities of hardware and software, it is
+almost impossible to ﬁnd one single architecture that is op-
+timal for all the platforms.
+
+Some other works attempt to automatically search for the
+optimal network architecture [36, 23, 19], but they also rely
+
+19145
+
+on FLOPs to estimate the network complexity and do not
+take into account the discrepancy of this metric with the ac-
+tual inference speed and also the target platforms. Despite
+a few works [8, 2, 28] consider the actual inference speed
+on target platforms, they search the architecture in each in-
+dividual building block and keep ﬁxed the overall architec-
+ture, i.e. depth and width.
+
+In this paper, we develop an efﬁcient architecture search
+algorithm that automatically selects the networks that of-
+fer better speed/accuracy trade-off on a target platform.
+The proposed algorithm is termed “Partial Order Prun-
+ing”, with which some candidates that fail to give better
+speed/accuracy trade-off are ﬁltered out at early stages of
+the architecture searching process based on a partial order
+assumption (see Section 3.3 for details). For example, a
+wider network cannot be more efﬁcient than a narrower one
+with the same depth, thus accordingly some wider ones are
+discarded. By pruning the search space in this way, our al-
+gorithm is forced to concentrate on those architectures that
+are more likely to lift the boundary of speed/accuracy trade-
+off.
+
+The proposed “Partial Order Pruning” algorithm differs
+from previous neural architecture search algorithms in three
+aspects. Firstly, it explicitly takes platform characteristics
+into consideration. Secondly, it balances the width and
+depth of the overall architecture, instead of searching for
+complicated building blocks. Thirdly, it employs a partial
+order assumption and a cutting plane algorithm to acceler-
+ate searching, instead of using reinforcement learning, evo-
+lutionary algorithms or gradient-based algorithms.
+
+With the proposed algorithm, we are able to obtain a set
+of networks that provide better accuracy and faster infer-
+ence speed on a target platform, which we call Dongfeng
+(DF) networks. We apply our algorithm to searching de-
+coder architectures in semantic segmentation and gain a set
+of DF-Seg networks. Figure 1 shows a comparison of our
+DF-Seg networks and other methods. It can be seen that
+our segmentation networks achieve new state-of-the-art in
+real-time urban scene parsing tasks.
+
+To sum up, we make following contributions to network
+
+architecture search:
+
+• We are among the ﬁrst to investigate the problem of
+balancing speed and accuracy of network architectures
+for network architecture search. By pruning the search
+space with a partial order assumption, our “Partial Or-
+der Pruning” algorithm can efﬁciently lift the boundary
+of speed/accuracy trade-off.
+
+• We present several DF networks that provide both high
+accuracy and fast inference speed on target embedded
+device TX2. The accuracy of our DF1/DF2A networks
+exceeds ResNet18/50 on ImageNet validation set, but
+the inference latency is 43% and 39% lower, respec-
+tively.
+
+• We apply the proposed algorithm to searching decoder
+architectures for a segmentation network. Together
+with DF backbone networks, we achieve new state-
+of-the-art in real-time segmentation on both high-end
+GPUs and target embedded device TX2. On GTX
+1080Ti, our DF1-Seg network achieves 106.4 FPS at
+resolution 1024×2048 with mIoUclass 74.1%. On TX2,
+our DF1-Seg network achieves 21.8 FPS at resolution
+1280 × 720, i.e. 720p.
+
+2. Related Work
+
+Efﬁcient Network Design Group convolution plays a key
+role in current efﬁcient CNN architecture design [20, 13,
+25]. MobileNet V2 [25] adopts an inverted residual module
+that uses group convolutions to reduce the FLOPs during
+inference. ShufﬂeNet [32] uses pointwise group convolu-
+tion and channel shufﬂe operation to reduce FLOPs while
+maintaining accuracy.
+[20] points out that there is a dis-
+crepancy between indirect metric (FLOPs) and direct metric
+(inference speed), and proposes four guidelines for efﬁcient
+network design. These works design a single architecture
+without considering the target platform while our algorithm
+explicitly takes platform characteristics into consideration.
+
+Neural Architecture Search Automatic network archi-
+tecture search is often tackled with either reinforcement
+learning [36, 35] or evolutionary algorithms [23, 24]. They
+require huge computational resources, and the obtained
+networks are relatively slower than manually designed
+ones [20, 8], even with comparable FLOPs. More recently,
+several gradient-based algorithms [19, 28, 2, 9] are pro-
+posed to reduce the architecture search cost. Besides, a few
+works [8, 28, 2] also take platform-related objectives into
+consideration in architecture search. Although their goal is
+somewhat similar to ours, our work differs in that we pur-
+sue the balance of width and depth of a network, instead of
+searching the architecture in each individual block.
+
+Real-time Semantic Segmentation Most semantic seg-
+mentation methods [34, 3, 5] aim at high performance but
+with relatively slow inference speed. For fast semantic seg-
+mentation, early works [22, 1] employ relatively shallower
+backbone networks and lower image resolution, offering
+fast inference speed but poorer accuracy. More recently,
+ICNet [33] uses the image cascade to speed up inference,
+in which pre-trained deep CNNs are only applied to the im-
+ages with lowest resolution. BiSeNet [31] employs a con-
+text path to obtain a sufﬁcient receptive ﬁeld, and an addi-
+tional spatial path with a small stride to preserve spatial in-
+formation. None of them attempts to accelerate inference by
+improving the backbone network, or considers the charac-
+teristics of target platforms. Comparatively, our algorithm
+explicitly takes platform characteristics into consideration,
+and aims at better speed/accuracy trade-off in both back-
+bone network and decoder network.
+
+9146
+
+Figure 2. (a) General network architecture. (b) The residual block used throughout this paper.
+
+(a)
+
+(b)
+
+Model Acceleration Some researchers try to accelerate
+inference of a pre-trained network via quantization [29],
+pruning [11], factorization [17], etc. For example, Ne-
+tAdapt [30] automatically adapts a pre-trained CNN to a
+mobile platform given a resource budget. Compared with
+them, we try to balance the width and depth of the overall
+architecture.
+
+3. Partial Order Pruning
+
+3.1. Search Space
+
+We provide a general network architecture in our search
+space, as shown in Figure 2(a).
+It consists of 6 stages
+to perform classiﬁcation from input images. Stages 1∼5
+down-sample the spatial resolution of the input tensor with
+a stride of 2, and stage 6 produces the ﬁnal prediction
+with a global average pooling and a fully connected layer.
+Stages 1&2 extract common low-level features on large ten-
+sor size, which brings heavy computation burden. In pur-
+suit of an efﬁcient network, we only use one convolution
+layer in stage 1&2, i.e. Conv1 and Conv2. We empiri-
+cally ﬁnd this is enough for achieving good accuracy. For
+stages 3, 4, 5, each consists of L, M, N residual blocks,
+where L, M ,N are integers, i.e. L, M, N ∈ N. Different
+settings of L/M/N lead to different network depths. The
+width (number of channels) of the i-th residual block in
+stage s is denoted as C s
+i . Therefore, an architecture can
+be encoded as shown in Figure 2(a). In practice, we restrict
+C s
+i ∈ {64, 128, 256, 512, 1024}. We empirically restrict the
+width of a block to be no narrower than its preceding blocks.
+Throughout this paper, we use the basic residual block pro-
+posed in [12] if not mentioned otherwise. As shown in
+Figure 2(b), the building block consists of two convolution
+layers and a shortcut connection. An additional projection
+layer is added if the size of input does not match the output
+tensor. All convolutional layers are followed with a batch
+normalization [14] layer and ReLU nonlinearity.
+
+3.2. Latency Estimation
+
+The set of all possible architectures, with different depths
+(number of blocks) and widths (number of channels per
+block), is denoted as S and usually referred to as the search
+space in neural architecture search [19, 36]. The latency of
+architectures in S can vary from very small to positive in-
+ﬁnity. But we only care about architectures in a subspace
+bS ⊂ S, which provide latency in the range [Tmin, Tmax].
+
+(a)
+
+(b)
+
+Figure 3. Preliminary experiments. (a) Our latency estimation is
+highly close to the actual proﬁled latency. (b) We experimentally
+veriﬁed that partial order assumption is generally true for efﬁcient
+architectures of our concern.
+
+input/output
+
+the same latency.
+
+We employ the proﬁler provided by TensorRT li-
+brary to obtain layer-wise latency of a network. We
+empirically ﬁnd that a block with a speciﬁc conﬁg-
+tensor size) always con-
+uration (i.e.
+sumes
+Thus we can construct
+a look-up table Latency (ci, hi, wi, co, ho, wo) provid-
+ing latency of each block conﬁguration, where ci/co
+is the number of channels in input/output
+tensor, and
+hi/wi/ho/wo is the corresponding spatial size. For exam-
+ple, Latency (32, 112, 112, 64, 56, 56) = 0.143ms on TX2.
+By simply summing up the latency of all blocks, we can
+efﬁciently estimate the latency Lat(x) of an architecture
+x ∈ S. In Figure 3(a), we compare the estimated latency
+with the proﬁled latency. It shows our latency estimation
+is highly close to the actual proﬁled latency. All architec-
+tures with latency ranging [Tmin, Tmax] form the subspace
+bS. This subspace construction signiﬁcantly narrows down
+our search space, and hence accelerates the architecture se-
+lection.
+
+3.3. Partial Order Assumption
+
+A partial order is a binary relation deﬁned over a set. It
+means that for certain pairs of elements (x, y) in the set,
+one of the elements x precedes the other y in the ordering,
+denoted with x ≺ y. Here “partial” indicates that not every
+pair of elements needs to be comparable.
+
+We ﬁnd that there is a partial order relation among archi-
+tectures in our search space. In Figure 4, we follow the ar-
+chitecture encoding in Figure 2(a), and illustrate the partial
+order relation among architectures. As explained in Sec-
+tion 3.2, bS is a set that contains all architectures in which
+we are interested. Let x, y ∈ bS denote two elements in the
+set bS. If x is shallower than y but they are with the same
+
+9147
+
+Figure 4. Partial order relations among architectures. An architec-
+ture (e.g. [(128), (256), (256)]) may be narrower than another one
+with same depth (e.g. [(128), (256), (512)]), or shallower than an-
+other with same width (e.g. [(128), (256, 256), (256)]).
+
+width, or narrower than y with same depth, we can borrow
+the concept from the order theory, and say that x precedes y
+in the ordering, denoted as x ≺ y. In the rest of this paper,
+we also call x a precedent of y if x ≺ y. Let Acc(x) and
+Lat(x) denote the accuracy and latency of the architecture
+x. Then the partial order assumption of architectures can be
+summarized as
+
+Lat(x) ≤ Lat(y), Acc(x) ≤ Acc(y),
+
+(1)
+where ∀x, y ∈ bS, x ≺ y. Formula (1) assumes that the la-
+tency and accuracy of an architecture are both higher than
+those of its precedents. This assumption may not hold for
+very deep networks that contain hundreds of layers [12], but
+it is generally true for the efﬁcient architectures of our con-
+cern, i.e. bS, which is experimentally veriﬁed in this work.
+We ﬁnd all comparable architecture pairs (x, y), x ≺ y in
+our trained architectures (Section 4.2), and compute the la-
+tency difference ∆Lat = Lat(y) − Lat(x) and accuracy
+difference ∆Acc = Acc(y) − Acc(x) in each pair. As
+shown in Figure 3(b), most points locate in the ﬁrst quar-
+tile. This means the accuracy of the precedent x is lower,
+for almost all comparable pairs. We also notice that a few
+points locate in the second quartile, but the lower limit of
+∆Acc. is −0.1%, which is negligible considering the ran-
+domness during training. The above experimental results
+validate the reasonableness of our partial order assumption.
+This assumption can be utilized to prune the architecture
+search space, and speed up the search process signiﬁcantly.
+
+3.4. Partial Order Pruning
+
+Formally, the goal of our architecture searching algo-
+rithm is to obtain an architecture with highest accuracy
+within every small latency range [T, T + δt]:
+
+max
+x∈S
+
+Acc(x), s.t.Lat(x) ∈ [T, T + δt]
+
+(2)
+
+where δt is a short time period such as 0.1ms. Instead of
+searching at every small latency range, we optimize within
+the entire latency range [Tmin, Tmax]. With our “Partial Or-
+der Pruning” algorithm, architecture searching at higher la-
+tency helps reduce the searching space at lower latency, and
+hence speeds up the overall searching process.
+
+Algorithm 1 Partial Order Pruning
+Initialize trained architecture set D = ∅
+Initialize pruned architecture set P = ∅.
+repeat
+
+Random select an architecture x ∈bS \ P .
+
+Train x and obtain its Acc(x).
+D ← D ∪ {x}.
+for all w ∈ D do
+yw = arg min
+y∈D
+
+Lat(y), s.t.Acc(y) ≥ Acc(w)
+
+△Pw = {m ∈ bS|m ≺ w, Lat(m) ≥ Lat(yw)}
+
+P ← P ∪ (∪
+w
+
+△Pw)
+
+end for
+B(D) = {x ∈ D|∀m ∈ D,
+
+Lat(m) ≥ Lat(x) or Acc(m) ≤ Acc(x)}
+
+until No change to B(D) for several iterations.
+
+Figure 5. We construct pruned search space P with partial order
+assumption, and prune the search space to be bS \ P . Architectures
+in B(D) form the boundary for speed/accuracy trade-off we have
+achieved. (Best viewed in color).
+
+We use a cutting plane algorithm to optimize the combi-
+national optimization problem in Formula (2). Algorithm 1
+summarizes the pipeline of our algorithm. D is a set con-
+taining all trained architectures, and is initialized as empty.
+P denotes the search space pruned from bS. Each time we
+train a new architecture x ∈ bS \ P and obtain its accu-
+racy Acc(x), we are able to update the pruned search space
+P . Figure 5 shows how to construct P with the aforemen-
+tioned partial order assumption. For each trained architec-
+ture w ∈ D, we ﬁnd the fastest architecture yw ∈ D that
+provides better accuracy:
+
+yw ← arg min
+y∈D
+
+Lat(y), s.t.Acc(y) ≥ Acc(w).
+
+(3)
+
+If no yw is found that satisﬁes the condition, we continue to
+process the next w. Let △ Pw denote the precedents of w
+with latency higher than yw, i.e.
+
+△Pw = {m ∈ bS|m ≺ w, Lat(m) ≥ Lat(yw)}.
+
+(4)
+
+Based on the partial order assumption, a precedent m has
+lower latency and accuracy, i.e. Acc(m) ≤ Acc(w). There-
+fore, even though we do not actually train m, we can assume
+
+∀m ∈ △Pw, Acc(m) ≤ Acc(yw).
+
+(5)
+
+9148
+
+for all m ∈ △P (wi), i ∈ {1, 2, 3},
+In Figure 5,
+the (Lat(m), Acc(m)) shall locate in the corresponding
+shadow area. These architectures in △Pw are very un-
+likely to provide better speed/accuracy trade-off, and thus
+get pruned from the search space to avoid unnecessary train-
+ing cost.
+
+Given trained architectures D, B(D) denotes the archi-
+tectures that provide best speed/accuracy trade-off in trained
+architectures:
+
+B(D) = {x ∈ D|∀w ∈ D, Lat(w) ≥ Lat(x);
+
+or Acc(w) ≤ Acc(x)}.
+
+(6)
+
+(a)
+
+(b)
+
+in B(D)
+
+boundary
+
+form the
+
+for
+Architectures
+speed/accuracy trade-off we can achieve on the target
+platform. Figure 5 shows B(D) and the corresponding
+speed/accuracy trade-off boundary.
+Intuitively, no archi-
+tecture in D \ B(D) could obtain higher accuracy with
+lower latency. By pruning P from the search space bS, our
+algorithm speeds up the architecture search process, and
+lifts the boundary of speed/accuracy trade-off. We stop
+the search process if no change to the B(D) happens for
+several iterations.
+
+3.5. Decoder Design
+
+With the proposed Algorithm 1, we are able to ﬁnd back-
+bone architectures that provide best speed/accuracy trade-
+off on the target platform. Given a backbone network,
+we build semantic segmentation networks as shown in Fig-
+ure 6(a). Each stage in the backbone network down-samples
+the resolution by 2. The resolution of tensors in stage 5 is
+thus 1/32 of the input image. We append a pyramid pool-
+ing module [34] after the output tensor of stage 5 to im-
+prove segmentation performance. These tensors are then
+processed by the decoder to produce ﬁnal prediction.
+
+We append a 1×1 convolution layer after stage 3/4/5 as a
+“Channel Controller” (CC). The channel controllers reduce
+the number of channels in the corresponding stage without
+changing its spatial resolution. The decoder fuses the ten-
+sors in different stages through the fusion nodes. The archi-
+tecture of the fusion node is shown in Figure 6(b). A fusion
+node ﬁrst projects a low resolution tensor from Cℓ channels
+to Ch channels with a 1 × 1 convolution layer, and then up-
+samples it by 2. We concatenate the up-sampled tensor with
+a higher resolution tensor, and then process it with a 3 × 3
+convolution layer, to fuse the expressive power of different
+backbone stages. We fuse the features from stage 3/4/5 and
+produce a 1/8 resolution score map. The score map is then
+up-sampled by 8 to produce ﬁnal per-pixel semantic seg-
+mentation prediction.
+
+Let C s, s = 3, 4, 5 denote the width of each CC. We
+heuristically set C ∈ {K, 32, 64, 128, 256, 512}, where K
+is the number of classes. Given a backbone network, differ-
+[C 3, C 4, C 5], lead
+ent settings of channel controllers, i.e.
+
+Figure 6. (a) Overall architecture of segmentation network.
+Detailed architecture of the fusion node.
+
+(b)
+
+to different decoder architectures. All the possible decoder
+CC settings form the search space of the decoder architec-
+ture. Similar to backbone network architectures, we also
+apply a partial order assumption over the CC settings. That
+is, a narrower decoder is always more efﬁcient and less ac-
+curate than a wider one. Therefore we can also employ the
+“Partial Order Pruning” algorithm to lift the speed/accuracy
+trade-off boundary in the decoder architecture search.
+
+4. Experiment
+
+4.1. Experimental Settings
+
+We adopt two typical kinds of hardware that provide dif-
+
+ferent computational power.
+
+• Embedded device: We use Nvidia Jetson TX2 with
+an integrated 256-core Pascal GPU as the target em-
+bedded device. It provides considerable computational
+power with limited electrical power consumption.
+
+• High-end GPU: We use Nvidia Geforce GTX 1080Ti
+that provides enormous computing power. We also use
+GTX Titan X (Maxwell) for fair comparison with pre-
+vious methods.
+
+We adopt two tools to measure inference speed. First, we
+employ the widely used high-performance CNN inference
+framework TensorRT-3.0.4. Second, for a fair comparison
+with ICNet [33], we use the time measure tool Caffe Time,
+and set the repeating number to 100 and take the average
+inference time for comparison. All experiments are per-
+formed under CUDA 9.0 and CUDNN V7.
+
+We conduct experiments on two benchmark datasets.
+The ImageNet [7] is a large-scale image classiﬁcation
+dataset, which contains over 1.2 million color images in the
+training set and 50k color images in the validation set. The
+Cityscapes [6] is a large benchmark dataset for urban scene
+parsing. It contains 5, 000 images with high quality pixel-
+level annotations, and is split to 2, 975 for training, 500 for
+validation, and 1, 525 for testing.
+
+9149
+
+Model
+
+Top1 Acc.
+
+Latency (ms)
+
+FLOPs
+
+ShufﬂeNet V2 [20]
+ResNet-18 [12]
+ShufﬂeNet V1 [32]
+GoogLeNet [26]
+MobileNet V1 [13]
+MobileNet V2 [25]
+ResNet-50 [12]
+
+FBNet-A [28]
+ProxylessNAS-GPU [2]
+NASNet-A [36]
+PNASNET-5 [18]
+
+DF1
+DF2
+DF2A
+
+69.4%
+69.0%
+67.4%
+68.7%
+70.8%
+71.9%
+75.3%
+
+73.0%
+75.1%
+74.0%
+74.2%
+
+69.8%
+73.9%
+76.0%
+
+4.1
+4.4
+4.7
+5.1
+6.1
+8.7
+10.6
+
+5.9
+9.3
+20.7
+27.6
+
+2.5
+5.0
+6.5
+
+146M
+1.8G
+140M
+1.43G
+569M
+300M
+3.8G
+
+249M
+
+-
+
+564M
+588M
+
+746M
+1.77G
+1.97G
+
+Table 1. Comparison with other popular networks on TX2.
+
+this paper.
+
+Compared with ResNet-18 and GoogLeNet, our DF1 ob-
+tains a higher accuracy 69.8% but the inference latency is
+43%, 51% lower than two baselines respectively. our DF2
+has a similar latency but the accuracy is 4.9% and 5.2%
+higher than the baselines respectively. Furthermore, DF2A
+achieves a surpassing ResNet-50-level accuracy with a 39%
+lower latency. Note we use the same building blocks with
+ResNet-18/50. So we attribute the better speed/accuracy
+trade-off to the better balancing between depth and width
+in our architectures. Speciﬁcally, our DF1/DF2A are slim-
+mer and deeper than ResNet-18/50 for obtaining the same
+accuracy.
+
+MobileNet [13, 25] and ShufﬂeNet [32, 20] are state-
+of-the-art efﬁcient networks that are designed for mobile
+applications. We also compare our DF networks to them
+on TX2 in Table 1 and Figure 7. It can be seen our DF1
+achieves higher accuracy but lower inference latency. The
+MobileNet/ShufﬂeNet have less FLOPs but higher latency.
+This is because they have higher memory access cost. The
+total memory cost (i.e.
+intermediate features) for Shuf-
+ﬂeNet V2 and DF1 is 4.86M and 2.91M respectively. This
+also indicates the FLOPs may be inconsistent with latency
+on the target platform [27, 20]. Therefore, taking character-
+istics of target platform into consideration is necessary for
+achieving the best speed/accuracy trade-off.
+
+We also compare our DF networks with other models
+searched by NAS methods [36, 18, 28, 2]. As shown in
+Table 1, NASNet [36] and PNASNet [18] have not taken la-
+tency into consideration, leading to higher latency. Compar-
+ing to FBNet [28] and ProxylessNAS [2], which also take
+target platform-related objectives into neural architecture
+search, our DF networks show better speed/accuracy trade-
+off. This can be explained as (a) DF networks are speciﬁ-
+cally searched for TX2 platform; (b) FBNet and Proxyless-
+NAS use an inverted bottleneck module, which brings more
+memory access cost; (c) FBNet and ProxylessNAS aim at
+
+9150
+
+Figure 7. Comparison with other popular networks on TX2.
+
+4.2. Backbone Architecture Search
+
+In contrast to current architecture search algorithms that
+conduct architecture searching on small datasets, we di-
+rectly conduct architecture searching on ImageNet. We use
+the SGD optimizer with the poly learning rate policy to train
+models. The power is set to 2, and the momentum is set to
+0.9. We use a weight decay of 0.0001. The batch size is
+set to 2048. We employ random scaling and stretching for
+data augmentation to relieve overﬁtting. Following [10], we
+ﬁrst train each network for 5 epochs with learning rate 0.1
+as a warm up scheme, and then train for 80 epochs with an
+initial learning rate 0.8.
+
+We conduct backbone architecture searching experi-
+ments on TX2 platform. During searching, we evaluate
+the single crop Top-1 accuracy on ImageNet validation set
+and the inference latency at resolution 224 × 224. We are
+interested in the efﬁcient architectures with latency falling
+in the range [1ms, 5ms], and construct the search space bS
+accordingly (Section 3.2). We conduct architecture search
+with Algorithm 1, and stop the search process when no
+remarkable boundary update is found during the search.
+The resulting speed/accuracy trade-off boundary is consid-
+ered to be nearly optimal in our search space bS on the tar-
+get platform TX2. We train ∼ 200 networks in total, as
+shown in Figure 7. With the training conﬁguration kept
+unchanged during architecture search, we train two rep-
+resentative network architectures with additional supervi-
+sion [26] and more epochs, to further improve their accu-
+racy. The resulting models are referred to as DF1, DF2.
+We further replace some of the building blocks in DF2 from
+basic block in Figure 2(b) to bottleneck block [12]. The re-
+sulting network is denoted as DF2A. Figure 7 and Table 1
+give a comparison of our DF networks and popular models2
+on the target platform TX2. Table 2 shows detailed archi-
+tectures of these three DF networks. Training with more so-
+phisticated methods, e.g. dropout or label smoothing, may
+produce higher accuracy, which however is not the focus of
+
+2We report latency with our re-implementation.
+
+Stage
+
+Layer
+
+Output size
+
+DF1
+
+DF2
+
+DF2A
+
+1
+2
+
+3
+
+4
+
+5
+
+6
+
+Conv1
+Conv2
+
+112 × 112
+
+56 × 56
+
+3 × 3, 32
+3 × 3, 64
+
+Res3 x
+
+28 × 28
+
+Res4 x
+
+14 × 14
+
+(cid:20)3 × 3, 64
+3 × 3, 64(cid:21) × 3
+
+3 × 3, 128(cid:21) × 3
+(cid:20)3 × 3, 128
+
+3 × 3, 32
+3 × 3, 64
+
+(cid:20)3 × 3, 64
+3 × 3, 64(cid:21) × 2
+3 × 3, 128(cid:21) × 1
+(cid:20)3 × 3, 128
+3 × 3, 128(cid:21) × 10
+(cid:20)3 × 3, 128
+3 × 3, 256(cid:21) × 1
+(cid:20)3 × 3, 256
+
+Res5 x
+
+7 × 7
+
+FC
+
+1 × 1
+
+3 × 3, 256(cid:21) × 3
+(cid:20)3 × 3, 256
+3 × 3, 512(cid:21) × 1
+(cid:20)3 × 3, 512
+
+3 × 3, 256(cid:21) × 4
+(cid:20)3 × 3, 256
+3 × 3, 512(cid:21) × 2
+(cid:20)3 × 3, 512
+
+Global Average Pooling, 1000-d FC, Softmax.
+
+3 × 3, 32
+3 × 3, 64
+
+(cid:20)3 × 3, 64
+3 × 3, 64(cid:21) × 2
+3 × 3, 128(cid:21) × 1
+(cid:20)3 × 3, 128
+
+
+ × 10
+
+
+
+ × 1
+
+
+
+ × 4
+
+
+
+ × 2
+
+
+1 × 1, 128
+3 × 3, 128
+1 × 1, 512
+1 × 1, 256
+3 × 3, 256
+1 × 1, 1024
+1 × 1, 256
+3 × 3, 256
+1 × 1, 1024
+1 × 1, 512
+3 × 3, 512
+1 × 1, 1024
+
+Depth
+
+23
+
+43
+
+60
+
+Table 2. Detailed architecture of DF networks.
+
+(a)
+
+(b)
+
+Figure 8. (a) Number of pruned architectures. (b) We empirically
+ﬁnd that accuracy of an architecture is correlated to the number of
+precedents.
+
+searching for better building block architectures while we
+balance the width and depth of the overall architecture.
+
+We then discuss the search efﬁciency of our proposed al-
+gorithm. Figure 8(a) shows the number of pruned architec-
+tures in the search process. We prune 438 architectures after
+training 200 architectures.Therefore, our POP algorithm ac-
+celerates the architecture search process for 2.2 times. Each
+model takes 5 ∼ 7 hours on a server with 8-GPUs. Train-
+ing 200 architectures takes ∼ 400 GPU days in total. The
+computational cost of our architecture for searching on Im-
+ageNet is lower than the building block architecture search-
+ing [36, 23] on CIFAR-10 by an order.
+
+Based on our architecture search results, we make fol-
+lowing observations. 1) Very quick down-sampling is pre-
+ferred in early stages to obtain higher efﬁciency. We use
+1 convolutional layer in each of stages 1&2, and are still
+able to achieve good accuracy. 2) Down-sampling with the
+convolutional layer is preferred to the pooling layer for ob-
+taining higher accuracy. We only use 1 global average pool-
+ing at the end of the network. 3) We empirically ﬁnd that
+the accuracy of a network is correlated to the number of its
+precedents, as shown in Figure 8(b). We assume that an ar-
+
+chitecture with more precedents may have a better balance
+between depth and width.
+
+4.3. Decoder Architecture Search
+
+With our DF1/DF2 backbone networks, we conduct de-
+coder architecture search experiments on two platforms,
+1080Ti and TX2. The mIoUclass at resolution 1024×2048 is
+taken as a metric of segmentation accuracy. The proﬁler of
+TensorRT is used to evaluate latency of segmentation net-
+works. We evaluate latency at resolution 1024 × 2048 on
+1080Ti, and 640 × 360 on TX2.
+
+Figure 9 shows our decoder architecture search results.
+We select three segmentation networks DF1-Seg, DF2-
+Seg1, DF2-Seg2 from trained networks that provide good
+speed/accuracy trade-off on both TX2 and 1080Ti. The CC
+setting in the decoder of these three segmentation networks
+are [19, 32, 128], [19, 19, 32], [19, 256, 512] respectively (19
+is the number of classes). Few previous works have reported
+inference speed on TX2, thus we provide a comparison be-
+tween our DF-Seg networks and other methods on 1080Ti,
+as shown in Table 3. We note [33] explicitly explains how
+they measure inference speed. Therefore, we add an addi-
+tional column “FPS(Caffe)” in Table 3 for fair comparison.
+Inference speed in the “FPS(Caffe)” column is measured by
+Caffe Time on Titan X (Maxwell) at resolution 1024×2048.
+Compared with BiSeNet1, our DF1-Seg achieves com-
+parable inference speed, but the mIoUclass on val set is
+5.1% higher. Compared with BiSeNet2, DF1-Seg achieves
+comparable mIoUclass on validation set, but
+the infer-
+ence speed (FPS) is 1.68 times faster. We attribute the
+better speed/accuracy trade-off of DF1-Seg to its back-
+bone network DF1. BiSeNet2 employs ResNet-18 as the
+backbone network. Our DF1 has a comparable accu-
+
+9151
+
+(a) DF1 and TX2
+
+(b) DF1 and GTX 1080Ti
+
+(c) DF2 and TX2
+
+(d) DF2 and GTX 1080Ti
+
+Figure 9. Speed/accuracy trade-off of decoder architecture search results with different backbone networks on different platforms. DF1-
+Seg/DF2-Seg are two segmentation networks that provide good speed/accuracy trade-off on both TX2 and GTX 1080Ti.
+
+mIoUclass
+test
+val
+
+FPS
+
+FPS (Caffe)
+
+Method
+
+640 × 360
+ms / FPS
+
+1280 × 720
+
+1920 × 1080
+
+ms / FPS
+
+ms / FPS
+
+Method
+
+SegNet [1]
+ENet [22]
+ICNet [33]
+ESPNet [21]
+BiSeNet1† [31]
+BiSeNet2† [31]
+
+DF1-Seg
+DF2-Seg1
+DF2-Seg2
+
+-
+-
+
+67.7
+
+-
+
+69.0
+74.8
+
+74.1
+75.9
+76.9
+
+56.1
+58.3
+69.5
+60.3
+68.4
+74.7
+
+73.0
+74.8
+75.3
+
+-
+-
+-
+
+110
+105.8
+65.5
+
+106.4
+67.2
+56.3
+
+-
+-
+
+30.3
+
+-
+-
+-
+
+30.7
+20.5
+17.7
+
+40.2
+
+DF1-Seg-d8
+
+72.4
+
+71.4
+
+136.9
+
+Table 3. Comparison with other real-time segmentation models on
+1080Ti. † means FPS is evaluated at 1536 × 768.
+
+racy with ResNet-18, but is 1.76 times faster (2.5ms vs
+4.4ms), as shown in Table 1. Compared with ICNet [33],
+DF1-Seg achieves comparable inference speed, and the
+mIoUclass is 3.5% higher on test set. Our DF2-Seg1 also
+achieves faster inference speed and better segmentation ac-
+curacy than BiSeNet2. With a wider decoder CC setting
+([19, 256, 512]), our DF2-Seg2 achieves the best mIoUclass
+76.9% on validation set and 75.3% on test set at 56.3 FPS.
+We obtain an even faster segmentation network by drop-
+ping the ﬁnal up-sampling layer, and produce a prediction
+at 1/8 of input resolution. The images to segment are then
+up-sampled by 8 times with nearest neighbor interpolation,
+which can be implemented very efﬁciently. We then obtain
+a DF1-Seg-d8 network that achieves 136.9 FPS on 1080Ti.
+The mIoUclass on test set (71.4%) is still 1.9% and 3% better
+than ICNet (69.5%) and BiSeNet1 (68.4%) respectively.
+
+For fair comparison with previous methods, we compare
+inference speed on Titan X (Maxwell) at different resolu-
+tion, as shown in Table 4. Our DF1-Seg and DF1-Seg-d8
+achieve 59.9 FPS and 75.9 FPS at resolution 1920 × 1080,
+1080p. Based on the above experimental results,
+i.e.
+the DF-Seg networks achieve new state-of-the-art in real-
+time segmentation on high-end GPU, demonstrating better
+speed/accuracy trade-off is achieved.
+
+Previous works [1, 22] mostly adopt TX1 to analyze their
+inference speed. In Table 5, we provide a detailed inference
+speed analysis on TX2. Our DF1-Seg/DF1-Seg-d8 achieve
+
+SegNet [1]
+ENet [22]
+BiSeNet-1 [31]
+BiSeNet-2 [31]
+
+DF1-Seg
+DF2-Seg1
+DF2-Seg2
+
+69/14.6
+7/135.4
+5/203.5
+8/129.4
+
+289/3.5
+21/46.8
+12/82.3
+21/47.9
+
+637/1.6
+46/21.6
+24/41.4
+43/23
+
+3.65/274.0
+5.88/170.1
+6.57/152.2
+
+8.24/121.4
+13.43/74.5
+15.10/66.2
+
+16.70/59.9
+27.36/36.5
+31.08/32.2
+
+DF1-Seg-d8
+
+3.25/307.7
+
+6.62/151.1
+
+13.18/75.9
+
+Table 4. Speed analysis on Titan X (Maxwell).
+
+Method
+
+480 × 320
+ms / FPS
+
+640 × 360
+ms / FPS
+
+1280 × 720
+
+ms / FPS
+
+ESPNet [21]
+
+-/-
+
+-/∼20
+
+-/-
+
+DF1-Seg
+DF2-Seg1
+DF2-Seg2
+
+9.45/105.8
+15.32/65.3
+16.98/58.9
+
+14.01/71.4
+22.25/44.9
+25.07/39.9
+
+45.93/21.8
+73.32/13.6
+82.07/12.2
+
+DF1-Seg-d8
+
+7.48/133.7
+
+10.79/92.7
+
+33.41/29.9
+
+Table 5. Speed analysis on TX2.
+
+21.8 FPS and 29.9 FPS at resolution 1280 × 720, i.e. 720p.
+
+5. Conclusion
+
+We propose a network architecture search algorithm
+“Partial Order Pruning” , which is able to lift the bound-
+ary of speed/accuracy trade-off of searched networks on the
+target platform. By utilizing a partial order assumption, it
+efﬁciently prunes the feasible architecture space to speed
+up the search process. We employ the proposed algorithm
+to search for both the backbone network and decoder net-
+work architectures. The searched DF backbone newtorks
+provide state-of-the-art speed/accuracy trade-off on target
+platforms. The searched DF-Seg networks achieve state-of-
+the-art speed/accuracy trade-off on both embedded devices
+and high-end GPUs.
+
+Acknowledgement
+
+Jiashi Feng was partially supported by NUS IDS R-263-
+000-C67-646, ECRA R-263-000-C87-133 and MOE Tier-II
+R-263-000-D17-112.
+
+9152
+
+References
+
+[1] V. Badrinarayanan, A. Kendall, and R. Cipolla. Segnet: A
+deep convolutional encoder-decoder architecture for image
+segmentation. TPAMI, (12):2481–2495, 2017. 1, 2, 8
+
+[2] H. Cai, L. Zhu, and S. Han. ProxylessNAS: Direct neural
+architecture search on target task and hardware. ICLR, 2019.
+2, 6
+
+[3] L.-C. Chen, M. D. Collins, Y. Zhu, G. Papandreou, B. Zoph,
+F. Schroff, H. Adam, and J. Shlens. Searching for efﬁcient
+multi-scale architectures for dense image prediction. NIPS,
+2018. 2
+
+[4] L.-C. Chen, G. Papandreou, I. Kokkinos, K. Murphy, and
+A. L. Yuille. Deeplab: Semantic image segmentation with
+deep convolutional nets, atrous convolution, and fully con-
+nected crfs. TPAMI, 40(4):834–848, 2018. 1
+
+[5] L.-C. Chen, Y. Zhu, G. Papandreou, F. Schroff, and H. Adam.
+Encoder-decoder with atrous separable convolution for se-
+mantic image segmentation. ECCV, 2018. 2
+
+[6] M. Cordts, M. Omran, S. Ramos, T. Rehfeld, M. Enzweiler,
+R. Benenson, U. Franke, S. Roth, and B. Schiele. The
+cityscapes dataset for semantic urban scene understanding.
+CVPR, 2016. 1, 5
+
+[19] K. S. Liu, Hanxiao and Y. Yang. Darts: Differentiable archi-
+tecture search. arXiv preprint arXiv:1806.09055, 2018. 1, 2,
+3
+
+[20] N. Ma, X. Zhang, H.-T. Zheng, and J. Sun. Shufﬂenet
+v2: Practical guidelines for efﬁcient cnn architecture design.
+ECCV, 2018. 2, 6
+
+[21] S. Mehta, M. Rastegari, A. Caspi, L. Shapiro, and H. Ha-
+jishirzi. Espnet: Efﬁcient spatial pyramid of dilated convo-
+lutions for semantic segmentation. ECCV, 2018. 8
+
+[22] A. Paszke, A. Chaurasia, S. Kim, and E. Culurciello. Enet:
+A deep neural network architecture for real-time semantic
+segmentation. arXiv preprint arXiv:1606.02147, 2016. 1, 2,
+8
+
+[23] E. Real, A. Aggarwal, Y. Huang, and Q. V. Le. Regular-
+ized evolution for image classiﬁer architecture search. AAAI,
+2019. 1, 2, 7
+
+[24] E. Real, S. Moore, A. Selle, S. Saxena, Y. L. Suematsu,
+J. Tan, Q. Le, and A. Kurakin. Large-scale evolution of im-
+age classiﬁers. ICML, 2017. 2
+
+[25] M. Sandler, A. Howard, M. Zhu, A. Zhmoginov, and L.-C.
+Chen. Inverted residuals and linear bottlenecks: Mobile net-
+works for classiﬁcation, detection and segmentation. CVPR,
+2018. 1, 2, 6
+
+[7] J. Deng, W. Dong, R. Socher, L.-J. Li, K. Li, and L. Fei-
+Fei. Imagenet: A large-scale hierarchical image database. In
+CVPR, 2009. 5
+
+[26] C. Szegedy, W. Liu, Y. Jia, P. Sermanet, S. Reed,
+D. Anguelov, D. Erhan, V. Vanhoucke, and A. Rabinovich.
+Going deeper with convolutions. CVPR, 2015. 6
+
+[8] J.-D. Dong, A.-C. Cheng, D.-C. Juan, W. Wei, and M. Sun.
+Dpp-net: Device-aware progressive search for pareto-
+optimal neural architectures. ECCV, 2018. 2
+
+[9] X. Dong and Y. Yang. Searching for a robust neural archi-
+
+tecture in four gpu hours. In CVPR, 2019. 2
+
+[10] P. Goyal,
+
+P. Doll´ar, R. Girshick,
+
+P. Noordhuis,
+L. Wesolowski, A. Kyrola, A. Tulloch, Y. Jia, and K. He.
+Accurate, large minibatch sgd: training imagenet in 1 hour.
+arXiv preprint arXiv:1706.02677, 2017. 6
+
+[11] Y. Guo, A. Yao, and Y. Chen. Dynamic network surgery for
+
+efﬁcient dnns. NIPS, 2016. 1, 3
+
+[12] K. He, X. Zhang, S. Ren, and J. Sun. Deep residual learning
+
+for image recognition. CVPR, 2016. 1, 3, 4, 6
+
+[13] A. G. Howard, M. Zhu, B. Chen, D. Kalenichenko, W. Wang,
+T. Weyand, M. Andreetto, and H. Adam. Mobilenets: Efﬁ-
+cient convolutional neural networks for mobile vision appli-
+cations. arXiv preprint arXiv:1704.04861, 2017. 1, 2, 6
+
+[14] S. Ioffe and C. Szegedy. Batch normalization: Accelerating
+deep network training by reducing internal covariate shift.
+ICML, 2015. 3
+
+[15] A. Krizhevsky, I. Sutskever, and G. E. Hinton.
+
+classiﬁcation with deep convolutional neural networks.
+NIPS, 2012. 1
+
+Imagenet
+In
+
+[16] A. Lavin and G. Scott. Fast algorithms for convolutional
+
+neural networks. CVPR, 2016. 1
+
+[17] B. Liu, M. Wang, H. Foroosh, M. Tappen, and M. Pensky.
+
+Sparse convolutional neural networks. CVPR, 2015. 1, 3
+
+[18] C. Liu, B. Zoph, J. Shlens, W. Hua, L.-J. Li, L. Fei-Fei,
+A. Yuille, J. Huang, and K. Murphy. Progressive neural ar-
+chitecture search. ECCV, 2018. 6
+
+[27] R. J. Wang, X. Li, S. Ao, and C. X. Ling. Pelee: A real-time
+
+object detection system on mobile devices. NIPS, 2018. 6
+
+[28] B. Wu, X. Dai, P. Zhang, Y. Wang, F. Sun, Y. Wu, Y. Tian,
+P. Vajda, Y. Jia, and K. Keutzer. Fbnet: Hardware-aware
+efﬁcient convnet design via differentiable neural architecture
+search. CVPR, 2019. 2, 6
+
+[29] J. Wu, C. Leng, Y. Wang, Q. Hu, and J. Cheng. Quantized
+convolutional neural networks for mobile devices. CVPR,
+2016. 1, 3
+
+[30] T.-J. Yang, A. Howard, B. Chen, X. Zhang, A. Go, M. San-
+dler, V. Sze, and H. Adam. Netadapt: Platform-aware neural
+network adaptation for mobile applications. ECCV, 2018. 3
+[31] C. Yu, J. Wang, C. Peng, C. Gao, G. Yu, and N. Sang.
+Bisenet: Bilateral segmentation network for real-time se-
+mantic segmentation. ECCV, 2018. 1, 2, 8
+
+[32] X. Zhang, X. Zhou, M. Lin, and J. Sun. Shufﬂenet: An
+extremely efﬁcient convolutional neural network for mobile
+devices. CVPR, 2018. 2, 6
+
+[33] H. Zhao, X. Qi, X. Shen, J. Shi, and J. Jia. Icnet for real-time
+semantic segmentation on high-resolution images. ECCV,
+2018. 1, 2, 5, 7, 8
+
+[34] H. Zhao, J. Shi, X. Qi, X. Wang, and J. Jia. Pyramid scene
+
+parsing network. CVPR, 2017. 1, 2, 5
+
+[35] B. Zoph and Q. V. Le. Neural architecture search with rein-
+
+forcement learning. ICLR, 2017. 2
+
+[36] B. Zoph, V. Vasudevan, J. Shlens, and Q. V. Le. Learn-
+ing transferable architectures for scalable image recognition.
+CVPR, 2018. 1, 2, 3, 6, 7
+
+9153
+
+

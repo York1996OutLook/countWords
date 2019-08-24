@@ -1,0 +1,1573 @@
+FlowNet3D: Learning Scene Flow in 3D Point Clouds
+
+Xingyu Liu∗1
+
+Charles R. Qi∗2
+
+Leonidas J. Guibas1
+
+2
+
+,
+
+1Stanford University
+
+2Facebook AI Research
+
+Abstract
+
+Many applications in robotics and human-computer in-
+teraction can beneﬁt from understanding 3D motion of
+points in a dynamic environment, widely noted as scene
+ﬂow. While most previous methods focus on stereo and
+RGB-D images as input, few try to estimate scene ﬂow di-
+rectly from point clouds. In this work, we propose a novel
+deep neural network named FlowNet3D that learns scene
+ﬂow from point clouds in an end-to-end fashion. Our net-
+work simultaneously learns deep hierarchical features of
+point clouds and ﬂow embeddings that represent point mo-
+tions, supported by two newly proposed learning layers for
+point sets. We evaluate the network on both challenging
+synthetic data from FlyingThings3D and real Lidar scans
+from KITTI. Trained on synthetic data only, our network
+successfully generalizes to real scans, outperforming vari-
+ous baselines and showing competitive results to the prior
+art. We also demonstrate two applications of our scene ﬂow
+output (scan registration and motion segmentation) to show
+its potential wide use cases.
+
+1. Introduction
+
+Scene ﬂow is the 3D motion ﬁeld of points in the
+scene [27]. Its projection to an image plane becomes 2D
+optical ﬂow. It is a low-level understanding of a dynamic
+environment, without any assumed knowledge of structure
+or motion of the scene. With this ﬂexibility, scene ﬂow can
+serve many higher level applications. For example, it pro-
+vides motion cues for object segmentation, action recogni-
+tion, camera pose estimation, or even serve as a regulariza-
+tion for other 3D vision problems.
+
+However, for this 3D ﬂow estimation problem, most pre-
+vious works rely on 2D representations. They extend meth-
+ods for optical ﬂow estimation to stereo or RGB-D images,
+and usually estimate optical ﬂow and disparity map sepa-
+rately [33, 28, 16], not directly optimizing for 3D scene
+ﬂow. These methods cannot be applied to cases where point
+clouds are the only input.
+
+Very recently, researchers in the robotics community
+started to study scene ﬂow estimation directly in 3D point
+
+* indicates equal contributions.
+
+FlowNet3D
+
+point cloud 1: !1×3
+point cloud 2: !2×3
+
+scene flow: !1×3
+
+Figure 1: End-to-end scene ﬂow estimation from point
+clouds. Our model directly consumes raw point clouds
+from two consecutive frames, and outputs dense scene ﬂow
+(as translation vectors) for all points in the 1st frame.
+
+clouds (e.g. from Lidar) [7, 25]. But those works did not
+beneﬁt from deep learning as they built multi-stage systems
+based on hand-crafted features, with simple models such as
+logistic regression. There are often many assumptions in-
+volved such as assumed scene rigidity or existence of point
+correspondences, which make it hard to adapt those systems
+to beneﬁt from deep networks. On the other hand, in the
+learning domain, Qi et al. [19, 20] recently proposed novel
+deep architectures that directly consume point clouds for
+3D classiﬁcation and segmentation. However, their work
+focused on processing static point clouds.
+
+In this work, we connect the above two research frontiers
+by proposing a deep neural network called FlowNet3D that
+learns scene ﬂow in 3D point clouds end-to-end. As illus-
+trated in Fig. 1, given input point clouds from two consec-
+utive frames (point cloud 1 and point cloud 2), our network
+estimates a translational ﬂow vector for every point in the
+ﬁrst frame to indicate its motion between the two frames.
+The network, based on the building blocks from [19], is
+able to simultaneously learn deep hierarchical features of
+point clouds and ﬂow embeddings that represent their mo-
+tions. While there are no correspondences between the
+two sampled point clouds, our network learns to associate
+points from their spatial localities and geometric similar-
+ities, through our newly proposed ﬂow embedding layer.
+Each output embedding implicitly represents the 3D mo-
+tion of a point. From the embeddings, the network further
+up-samples and reﬁnes them in an informed way through
+another novel set upconv layer. Compared to direct feature
+
+1529
+
+up-sampling with 3D interpolations, the set upconv layers
+learn to up-sample points based on their spatial and feature
+relations.
+
+We extensively study the design choices in our model
+and validate the usefullness of our newly proposed point
+set learning layers, with a large-scale synthetic dataset
+(FlyingThings3D). We also evaluate our model on the
+real LiDAR scans from the KITTI benchmark, where our
+model shows signiﬁcantly stronger performance compared
+to baselines of non-deep learning methods and competitive
+results to the prior art. More remarkably, we show that our
+network, even trained on synthetic data, is able to robustly
+estimate scene ﬂow in point clouds from real scans, showing
+its great generalizability. With ﬁne tuning on a small set of
+real data, the network can achieve even better performance.
+
+The key contributions of this paper are as follows1:
+
+• We propose a novel architecture called FlowNet3D
+that estimates scene ﬂow from a pair of consecutive
+point clouds end-to-end.
+
+• We introduce two new learning layers on point clouds:
+a ﬂow embedding layer that learns to correlate two
+point clouds, and a set upconv layer that learns to prop-
+agate features from one set of points to the other.
+
+• We show how we can apply the proposed FlowNet3D
+architecture on real LiDAR scans from KITTI and
+achieve greatly improved results in 3D scene ﬂow es-
+timation compared with traditional methods.
+
+2. Related Work
+
+Scene ﬂow from RGB or RGB-D images. Vedula et
+al. [27] ﬁrst introduced the concept of scene ﬂow, as three-
+dimensional ﬁeld of motion vectors in the world. They as-
+sumed knowledge of stereo correspondences and combined
+optical ﬂow and ﬁrst-order approximations of depth maps
+to estimate scene ﬂow. Since this seminal work, many oth-
+ers have tried to jointly estimate structure and motion from
+stereoscopic images [12, 18, 34, 26, 5, 33, 28, 29, 1, 30, 16],
+mostly in a variational setting with regularizations for
+smoothness of motion and structure [12, 1, 26], or with as-
+sumption of the rigidity of the local structures [29, 16, 30].
+With the recent advent of commodity depth sensors, it
+has become feasible to estimate scene ﬂow from monocu-
+lar RGB-D images [9], by generalizing variational 2D ﬂow
+algorithms to 3D [10, 14] and exploiting more geometric
+cues provided by the depth channel [21, 11, 23]. Our work
+focuses on learning scene ﬂow directly from point clouds,
+without any dependence on RGB images or assumptions on
+rigidity and camera motions.
+
+1The code is available at https://github.com/xingyul/
+
+flownet3d.
+
+Scene ﬂow from point clouds. Recently, Dewan et
+al. [7] proposed to estimate dense rigid motion ﬁelds in 3D
+LiDAR scans. They formulate the problem as an energy
+minimization problem of a factor graph, with hand-crafted
+SHOT [24] descriptors for correspondence search. Later,
+Ushani et al. [25] presented a different pipeline: They train
+a logistic classiﬁer to tell whether two columns of occu-
+pancy grids correspond and formulate an EM algorithm to
+estimate a locally rigid and non-deforming ﬂow. Compared
+to these previous works, our method is an end-to-end solu-
+tion with deep learned features and no dependency on hard
+correspondences or assumptions on rigidity.
+
+Concurrent to our work, [2] estimate scene ﬂow as rigid
+motions of individual objects or background with network
+that jointly learns to regress ego-motion and detect 3D ob-
+jects. [22] jointly estimate object rigid motions and segment
+them based on their motions. A recent work [32] also ex-
+plored to estimate scene ﬂow with a newly proposed learn-
+ing network on point clouds but little detail was revealed on
+its speciﬁc implementation.
+
+Related deep learning based methods. FlowNet [8]
+and FlowNet 2.0 [13] are two seminal works that propose to
+learn optical ﬂow with convolutional neural networks in an
+end-to-end fashion, showing competitive performance with
+great efﬁciency. [15] extends FlowNet to simultaneously es-
+timating disparity and optical ﬂow. [32] proposed paramet-
+ric continuous convolution for scene ﬂow in point clouds.
+Our work is inspired by the success of those deep learning
+based attempts at optical ﬂow prediction, and can be viewed
+as the 3D counterpart of them. However, the irregular struc-
+ture in point clouds (no regular grids as in image) presents
+new challenges and opportunities for design of novel archi-
+tectures, which is the focus of this work.
+
+3. Problem Deﬁnition
+
+We design deep neural networks that estimate 3D mo-
+tion ﬂow from consecutive frames of point clouds. Input to
+our network are two sets of points sampled from a dynamic
+3D scene, at two consecutive time frames: P = {xi|i =
+1, . . . , n1} (point cloud 1) and Q = {yj|j = 1, . . . , n2}
+(point cloud 2), where xi, yj ∈ R3 are XY Z coordinates of
+individual points. Note that due to object motion and view-
+point changes, the two point clouds do not necessarily have
+the same number of points or have any correspondences be-
+tween their points. It is also possible to include more point
+features such as color and Lidar intensity. For simplicity we
+focus on XY Z only.
+
+Now consider the physical point under a sampled point
+xi moves to location x′
+i at the second frame, then the trans-
+lational motion vector of the point is di = x′
+i − xi. Our
+goal is, given P and Q, to recover the scene ﬂow for every
+sampled point in the ﬁrst frame: D = {di|i = 1, . . . , n1}.
+
+530
+
+set 
+conv 
+
+ﬂow 
+
+embedding 
+
+set 
+
+upconv
+
+n × (c + 3)
+
+′n × ( ′c + 3)
+
+n
+1
+
+× (c + 3) n
+2
+
+× (c + 3)
+
+n
+1
+
+× ( ′c + 3)
+
+n × (c + 3)
+
+′n × ( ′c + 3)
+
+Figure 2: Three trainable layers for point cloud processing. Left: the set conv layer to learn deep point cloud features.
+Middle: the ﬂow embedding layer to learn geometric relations between two point clouds to infer motions. Right: the set
+upconv layer to up-sample and propagate point features in a learnable way.
+
+4. FlowNet3D Architecture
+
+4.2. Point Mixture with Flow Embedding Layer
+
+In this section, we introduce FlowNet3D (Fig. 3), an end-
+to-end scene ﬂow estimation network on point clouds. The
+model has three key modules for (1) point feature learn-
+ing, (2) point mixture, and (3) ﬂow reﬁnement. Under these
+modules are three key deep point cloud processing layers:
+set conv layer, ﬂow embedding layer and set upconv layer
+(Fig. 2).
+In the following subsections, we describe each
+modules with their associating layers in details, and spec-
+ify the ﬁnal FlowNet3D architecture in Sec. 4.4.
+
+4.1. Hierarchical Point Cloud Feature Learning
+
+Since a point cloud is a set of points that is irregular and
+orderless, traditional convolutions do not ﬁt. We therefore
+follow a recently proposed PointNet++ architecture [20],
+a translation-invariant network that learns hierarchical fea-
+tures. Although the set conv layer 2 was designed for 3D
+classiﬁcation and segmentation, we ﬁnd its feature learning
+layers also powerful for the task of scene ﬂow.
+
+As shown in Fig. 2 (left), a set conv layer takes a point
+cloud with n points, each point pi = {xi, fi} with its XY Z
+coordinates xi ∈ R3 and its feature fi ∈ Rc (i = 1, ..., n),
+and outputs a sub-sampled point cloud with n′ points, where
+each point p′
+j and
+an updated point feature f ′
+
+j} has its XY Z coordinates x′
+
+(j = 1, ...n′).
+
+j = {x′
+
+j, f ′
+
+j ∈ Rc′
+
+Speciﬁcally, as described more closely in [20], the layer
+ﬁrstly samples n′ regions from the input points with farthest
+point sampling (with region centers as x′
+j ), then for each re-
+gion (deﬁned by a radius neighborhood speciﬁed by radius
+r), it extracts its local feature with the following symmetric
+function
+
+To mix two point clouds we rely on a new ﬂow embed-
+ding layer (Fig. 2 middle). To inspire our design, imagine a
+point at frame t, if we know its corresponding point in frame
+t+1 then its scene ﬂow is simply their relative displacement.
+However, in real data, there are often no correspondences
+between point clouds in two frames, due to viewpoint shift
+and occlusions. It is still possible to estimate the scene ﬂow
+though, because we can ﬁnd multiple softly corresponding
+points in frame t + 1 and make a “weighted” decision.
+
+Our ﬂow embedding layer learns to aggregate both (ge-
+ometric) feature similarities and spatial relationships of
+points to produce embeddings that encode point motions.
+Compared to the set conv layer that takes in a single point
+the ﬂow embedding layer takes a pair of point
+cloud,
+clouds: {pi = (xi, fi)}n1
+j=1 where
+each point has its XY Z coordinate xi, yj ∈ R3, and a fea-
+ture vector fi, gj ∈ Rc. The layer learns a ﬂow embedding
+i=1 where ei ∈ Rc′
+for each point in the ﬁrst frame: {ei}n1
+.
+We also pass the original coordinates xi of the points in
+the ﬁrst frame to the output, thus the ﬁnal layer output is
+{oi = (xi, ei)}n1
+
+i=1 and {qj = (yj, gj)}n2
+
+i=1.
+
+The underneath operation to compute ei is similar to the
+one in set conv layers. However, their physical meanings
+are vastly different. For a given point pi in the ﬁrst frame,
+the layer ﬁrstly ﬁnds all the points qj from the second frame
+in its radius neighborhood (highlighted blue points). If a
+particular point q∗ = {y∗, g∗} corresponded to pi, then the
+ﬂow of pi were simply y∗−xi. Since such case rarely exists,
+we instead use a neural layer to aggregate ﬂow votes from
+all the neighboring qj ’s
+
+f ′
+j =
+
+MAX
+
+j k≤r}(cid:8)h(fi, xi − x′
+
+j)(cid:9) .
+
+{i|kxi−x′
+
+(1)
+
+ei =
+
+MAX
+
+{j|kyj −xik≤r}
+
+{h(fi, gj, yj − xi)} .
+
+(2)
+
+where h : Rc+3 → Rc′
+is a non-linear function (realized as
+a multi-layer perceptron) with concatenated fi and xi − x′
+j
+as inputs, and MAX is element-wise max pooling.
+
+2Noted as set abstraction layer in [20]. We name it set conv here to
+
+emphasize its spatial locality and translation invariance.
+
+where h is a non-linear function with trainable parameters
+similar to the set conv layer and MAX is the element-wise
+max pooling. Compared to Eq. (1), we input two point fea-
+tures to h, expecting it to learn to compute the “weights” to
+aggregate all potential ﬂow vectors dij = yj − xi.
+
+An alternative formulation is to explicitly specify how
+we relate point features, by computing a feature distance
+
+531
+
+1
+
+d
+u
+o
+l
+c
+
+i
+
+t
+n
+o
+p
+
+(1
+
+3
+
+2
+
+d
+u
+o
+l
+c
+
+i
+
+t
+n
+o
+p
+
+(2
+
+3
+
+skip connections
+
+flow
+
+embedding
+
+set conv
+
+layers
+
+set upconv
+
+layers
+
+128
+
+(1/8	
+
+3
+
+512
+
+(1/128	 3
+
+w
+o
+l
+f
+
+e
+n
+e
+c
+s
+
+(1
+
+3
+
+set conv
+
+layers
+
+64
+
+(1/8	
+
+3
+
+set conv
+
+layers
+
+64
+
+(2/8	
+
+3
+
+point feature learning
+
+point mixture
+
+flow refinement
+
+Figure 3: FlowNet3D architecture. Given two frames of point clouds, the network learns to predict the scene ﬂow as
+translational motion vectors for each point of the ﬁrst frame. See Fig. 2 for illustrations of the layers and Sec. 4.4 for more
+details on the network architecture.
+
+dist(fi, gj). The feature distance is then fed to the non-
+linear function h (instead directly feeding the fi and gj ).
+In ablation studies we show that our formulation in Eq. (2)
+learns more effective ﬂow embeddings than this alternative.
+The computed ﬂow embeddings are further mixed
+through a few more set conv layers so that we obtain spa-
+tial smoothness. This also help resolve ambiguous cases
+(e.g. points on the surface of a translating table) that require
+large receptive ﬁelds for ﬂow estimation.
+
+4.3. Flow Reﬁnement with Set Upconv Layer
+
+In this module, we up-sample the ﬂow embeddings as-
+sociated with the intermediate points to the original points,
+and at the last layer predict ﬂow for all the original points.
+The up-sampling step is achieved by a learnable new layer
+– the set upconv layer, which learns to propagate and reﬁne
+the embeddings in an informed way.
+
+Fig. 2 (right) illustrates the process of a set upconv
+layer. The inputs to the layer are source points {pi =
+{xi, fi}|i = 1, . . . , n}, and a set of target point coordinates
+{x′
+j|j = 1, . . . , n′} which are locations we want to propa-
+gate the source point features to. For each target location
+j the layer outputs its point feature f ′
+x′
+(propagated
+ﬂow embedding in our case) by aggregating its neighboring
+source points’ features.
+
+j ∈ Rc′
+
+Interestingly,
+
+just like in 2D convolutions in images
+where upconv2D can be implemented through conv2D, our
+set upconv can also be directly achieved with the same set
+conv layer as deﬁned in Eq. (1), but with a different local re-
+gion sampling strategy. Instead of using farthest point sam-
+pling to ﬁnd x′
+j as in the set conv layer, we compute features
+on speciﬁed locations by the target points {x′
+
+j}n′
+
+j=1.
+
+Note that although n′ > n in our up-sampling case, the
+
+set upconv layer itself is ﬂexible to take any number of target
+locations which unnecessarily correspond to any real points.
+It is a ﬂexible and trainable layer to propagate/summarize
+features from one point cloud to another.
+
+j k≤r} w(xi, x′
+
+features – using 3D interpolation (f ′
+j
+
+Compared to an alternative way to up-sample
+=
+point
+P{i|kxi−x′
+j)fi with w as a normalized
+inverse-distance weight function [20]), our network learns
+how to weight the nearby points’ features, just as how the
+ﬂow embedding layer weights displacements. We ﬁnd that
+the new set upconv layer shows signiﬁcant advantages in
+empirical results.
+
+4.4. Network Architecture
+
+The ﬁnal FlowNet3D architecture is composed of four
+set conv layers, one ﬂow embedding layer and four set up-
+conv layers (corresponding to the four set conv layers) and
+a ﬁnal linear ﬂow regression layer that outputs the R3 pre-
+dicted scene ﬂow. For the set upconv layers we also have
+skip connections to concatenate set conv output features.
+Each learnable layer adopts multi-layer perceptrons for the
+function h with a few Linear-BatchNorm-ReLU layers pa-
+rameterized by its linear layer width. The detailed layer
+parameters are as shown in Table 1.
+
+5. Training and Inference wtih FlowNet3D
+
+We take a supervised approach to train the FlowNet3D
+model with ground truth scene ﬂow supervision. While this
+dense supervision is hard to acquire in real data, we tap
+large-scale synthetic dataset (FlyingThings3D) and show
+that our model trained on synthetic data generalizes well
+to real Lidar scans (Sec. 6.2).
+
+532
+
+Layer type
+
+set conv
+set conv
+
+ﬂow embedding
+
+set conv
+set conv
+
+set upconv
+set upconv
+set upconv
+set upconv
+
+linear
+
+r
+0.5
+1.0
+5.0
+2.0
+4.0
+4.0
+2.0
+1.0
+0.5
+-
+
+Sample rate
+
+0.5×
+0.25×
+
+1×
+
+0.25×
+0.25×
+
+4×
+4×
+4×
+2×
+-
+
+MLP width
+[32, 32, 64]
+[64, 64, 128]
+
+[128, 128, 128]
+[128, 128, 256]
+[256, 256, 512]
+[128, 128, 256]
+[128, 128, 256]
+[128, 128, 128]
+[128, 128, 128]
+
+3∗
+
+Method
+
+Input
+
+EPE
+
+FlowNet-C [8]
+
+0.7887
+depth
+RGBD 0.7836
+
+ACC
+(0.05)
+
+0.20%
+0.25%
+
+ACC
+(0.1)
+
+1.49%
+1.74%
+
+ICP [3]
+
+EM-baseline (ours)
+LM-baseline (ours)
+DM-baseline (ours)
+
+points
+points
+points
+points
+
+0.5019
+0.5807
+0.7876
+0.3401
+
+7.62% 21.98%
+2.64% 12.21%
+0.27%
+1.83%
+4.87% 21.01%
+
+FlowNet3D (ours)
+
+points
+
+0.1694
+
+25.37% 57.85%
+
+Table 1: FlowNet3D architecture specs. Note that the last
+layer is linear thus has no ReLU and batch normalization.
+
+Table 2: Flow estimation results on the FlyingThings3D
+dataset. Metrics are End-point-error (EPE), Acc (<0.05 or
+5%, <0.1 or 10%) for scene ﬂow.
+
+Training loss with cycle-consistency regularization.
+We use smooth L1 loss (huber loss) for scene ﬂow su-
+pervision, together with a cycle-consistency regularization.
+Given a point cloud P = {xi}n1
+i=1 at frame t and a point
+cloud Q = {yj}n2
+j=1 at frame t + 1, the network predicts
+scene ﬂow as D = F (P, Q; Θ) = {di}n1
+i=1 where F is the
+FlowNet3D model with parameters Θ. With ground truth
+scene ﬂow D∗ = {d∗
+i=1, our loss is deﬁned as in Eq. (3).
+In the equation, kd′
+i + dik is the cycle-consistency term that
+i=1 = F (P ′, P; Θ) from
+enforces the backward ﬂow {d′
+the shifted point cloud P ′ = {xi + di}n1
+i=1 to the original
+point cloud P is close to the reverse of the forward ﬂow
+
+i }n1
+
+i}n1
+
+L(P, Q, D∗, Θ) =
+
+1
+n1
+
+n1
+
+X
+
+i=1
+
+nkdi − d∗
+
+i k+λkd′
+
+i + diko (3)
+
+Inference with random re-sampling. A special chal-
+lenge with regression problems (such as scene ﬂow) in point
+clouds is that down-sampling introduces noise in predic-
+tion. A simple but effective way to reduce the noise is to
+randomly re-sample the point clouds for multiple inference
+runs and average the predicted ﬂow vectors for each point.
+In the experiments, we will see that this re-sampling and
+averaging step leads to a slight performance gain.
+
+6. Experiments
+
+In this section, we ﬁrst evaluate and validate our design
+choices in Sec. 6.1 with a large-scale synthetic dataset (Fly-
+ingThings3D), and then in Sec. 6.2 we show how our model
+trained on synthetic data can generalize successfully to real
+Lidar scans from KITTI. Finally, in Sec. 6.3 we demonstrate
+two applications of scene ﬂow on 3D shape registration and
+motion segmentation.
+
+6.1. Evaluation and Design Validation on FlyingTh 
+
+ings3D
+
+As annotating or acquiring dense scene ﬂow is very ex-
+pensive on real data, there does not exist any large-scale real
+
+dataset with scene ﬂow annotations to the best of our knowl-
+edge 3. Therefore, we turn to a synthetic, yet challenging
+and large-scale dataset, FlyingThings3D, to train and eval-
+uate our model as well as to validate our design choices.
+
+FlyingThings3D [15]. The dataset consists of stereo and
+RGB-D images rendered from scenes with multiple ran-
+domly moving objects sampled from ShapeNet [6]. There
+are in total around 32k stereo images with ground truth dis-
+parity and optical ﬂow maps. We randomly sub-sampled
+20,000 of them as our training set and 2,000 as our test set.
+Instead of using RGB images, we preprocess the data by
+popping up disparity maps to 3D point clouds and optical
+ﬂow to scene ﬂow. We will release our prepared data.
+
+Evaluation Metrics. We use 3D end point error (EPE)
+and ﬂow estimation accuracy (ACC) as our metrics. The
+3D EPE measures the average L2 distance between the es-
+timated ﬂow vector to the ground truth ﬂow vector. Flow
+estimation accuracy measures the portion of estimated ﬂow
+vectors that are below a speciﬁed end point error, among
+all the points. We report two ACC metrics with different
+thresholds.
+
+Results. Table 2 reports ﬂow evaluation results on the test
+set, comparing FlowNet3D to various baselines. Among
+the baselines, FlowNet-C is a CNN model adapted from
+[13] that learns to predict scene ﬂow from a pair of depth
+images or RGB-D images (depth images transformed to
+XY Z coordinate maps for input), instead of optical ﬂow
+from RGB images as originally in [13] (more architecture
+details in supplementary). However, we see that this image-
+based method has a hard time predicting accurate scene ﬂow
+probably because of strong occlusions and clutters in the 2D
+projected views. We also compare with an ICP (iterative
+
+3The KITTI dataset we test on in Sec. 6.2 only has 200 frames with
+annotations. [31] mentioned a larger dataset however it belongs to Uber
+and is not publicly available.
+
+533
+
+one-hot vector
+
+encoder
+deocder
+
+3
+×
+1
+!
+
+3
+×
+1
+!
+
+3
+×
+2
+!
+
+local feature
+
+set 
+convs
+
+&
+
+shared
+
+&
+
+point-wise
+
+FC
+
+3
+×
+1
+!
+
+set 
+convs
+
+global feature
+concatenation
+
+3
+×
+1
+!
+
+3
+×
+2
+!
+
+Early Mixture
+
+Late Mixture
+
+3
+×
+1
+!
+
+3
+×
+2
+!
+
+set 
+convs
+
+shared
+
+set 
+convs
+
+×
+1
+’
+!
+
+)
+3
++
+)
+(
+
+×
+2
+’
+!
+
+)
+3
++
+)
+(
+
+local feature
+
+mix
+
+×
+1
+’
+!
+
+)
+3
++
+
+′
+
+)
+(
+
+feature
+
+propagate
+
+3
+×
+1
+!
+
+local feature
+
+Deep Mixture
+
+Figure 4: Three meta-architectures for scene ﬂow net-
+work. FlowNet3D (Fig. 3) belongs to the deep mixture.
+
+closest point) baseline that ﬁnds a single rigid transform for
+the entire scene, which matches large objects in the scene
+but is unable to adapt to the multiple independently moving
+objects in our input. Surprisingly, this ICP baseline is still
+able to get some reasonable numbers (even better than the
+2D FlowNet-C one).
+
+We also report results of three baseline deep models that
+directly consume point clouds (as instantiations of the three
+meta-architectures in Fig. 4). They mix point clouds of
+two frames at early, late, or intermediate stages. The EM-
+baseline combines two point clouds into a single set at input
+and distinguishes them by appending each point with a one-
+hot vector of length 2. The LM-baseline ﬁrstly computes a
+global feature for the point cloud from each frame, and then
+concatenates the global features as a way to mix the points.
+The DM-baseline is similar in structure to our FlowNet3D
+(they both belong to the DM meta-architecture) but uses a
+more naive way to mix two intermediate point clouds (by
+concatenating all features and point displacements and pro-
+cessing it with fully connected layers), and it uses 3D in-
+terpolation instead of set upconv layers to propagate point
+features. More details are provided in the supplementary.
+
+Compared to those baseline models, our FlowNet3D
+achieves much lower EPE as well as signiﬁcantly higher
+accuracy.
+
+Ablation studies. Table 3 shows the effects of several de-
+sign choices of FlowNet3D. Comparing the ﬁrst two rows,
+we see max pooling has a signiﬁcant advantage over aver-
+age pooling, probably because max pooling is more selec-
+tive in picking “corresponding” point and suffers less from
+noise. From row 2 to row 4, we compare our design to the
+alternatives of using feature distance functions (as discussed
+in Sec. 4.2) with cosine distance and its unnormalized ver-
+sion (dot product). Our approach gets the best performance,
+
+Feature
+distance
+
+dot
+
+dot
+
+cosine
+learned
+
+learned
+learned
+learned
+
+Pooling Reﬁne
+
+Multiple
+resample
+
+Cycle-
+
+consistency
+
+avg
+
+max
+max
+max
+
+max
+max
+max
+
+interp
+
+interp
+interp
+interp
+
+upconv
+upconv
+upconv
+
+✗
+
+✗
+
+✗
+
+✗
+
+✗
+
+✓
+
+✓
+
+✗
+
+✗
+
+✗
+
+✗
+
+✗
+
+✗
+
+✓
+
+EPE
+
+0.3163
+
+0.2463
+0.2600
+0.2298
+
+0.1835
+0.1694
+0.1626
+
+Table 3: Ablation studies on the FlyingThings3D dataset.
+We study the effects of distance function, type of pooling in
+h, layers used in ﬂow reﬁnement, as well as effects of re-
+sampling and cycle-consistency regularization.
+
+Method
+
+Input
+
+EPE
+
+outliers
+
+(meters)
+
+(0.3m or 5%)
+
+KITTI
+ranking
+
+LDOF [4]
+OSF [16]
+
+PRSM [30]
+
+RGB-D
+RGB-D
+RGB-D
+
+0.498
+0.394
+0.327
+RGB stereo 0.729
+
+Dewan et al. [7]
+
+ICP (global)
+
+ICP (segmentation)
+
+points
+points
+points
+
+FlowNet3D (ours)
+
+points
+
+0.587
+0.385
+0.215
+
+0.122
+
+12.61%
+8.25%
+6.06%
+6.40%
+
+71.74%
+42.38%
+13.38%
+
+5.61%
+
+21
+9
+
+3
+
+-
+-
+-
+
+-
+
+Table 4: Scene ﬂow estimation on the KITTI scene ﬂow
+dataset (w/o ground points). Metrics are EPE, outlier ra-
+tio (>0.3m or 5%). KITTI rankings are the methods’ rank-
+ings on the KITTI scene ﬂow leaderboard. Our FlowNet3D
+model is trained on the synthetic FlyingThings3D dataset.
+
+with (11.6% error reduction compared to using the cosine
+distance. Looking at row 4 and row 5, we see that our newly
+proposed set upconv layer signiﬁcantly reduces ﬂow error
+by 20%. Lastly, we ﬁnd multiple re-sampling (10 times)
+during inference (second last row) and training with cycle-
+consistency regularization (with λ = 0.3) further boost the
+performance. The ﬁnal row represents the ﬁnal setup of our
+FlowNet3D.
+
+6.2. Generalization to Real Lidar Scans in KITTI
+
+In this section, we show that our model, trained on the
+synthetic dataset, can be directly applied to detect scene
+ﬂow in point clouds from real Lidar scans from KITTI.
+
+Data and setup. We use the KITTI scene ﬂow dataset [17,
+16], which is designed for evaluations of RGB stereo based
+methods. To evaluate point cloud based method, we use
+its ground truth labels and trace raw point clouds associ-
+ated to the frames. Since no point cloud is provided for the
+
+534
+
+Figure 5: Scene ﬂow on KITTI point clouds. We show scene ﬂow predicted by FlowNet3D on four KITTI scans. Lidar
+points are colored to indicate points as from frame 1, frame 2 or as translated points (point cloud 1 + scene ﬂow).
+
+Method
+
+PRSM [30]
+(RGB stereo)
+
+PRSM [30]
+(RGB-D)
+
+ICP
+
+FlowNet3D
+
+(global)
+
+(without ﬁnetune)
+
+FlowNet3D + ICP
+(without ﬁnetune)
+
+FlowNet3D
+
+(with ﬁnetune)
+
+3D EPE
+
+0.668
+
+0.368
+
+0.281
+
+0.211
+
+3D outliers
+
+6.42%
+
+6.06%
+
+24.29%
+
+20.71%
+
+0.195
+
+13.41%
+
+0.144
+
+9.52%
+
+Table 5: Scene ﬂow estimation on the KITTI sceneﬂow dataset (w/ ground points). The ﬁrst 100 frames are used to
+ﬁnetune our model. All methods are evaluated on the rest 50 frames.
+
+test set (and part of the train set), we evaluate on all 150
+out of 200 frames from the train set with available point
+clouds. Furthermore, to keep comparison fair with the pre-
+vious method [7], we ﬁrstly evaluation our model on Lidar
+scans with removed grounds 4 (see supplementary for de-
+tails) in Table 4. We then report another set of results with
+the full Lidar scans including the ground points in Table 5.
+
+(fourth row) or pixel depth change (ﬁrst three rows) to com-
+pute depth-wise ﬂow displacements.
+
+ICP (global) estimates a single rigid motion for the en-
+tire scene. ICP (segmentation) is a stronger baseline that
+ﬁrst computes connected components on Lidar points after
+ground removal and then estimates rigid motions for each
+individual segment of point clouds.
+
+Baselines. LDOF+depth [4] uses a variational model to
+solve optical ﬂow and treats depth as an extra feature di-
+mension. OSF [16] uses discrete-continuous CRF on su-
+perpixels with the assumption of rigid motion of objects.
+PRSM [30] uses energy minimization on rigidly moving
+segments and jointly estimates multiple attributes together
+including rigid motion. Since the three RGB-D image based
+methods do not output scene ﬂow directly (but optical ﬂow
+and disparity separately), we either use estimated disparity
+
+4The ground is a large piece of ﬂat geometry that provides little cue to
+its motion but at the same time occupies a large portion of points, which
+biases the evaluation results.
+
+Results.
+In Table 4, we compare FlowNet3D with prior
+arts optimized for 2D optical ﬂow as well as the two ICP
+baselines on point clouds. Compared to 2D-image based
+methods [4, 16, 30], our method shows great advantages on
+scene ﬂow estimation – achieving signiﬁcantly lower 3D
+end-point error (63% relative error reduction from [30])
+and 3D outlier ratios. Our method also outperforms the two
+ICP baselines that rely more on rigidity of global scene or
+correctness of segmentation. Additionally, we conclude that
+our model, although only trained on synthetic data, remark-
+ably generalizes well to the real Lidar point clouds.
+
+Fig. 5 visualizes our scene ﬂow prediction. We can see
+
+535
+
+Input 
+
+point clouds
+
+ICP 
+
+registration
+
+Scene flow
+
+Ours
+
+registration
+
+Figure 6: Partial scan registration of two chair scans.
+The goal is to register point cloud 1 (red) to point cloud 2
+(green). The transformed point cloud 1 is in blue. We show
+a case where ICP fails to align the chair while our method
+grounded by dense scene ﬂow succeeds.
+
+ICP
+
+Scene ﬂow (SF)
+
+SF + Rigid motion
+
+EPE
+
+0.384
+
+0.220
+
+0.125
+
+Table 6: Point cloud warping errors.
+
+our model can accurately estimate ﬂows for dynamic ob-
+jects, such as moving vehicles and pedestrians.
+
+In Table 5 we report results on the full Lidar scans with
+ground point clouds. We also split the data to use 100
+frames to ﬁnetune our FlowNet3D model on Lidar scans,
+and use the rest 50 for testing. We see that including ground
+points negatively impacted all methods. But our method
+still outperforms the ICP baseline. By adopting ICP es-
+timated ﬂow on the segmented grounds and net estimated
+ﬂow for the rest of points (FlowNet3D+ICP), our method
+can also beat the prior art (PRSM) in EPE. The PRSM leads
+in outlier ratio because ﬂow estimation for grounds is more
+friendly with methods taking images input. By ﬁnetuning
+FlowNet3D on the Lidar scans, our model even achieves
+better results (the last column).
+
+6.3. Applications
+
+While scene ﬂow itself is a low-level signal in under-
+standing motions,
+it can provide useful cues for many
+higher level applications as shown below (more details on
+the demo and datasets are included in supplementary).
+
+6.3.1
+
+3D Scan Registration
+
+Point cloud registration algorithms (e.g. ICP) often rely
+on ﬁnding correspondences between the two point sets.
+However due to scan partiality, there are often no direct
+correspondences.
+In this demo, we explore in using the
+dense scene ﬂow predicted from FlowNet3D for scan reg-
+istration. The point cloud 1 shifted by our predicted scene
+ﬂow has a natural correspondence to the original point cloud
+1 and thus can be used to estimate a rigid motion between
+them. We show in Fig. 6 that in partial scans our scene ﬂow
+
+Figure 7: Motion segmentation of a Lidar point cloud.
+Left: Lidar points and estimated scene ﬂow in colored
+quiver vectors. Right: motion segmented objects and re-
+gions.
+
+based registration can be more robust than the ICP method
+in cases when ICP stucks at a local minimum. Table 6 quan-
+titatively compares the 3D warping error (the EPE from
+warped points to ground truth points) of ICP, directly us-
+ing our scene ﬂow and using scene ﬂow followed by a rigid
+motion estimation.
+
+6.3.2 Motion Segmentation
+
+Our estimated scene ﬂow in Lidar point clouds can also
+be used for motion segmentation of the scene – segment-
+ing the scene into different objects or regions depending on
+their motions. In Fig. 7, we demonstrate motion segmen-
+tation results in a KITTI scene, where we clustered Lidar
+points based on their coordinates and estimated scene ﬂow
+vectors. We see that different moving cars, grounds, and
+static objects are clearly segmented from each other. Re-
+cently, [22] also tried to jointly estimate scene ﬂow and mo-
+tion segmentation from RGB-D input. It is interesting to
+augment our pipeline for similar tasks in point clouds in the
+future.
+
+7. Conclusion
+
+In this paper, we have presented a novel deep neural net-
+work architecture that estimates scene ﬂow directly from 3D
+point clouds, as arguablely the ﬁrst work that shows success
+in solving the problem end-to-end with point clouds. To
+support FlowNet3D, we have proposed a novel ﬂow em-
+bedding layer that learns to aggregate geometric similar-
+ities and spatial relations of points for motion encoding,
+as well as a new set upconv layer for trainable set feature
+propagation. On both challenging synthetic dataset and real
+Lidar point clouds, we validated our network design and
+showed its competitive or better results to various baselines
+and prior arts. We have also demonstrated two example ap-
+plications of using scene ﬂow estimated from our model.
+
+Acknowledgement
+
+This research was supported by Toyota-Stanford AI Cen-
+ter grant TRI-00387, NSF grant IIS-1763268, a Vannevar
+Bush Faculty Fellowship, and a gift from Amazon AWS.
+
+536
+
+References
+
+[1] T. Basha, Y. Moses, and N. Kiryati. Multi-view scene ﬂow
+IJCV,
+
+estimation: A view centered variational approach.
+2013. 2
+
+[2] A. Behl, D. Paschalidou, S. Donn´e, and A. Geiger. Point-
+ﬂownet: Learning representations for 3d scene ﬂow estima-
+tion from point clouds. arXiv preprint arXiv:1806.02170,
+2018. 2
+
+[3] P. J. Besl and N. D. McKay. A method for registration of 3-d
+
+shapes. TPAMI, 1992. 5
+
+[4] T. Brox and J. Malik. Large displacement optical ﬂow: De-
+scriptor matching in variational motion estimation. TPAMI,
+2011. 6, 7
+
+[5] J. ˇCech, J. Sanchez-Riera, and R. Horaud. Scene ﬂow esti-
+mation by growing correspondence seeds. In CVPR, 2011.
+2
+
+[6] A. X. Chang, T. Funkhouser, L. Guibas, P. Hanrahan,
+Q. Huang, Z. Li, S. Savarese, M. Savva, S. Song, H. Su,
+J. Xiao, L. Yi, and F. Yu. ShapeNet: An Information-Rich
+3D Model Repository. Technical Report arXiv:1512.03012,
+2015. 5
+
+[7] A. Dewan, T. Caselitz, G. D. Tipaldi, and W. Burgard. Rigid
+
+scene ﬂow for 3d lidar scans. In IROS, 2016. 1, 2, 6, 7
+
+[8] A. Dosovitskiy, P. Fischery, E. Ilg, C. Hazirbas, V. Golkov,
+P. van der Smagt, D. Cremers, and T. Brox. Flownet: Learn-
+ing optical ﬂow with convolutional networks. In ICCV, 2015.
+2, 5
+
+[9] S. Hadﬁeld and R. Bowden. Kinecting the dots: Particle
+
+based scene ﬂow from depth sensors. In ICCV, 2011. 2
+
+[10] E. Herbst, X. Ren, and D. Fox. Rgb-d ﬂow: Dense 3-d mo-
+
+tion estimation using color and depth. In ICRA, 2013. 2
+
+[11] M. Hornacek, A. Fitzgibbon, and C. Rother. Sphereﬂow: 6
+
+dof scene ﬂow from rgb-d pairs. In CVPR, 2014. 2
+
+[12] F. Huguet and F. Devernay. A variational method for scene
+
+ﬂow estimation from stereo sequences. In ICCV, 2007. 2
+
+[13] E. Ilg, N. Mayer, T. Saikia, M. Keuper, A. Dosovitskiy, and
+T. Brox. Flownet 2.0: Evolution of optical ﬂow estimation
+with deep networks. In CVPR, 2017. 2, 5
+
+[14] M. Jaimez, M. Souiai, J. Gonzalez-Jimenez, and D. Cre-
+mers. A primal-dual framework for real-time dense rgb-d
+scene ﬂow. In ICRA, 2015. 2
+
+[15] N. Mayer, E. Ilg, P. Hausser, P. Fischer, D. Cremers,
+A. Dosovitskiy, and T. Brox. A large dataset to train convo-
+lutional networks for disparity, optical ﬂow, and scene ﬂow
+estimation. In CVPR, 2016. 2, 5
+
+[16] M. Menze and A. Geiger. Object scene ﬂow for autonomous
+
+vehicles. In CVPR 2015. 1, 2, 6, 7
+
+[17] M. Menze, C. Heipke, and A. Geiger. Joint 3d estimation
+In ISPRS Workshop on Image
+
+of vehicles and scene ﬂow.
+Sequence Analysis (ISA), 2015. 6
+
+[18] J.-P. Pons, R. Keriven, and O. Faugeras. Multi-view stereo
+reconstruction and scene ﬂow estimation with a global
+image-based matching score. IJCV, 2007. 2
+
+[19] C. R. Qi, H. Su, K. Mo, and L. J. Guibas. Pointnet: Deep
+learning on point sets for 3d classiﬁcation and segmentation.
+CVPR, 2017. 1
+
+[20] C. R. Qi, L. Yi, H. Su, and L. J. Guibas. Pointnet++: Deep
+hierarchical feature learning on point sets in a metric space.
+arXiv preprint arXiv:1706.02413, 2017. 1, 3, 4
+
+[21] J. Quiroga, T. Brox, F. Devernay, and J. Crowley. Dense
+In
+
+semi-rigid scene ﬂow estimation from rgbd images.
+ECCV, 2014. 2
+
+[22] L. Shao, P. Shah, V. Dwaracherla, and J. Bohg. Motion-based
+object segmentation based on dense rgb-d scene ﬂow. arXiv
+preprint arXiv:1804.05195, 2018. 2, 8
+
+[23] D. Sun, E. B. Sudderth, and H. Pﬁster. Layered rgbd scene
+
+ﬂow estimation. In CVPR, 2015. 2
+
+[24] F. Tombari, S. Salti, and L. Di Stefano. Unique signatures of
+histograms for local surface description. In ECCV, 2010. 2
+[25] A. K. Ushani, R. W. Wolcott, J. M. Walls, and R. M. Eu-
+stice. A learning approach for real-time temporal scene ﬂow
+estimation from lidar data. In ICRA, 2017. 1, 2
+
+[26] L. Valgaerts, A. Bruhn, H. Zimmer, J. Weickert, C. Stoll,
+and C. Theobalt. Joint estimation of motion, structure and
+geometry from stereo sequences. In ECCV, 2010. 2
+
+[27] S. Vedula, S. Baker, P. Rander, R. Collins, and T. Kanade.
+
+Three-dimensional scene ﬂow. In ICCV, 1999. 1, 2
+
+[28] C. Vogel, K. Schindler, and S. Roth. 3d scene ﬂow estimation
+
+with a rigid motion prior. In ICCV, 2011. 1, 2
+
+[29] C. Vogel, K. Schindler, and S. Roth. Piecewise rigid scene
+
+ﬂow. In ICCV, 2013. 2
+
+[30] C. Vogel, K. Schindler, and S. Roth. 3d scene ﬂow estimation
+
+with a piecewise rigid scene model. IJCV, 2015. 2, 6, 7
+
+[31] S. Wang, S. Suo, W.-C. M. A. Pokrovsky, and R. Urtasun.
+Deep parametric continuous convolutional neural networks.
+In CVPR, 2018. 5
+
+[32] Y. Wang, Y. Sun, Z. Liu, S. E. Sarma, M. M. Bronstein, and
+J. M. Solomon. Dynamic graph cnn for learning on point
+clouds. arXiv preprint arXiv:1801.07829, 2018. 2
+
+[33] A. Wedel, T. Brox, T. Vaudrey, C. Rabe, U. Franke, and
+D. Cremers. Stereoscopic scene ﬂow computation for 3d mo-
+tion understanding. IJCV, 2011. 1, 2
+
+[34] A. Wedel, C. Rabe, T. Vaudrey, T. Brox, U. Franke, and
+D. Cremers. Efﬁcient dense scene ﬂow from sparse or dense
+stereo data. In ECCV, 2008. 2
+
+537
+
+

@@ -1,0 +1,1180 @@
+AdaFrame: Adaptive Frame Selection for Fast Video Recognition
+
+Zuxuan Wu1∗, Caiming Xiong2†, Chih-Yao Ma3, Richard Socher2, Larry S. Davis1
+1 University of Maryland, 2 Salesforce Research, 3 Georgia Institute of Technology
+
+Abstract
+
+We present AdaFrame, a framework that adaptively
+selects relevant frames on a per-input basis for fast video
+recognition. AdaFrame contains a Long Short-Term Mem-
+ory network augmented with a global memory that pro-
+vides context information for searching which frames to use
+over time. Trained with policy gradient methods, AdaFrame
+generates a prediction, determines which frame to observe
+next, and computes the utility, i.e., expected future rewards,
+of seeing more frames at each time step. At testing time,
+AdaFrame exploits predicted utilities to achieve adaptive
+lookahead inference such that the overall computational
+costs are reduced without incurring a decrease in accuracy.
+Extensive experiments are conducted on two large-scale
+video benchmarks, FCVID and ActivityNet. AdaFrame
+matches the performance of using all frames with only 8.21
+and 8.65 frames on FCVID and ActivityNet, respectively.
+We further qualitatively demonstrate learned frame usage
+can indicate the difﬁculty of making classiﬁcation deci-
+sions; easier samples need fewer frames while harder ones
+require more, both at instance-level within the same class
+and at class-level among different categories.
+
+1. Introduction
+
+The explosive increase of Internet videos, driven by the
+ubiquity of mobile devices and sharing activities on social
+networks, is phenomenal: around 300 hours of video are up-
+loaded to YouTube every minute of every day! Such growth
+demands effective and scalable approaches that can recog-
+nize actions and events in videos automatically for tasks like
+indexing, summarization, recommendation, etc. Most exist-
+ing work focuses on learning robust video representations
+to boost accuracy [24, 29, 19, 28], while limited effort has
+been devoted to improving efﬁciency [31, 38].
+
+State-of-the-art video recognition frameworks rely on
+the aggregation of prediction scores from uniformly sam-
+
+∗ Most of the work is done when the author was an intern at Sales-
+
+force.
+
+† Corresponding author.
+
+Figure 1: A conceptual overview of our approach.
+AdaFrame aims to select a small number of frames to make
+correct predictions conditioned on different input videos so
+as to reduce the overall computational cost.
+
+pled frames 1, if not every single frame [16], during infer-
+ence. While uniform sampling has been shown to be effec-
+tive [19, 28, 29], the analysis of even a single frame is still
+computationally expensive due to the use of high-capacity
+backbone networks such as ResNet [7], ResNext [34], In-
+ceptionNet [22], etc. On the other hand, uniform sampling
+assumes information is evenly distributed over time, which
+could therefore incorporate noisy background frames that
+are not relevant to the class of interest.
+
+It is also worth noting that the difﬁculty of making recog-
+nition decisions relates to the category to be classiﬁed—
+one frame might be sufﬁcient to recognize most static ob-
+jects (e.g., “dogs” and “cats”) or scenes (e.g., “forests” or
+“sea”) while more frames are required to differentiate sub-
+tle actions like “drinking coffee” and “drinking beer”. This
+also holds for samples even within the same category due
+to large intra-class variations. For example, a “playing bas-
+ketball” event can be captured from multiple view points
+(e.g., different locations of a gymnasium), occur at different
+locations (e.g., indoor or outdoor), with different players
+(e.g., professionals or amateurs). As a result, the number of
+frames required to recognize the same event are different.
+
+With this in mind, to achieve efﬁcient video recognition,
+we explore how to automatically adjust computation within
+a network on a per-video basis such that—conditioned on
+different input videos, a small number of informative frames
+
+1Here, we use frame as a general term, and it can be in the forms of
+a single RGB image, stacked RGB images (snippets), and stacked optical
+ﬂow images.
+
+11278
+
+BirthdayMaking CakePitching  Tentare selected to produce correct predictions (See Figure 1).
+However, this is a particularly challenging problem, since
+videos are generally weakly-labeled for classiﬁcation tasks,
+one annotation for a whole sequence, and there is no super-
+vision informing which frames are important. Therefore, it
+is unclear how to effectively explore temporal information
+over time to choose which frames to use, and how to encode
+temporal dynamics in these selected frames.
+
+In this paper, we propose AdaFrame, a Long Short-Term
+Memory (LSTM) network augmented with a global mem-
+ory, to learn how to adaptively select frames conditioned
+on inputs for fast video recognition. In particular, a global
+memory derived from representations computed with spa-
+tially and temporally downsampled video frames is intro-
+duced to guide the exploration over time for learning frame
+usage policies. The memory-augmented LSTM serves as an
+agent interacting with video sequences; at a time step, it ex-
+amines the current frame, and with the assistance of global
+context information derived by querying the global mem-
+ory, generates a prediction, decides which frame to look at
+next and calculates the utility of seeing more frames in the
+future. During training, AdaFrame is optimized using pol-
+icy gradient methods with a ﬁxed number of steps to max-
+imize a reward function that encourages predictions to be
+more conﬁdent when observing one more frame. At testing
+time, AdaFrame is able to achieve adaptive inference con-
+ditioned on input videos by exploiting the predicted future
+utilities that indicate the advantages of going forward.
+
+We conduct extensive experiments on two large-scale
+and challenging video benchmarks for generic video cate-
+gorization (FCVID [11]) and activity recognition (ACTIV-
+ITYNET [8]). AdaFrame offers similar or better accura-
+cies measured in mean average precision over the widely
+adopted uniform sampling strategy, a simple yet strong
+baseline, on FCVID and ACTIVITYNET respectively, while
+requiring 58.9% and 63.3% fewer computations on aver-
+age, going as high as savings of 90.6%. AdaFrame also
+outperforms by clear margins alternative methods [36, 3]
+that learn to select frames. We further show that, among
+other things, frame usage is correlated with the difﬁculty of
+making predictions—different categories produce different
+frame usage patterns and instance-level frame usage within
+the same class also differs. These results corroborate that
+AdaFrame can effectively learn to generate frame usage
+policies that adaptively select a small number of relevant
+frames for classiﬁcation for each input video.
+
+2. Related Work
+
+Video Analysis. Extensive studies have been conducted
+on video recognition [33]. Most existing work focuses on
+extending 2D convolution to the video domain and mod-
+eling motion information in videos [19, 29, 28, 35, 24].
+Only a few methods consider efﬁcient video classiﬁca-
+
+tion [38, 31, 40, 20, 10]. However, these approaches per-
+form mean-pooling of scores/features from multiple frames,
+either uniformly sampled or decided by an agent, to classify
+a video clip. In contrast, we focus on selecting a small num-
+ber of relevant frames, whose temporal relations are mod-
+eled by an LSTM, on a per-video basis for efﬁcient recog-
+nition. Note that our framework is also applicable to 3D
+CNNs; the inputs to our framework can be easily replaced
+with features from stacked frames. A few recent approaches
+attempt to reduce computation cost in videos by exploring
+similarities among adjacent frames [39, 17], while our goal
+is to selectively choose relevant frames based on inputs.
+
+Our work is more related to [36] and [3] that choose
+frames with policy search methods [2]. Yeung et al. in-
+troduce an agent to predict whether to stop and where to
+look next through sampling from the whole video for ac-
+tion detection [36]. For detection, ground-truth temporal
+boundaries are available, providing strong feedback about
+whether viewed frames are relevant. In the context of clas-
+siﬁcation, there is no such supervision, and thus directly
+sampling from the entire sequence is difﬁcult. To overcome
+this issue, Fan et al. propose to sample from a predeﬁned
+action set deciding how many steps to jump [3], which re-
+duces the search space but sacriﬁces ﬂexibility. In contrast,
+we introduce a global memory module that provides context
+information to guide the frame selection process. We also
+decouple the learning of frame selection and when to stop,
+exploiting predicted future returns as stop signals.
+
+Adaptive Computation. Our work also relates to adaptive
+computation to achieve efﬁciency by deciding whether to
+stop inference based on the conﬁdence of classiﬁers. The
+idea dates back to cascaded classiﬁers [27] that quickly re-
+ject easy negative sub-windows for fast face detection. Sev-
+eral recent approaches propose to add decision branches
+to different layers of CNNs to learn whether to exit the
+model [23, 9, 13, 4]. Graves introduce a halting unit to
+RNNs to decide whether computation should continue [6].
+Related are also [30, 26, 32, 15, 5] that learn to drop lay-
+ers in residual networks or learn where to look in images
+conditioned on inputs. In this paper, we focus on adaptive
+computation for videos to adaptively select frames rather
+than layers/units in neural networks for fast inference.
+
+3. Approach
+
+Our goal is, given a testing video, to derive an effective
+frame selection strategy that produces a correct prediction
+while using as few frames as possible. To this end, we
+introduce AdaFrame, a memory-augmented LSTM (Sec-
+tion 3.1), to explore the temporal space of videos effectively
+with the guidance of context information from a global
+memory. AdaFrame is optimized to choose which frames
+to use on a per-video basis, and to capture the temporal dy-
+
+1279
+
+Figure 2: An overview of the proposed framework. A memory-agumented LSTM serves as an agent, interacting with
+a video sequence. At each time step, it takes features from the current frame, previous states, and a global context vector
+derived from a global memory to generate the current hidden states. The hidden states are used to produce a prediction,
+decides where to look next and calculates the utility of seeing more frames in the future. See texts for more details.
+
+namics of these selected frames. Given the learned model,
+we perform adaptive lookahead inference (Section 3.2) to
+accommodate different computational needs through ex-
+ploring the utility of seeing more frames in the future.
+
+3.1. Memory augmented LSTM
+
+The memory-augmented LSTM can be seen as an agent
+that recurrently interacts with a video sequence of T frames,
+whose representations are denoted as {v1, v2, . . . , vT }.
+More formally, the LSTM, at the t-th time step, takes fea-
+tures of the current frame vt, previous hidden states ht−1
+and cell outputs ct−1, as well as a global context vector ut
+derived from a global memory M as its inputs, and produces
+the current hidden states ht and cell contents ct:
+
+1, vs
+
+2, . . . , vs
+
+history. Therefore, for each video, we introduce a global
+memory to provide context information, which consists of
+representations of spatially and temporally downsampled
+frames, M = [vs
+Td ]. Here, Td denotes the num-
+ber of frames (Td < T ), and the representations are com-
+puted with a lightweight network using spatially downsam-
+pled inputs (more details in Sec. 4.1). This is to ensure the
+computational overhead of the global memory is small. As
+these representations are computed frame by frame without
+explicit order information, we further utilize positional en-
+coding [25] to encode positions in the downsampled repre-
+sentations. To obtain global context information, we query
+the global memory with the hidden states of the LSTM to
+get an attention weight for each element in the memory:
+
+ht, ct = LSTM([vt, ut], ht−1, ct−1),
+
+(1)
+
+zt,j = (Whht−1)⊤P E(vs
+
+j ), βt =Softmax(zt),
+
+where vt and ut are concatenated. The hidden states ht are
+further input into a prediction network fp for classiﬁcation,
+and the probabilities are used to generate a reward rt mea-
+suring whether the transition from the last time step brings
+information gain. Furthermore, conditioned on the hidden
+states, a selection network fs decides where to look next,
+and a utility network fu calculates the advantage of seeing
+more frames in the future. Figure 2 gives an overview of the
+framework. In the following, we elaborate detailed compo-
+nents in the memory-augmented LSTM.
+
+Global memory. The LSTM is expected to make reliable
+predictions and explore the temporal space to select frames
+guided by rewards received. However, learning where to
+look next is difﬁcult due to the huge search space and lim-
+ited capacity of hidden states [1, 37] to remember input
+
+where Wh maps hidden states to the same dimension as the
+j-th downsampled feature vs
+j in the memory, P E denotes
+the operation of adding positional encoding to features, and
+βt is the normalized attention vector over the memory. We
+can further derive the global context vector as the weighted
+average of the global memory: ut = β⊤
+t M. The intuition
+of computing a global context vector with soft-attention as
+inputs to the LSTM is to derive a rough estimate of the cur-
+rent progress based on features in the memory block, serv-
+ing as global context to assist the learning of which frame
+in the future to examine.
+
+Prediction network. The prediction network fp(ht; Wp)
+parameterized by weights Wp maps the hidden states ht to
+outputs st ∈ RC with one fully-connected layer, where C
+is the number of classes. In addition, st is further normal-
+
+1280
+
+ProjectionSpatially & temporally  downsampled videoSoft-attentionGlobal context prediction utilitypolicyRewardLSTMlightweight  LSTMCNNExpected gradientGlobal Memoryized with Softmax to produce probability scores for each
+class. The network is trained with cross-entropy loss using
+predictions from the last time step Te:
+
+Lcls(Wp) = −
+
+C
+
+Xc=1
+
+yc log(sc
+
+Te ),
+
+(2)
+
+where y is a one-hot vector encoding the label of the corre-
+sponding sample. In addition, we constrain Te ≪ T , since
+we wish to use as few frames as possible.
+
+Reward function. Given the classiﬁcation scores st of the
+t-th time step, a reward is given to evaluate whether the tran-
+sition from the previous time step is useful—observing one
+more frame is expected to produce more accurate predic-
+tions. Inspired by [12], we introduce a reward function that
+forces the classiﬁer to be more conﬁdent when seeing addi-
+tional frames, taking the following form (when t > 1):
+
+rt = max{0, mt − max
+
+t′∈[0,t−1]
+
+mt′}.
+
+(3)
+
+t |c′
+
+t − max{sc′
+
+Here, mt = sgt
+6= gt} is the margin be-
+tween the probability of the ground-truth class (indexed by
+gt) and the largest probabilities from other classes, pushing
+the score of the ground-truth class to be higher than other
+classes by a margin. And the reward function in Eqn. 3 en-
+courages the current margin to be larger than historical ones
+to receive a positive reward, which demands that the conﬁ-
+dence of the classiﬁer increases when seeing more frames.
+Such a constraint acts as a proxy to measure if the transition
+from the last time step brings additional information for rec-
+ognizing target classes, as there is no supervision providing
+feedback about whether a single frame is informative.
+
+Selection network. The selection network fs deﬁnes a pol-
+icy with a Gaussian distribution using ﬁxed variance, to
+decide which frame to observe next, using hidden states
+ht that contain information of current inputs and histori-
+cal context.
+In particular, the network, parameterized by
+Ws, transforms the hidden states to a 1-dimensional output
+fs(ht; Ws) = at = sigmoid(W ⊤
+s ht), as the mean of the
+location policy. Following [14], during training, we sample
+from the policy ℓt+1 ∼ π(·|ht) = N (at, 0.12), and at test-
+ing time, we directly use the output as the location. We also
+clamp ℓt+1 to be in the interval of [0, 1], so that it can be
+further transfered to a frame index multiplying by the total
+number of frames. It is worth noting that at the current time
+step, the policy searches through the entire time horizon and
+there is no constraint; it can not only jump forward to seek
+future informative frames but also go back to re-examine
+past information. We train the selection network to maxi-
+mize the expected future reward:
+
+Jsel(Ws) = E
+
+ℓt∼π(·|ht;Ws)" Te
+Xt=0
+
+rt# .
+
+(4)
+
+Utility network. The utility network, parameterized by
+Wu, produces an output fu(ht; Wu) = ˆVt = W ⊤
+u ht using
+one fully-connected layer. It serves as a critic to provide an
+approximation of expected future rewards from the current
+state, which is also known as the value function [21]:
+
+Vt = Eht+1:Te ,
+
+at:Te "Te−t
+Xi=0
+
+γirt+i# ,
+
+(5)
+
+where γ is the discount factor ﬁxed to 0.9. The intuition
+is to estimate the value function Vt derived from empirical
+rollouts with the network output ˆVt to update policy param-
+eters in the direction of performance improvement. More
+importantly, by estimating future returns, it provides the
+agent with the ability to look ahead, measuring the utility of
+subsequently observing more frames. The utility network is
+trained with the following regression loss:
+
+Lutl(Wu) =
+
+1
+2
+
+k ˆVt − Vtk2.
+
+(6)
+
+Optimization. Combining Eqn. 2, Eqn. 4 and Eqn. 6, the
+ﬁnal objective function can be written as:
+
+minimize
+
+Θ
+
+Lcls + λLutl − λJsel,
+
+where λ controls the trade off between classiﬁcation and
+temporal exploration and Θ denotes all trainable parame-
+ters. Note that the ﬁrst two terms are differentiable, and we
+can directly use back propagation with stochastic gradient
+descent to learn the optimal weights. Thus, we only dis-
+cuss how to maximize the expected reward Jsel in Eqn. 4.
+Following [21], we derive the expected gradient of Jsel as:
+
+∇ΘJsel = E" Te
+Xt=0
+
+(Rt − ˆVt)∇Θ log πθ(· | ht)# ,
+
+(7)
+
+where Rt denotes the expected future reward, and ˆVt serves
+as a baseline function to reduce variance during train-
+ing [21]. Eqn. 7 can be approximated with Monte-Carlo
+sampling using samples in a mini-batch, and further back-
+propagated downstream for training.
+
+3.2. Adaptive Lookahead Inference
+
+While we optimize the memory-augmented LSTM for a
+ﬁxed number of steps during training, we aim to achieve
+adaptive inference at testing time such that a small num-
+ber of informative frames are selected conditioned on in-
+put videos without incurring any degradation in classiﬁca-
+tion performance. Recall that the utility network is trained
+to predict expected future rewards,
+indicating the util-
+ity/advantage of seeing more frames in the future. There-
+fore, we explore the outputs of the utility network to de-
+termine whether to stop inference through looking ahead.
+
+1281
+
+t
+
+; if ˆV max
+
+A straightforward way is to calculate the utility ˆVt at each
+time step, and exit the model once it is less than a threshold.
+However, it is difﬁcult to ﬁnd an optimal value that works
+well for all samples. Instead, we maintain a running max
+of utility ˆV max over time for each sample, and at each time
+step, we compare the current utility ˆVt with the max value
+is larger than ˆVt by a margin µ more than
+ˆV max
+t
+p times, predictions from the current time step will be used
+as the ﬁnal score and inference will be stopped. Here, µ
+controls the trade-off between computational cost and ac-
+curacy; a small µ constrains the model to make early pre-
+dictions once the predicted utility begins to decrease while a
+large µ tolerates a drop in utility, allowing more considera-
+tions before classiﬁcation. Further, we also introduce p as a
+patience metric, which permits the current utility to deviate
+from the max value for a few iterations. This is similar in
+spirit to reducing learning rates on plateaus, which instead
+of intermediately decays learning rate waits for a few more
+epochs when the loss does not further decrease.
+
+Note that although the same threshold µ is used for all
+samples, comparisons made to decide whether to stop or
+not is based on the utility distribution of each sample in-
+dependently, which is softer than comparing ˆVt with µ di-
+rectly. One can add another network to predict whether to
+stop inference using the hidden states as in [36, 3], how-
+ever coupling the training of frame selection with learning a
+binary policy to stop makes optimization challenging, par-
+ticularly with reinforcement learning, as will be shown in
+experiments. In contrast, we leverage the utility network to
+achieve adaptive lookahead inference.
+
+4. Experiments
+
+4.1. Experimental Setup
+
+Datasets and evaluation metrics. We experiment with two
+challenging large-scale video datasets, Fudan-Columbia
+Video Datasets (FCVID) [11] and ACTIVITYNET [8], to
+evaluate the proposed approach. FCVID consists of 91, 223
+videos from YouTube with an average duration of 167 sec-
+onds, manually annotated into 239 classes. These cat-
+egories cover a wide range of topics,
+including scenes
+(e.g., “river”), objects (e.g., “dog”), activities (e.g., “fenc-
+ing”), and complicated events (e.g., “making pizza”). The
+dataset is split evenly for training (45, 611 videos) and test-
+ing (45, 612 videos). ACTIVITYNET is an activity-focused
+large-scale video dataset, containing YouTube videos with
+an average duration of 117 seconds. Here we adopt the
+latest release (version 1.3), which consists of around 20K
+videos belonging to 200 classes. We use the ofﬁcial split
+with a training set of 10, 024 videos, a validation set of
+4, 926 videos and a testing set of 5, 044 videos. Since the
+testing labels are not publicly available, we report perfor-
+mance on the validation set. We compute average pre-
+
+cision (AP) for each class and use mean average preci-
+sion (mAP) to measure the overall performance on both
+datasets. It is also worth noting that videos in both datasets
+are untrimmed, for which efﬁcient recognition is extremely
+critical given the redundant nature of video frames.
+
+Implementation details. We use a one-layer LSTM with
+2, 048 and 1, 024 hidden units for FCVID and ACTIVI-
+TYNET respectively. To extract inputs for the LSTM, we
+decode videos at 1fps and compute features from the penul-
+timate layer of a ResNet-101 model [7]. The ResNet model
+is pretrained on ImageNet with a top-1 accuracy of 77.4%
+and further ﬁnetuned on target datasets. To generate the
+global memory that provides context information, we com-
+pute features using spatially and temporally downsampled
+video frames with a lightweight CNN to reduce overhead.
+In particular, we lower the resolution of video frames to
+112 × 112, and sample 16 frames uniformly. We use a pre-
+trained MobileNetv2 [18] as the lightweight CNN, which
+achieves a top-1 accuracy of 52.3% on ImageNet with
+downsampled inputs. We adopt PyTorch for implementa-
+tion and leverage SGD for optimization with a momentum
+of 0.9, a weight decay of 1e − 4 and a λ of 1. We train the
+network for 100 epochs with a batch size of 128 and 64 for
+FCVID and ACTIVITYNET, respectively. The initial learn-
+ing rate is set to 1e − 3 and decayed by a factor of 10 every
+40 epochs. For the patience p during inference, it is set to
+2 when µ < 0.7, and K/2 + 1 when µ = 0.7, where K is
+number of time steps the model is trained for.
+
+4.2. Main Results
+
+Effectiveness of learned frame usage. We ﬁrst optimize
+AdaFrame with K steps during training and then at test-
+ing time we perform adaptive lookahead inference with
+µ = 0.7, allowing each video to see K ′ frames on aver-
+age while maintaining the same accuracy as viewing all K
+frames. We compare AdaFrame with the following alter-
+native methods to produce ﬁnal predictions during testing:
+(1) AVGPOOLING, which simply computes a prediction for
+each sampled frame and then performs a mean pooling over
+frames as the video-level classiﬁcation score; (2) LSTM,
+which generates predictions using hidden states from the
+last time step of an LSTM. We also experiment with dif-
+ferent number of frames (K + ∆) used as inputs for AVG-
+POOLING and LSTM, which are sampled either uniformly
+(U) or randomly (R). Here, we use K for AdaFrame while
+K + ∆ for other methods to offset the additional compu-
+tation cost incurred, which will be discussed later. Table 1
+presents the results. We observe AdaFrame achieves bet-
+ter results than AVGPOOLING and LSTM whiling using
+fewer frames under all settings on both datasets.
+In par-
+ticular, AdaFrame achieves an mAP of 78.6%, and 69.5%
+using an average of 4.92 and 3.8 frames on FCVID and AC-
+TIVITYNET respectively. These results, requiring 3.08 and
+
+1282
+
+FCVID
+
+ACTIVITYNET
+
+Method
+
+R8
+
+U8
+
+R10 U10
+
+R25 U25
+
+AvgPooling
+
+LSTM
+
+78.3
+77.8
+
+78.4
+77.9
+
+79.0
+78.7
+
+78.9
+78.1
+
+AdaFrame
+
+78.6
+
+5 → 4.92
+
+79.2
+
+8 → 6.15
+
+79.7
+78.0
+
+80.0
+79.8
+
+80.2
+
+10 → 8.21
+
+All
+
+80.2
+80.0
+
+R8
+
+U8
+
+R10 U10
+
+R25 U25
+
+67.5
+68.7
+
+67.8
+68.8
+
+68.9
+69.8
+
+68.6
+70.4
+
+69.5
+
+5 → 3.8
+
+70.4
+
+8 → 5.82
+
+69.8
+69.9
+
+70.0
+70.8
+
+71.5
+
+10 → 8.65
+
+All
+
+70.2
+71.0
+
+Table 1: Performance of different frame selection strategies on FCVID and ACTIVITYNET. R and U denote random
+and uniform sampling, respectively. We use K → K ′ to denote the frame usage for AdaFrame, which uses K frames during
+training and K ′ frames on average when performing adaptive inference. See texts for more details.
+
+4.2 fewer frames, are better than AVGPOOLING and LSTM
+with 8 frames and comparable with their results with 10
+frames. It is also promising to see that AdaFrame can match
+the performance of using all frames with only 8.21 and 8.65
+frames on FCVID and ACTIVITYNET. This veriﬁes that
+AdaFrame can indeed learn to derive frame selection poli-
+cies while maintaining the same accuracies.
+
+In addition, the performance of random sampling and
+uniform sampling for AVGPOOLING and LSTM are similar
+and LSTM is worse than AVGPOOLING on FCVID, pos-
+sibly due to the diverse set of categories incur signiﬁcant
+intra-class variations. Note that although AVGPOOLING is
+simple and straightforward, it is a very strong baseline and
+has been widely adopted during testing for almost all CNN-
+based approaches due to its strong performance.
+
+Computational savings with adaptive inference. We now
+discuss computational savings of AdaFrame with adaptive
+inference and compare with state-of-the-art-methods. We
+use average GFLOPs, a hardware independent metric, to
+measure the computation needed to classify all the videos
+in the testing set. We train AdaFrame with ﬁxed K time
+steps to obtain different models, denoted as AdaFrame-K to
+accommodate different computational requirements during
+testing; and for each model we vary µ such that adaptive
+inference can be achieved within the same model.
+
+In addition to selecting frames based on heuristics, we
+also compare AdaFrame with FrameGlimpse [36] and Fast-
+Forward [3]. FrameGlimpse is developed for action detec-
+tion with a location network to select frames and a stop
+network to decide whether to stop; ground-truth bound-
+aries of actions are used as feedback to estimate the qual-
+ity of selected frames.
+there is no
+such ground-truth and thus we preserve the architecture
+of FrameGlimpse but use our reward function. FastFor-
+ward [3] samples from a predeﬁned action set, determining
+how many steps to go forward. It also consists of a stop
+branch to decide whether to stop. In addition, we also at-
+tach the global memory to these frameworks for fair com-
+parisons, denoted as FrameGlimpse-G and FastForward-G,
+respectively. Figure 3 presents the results. For AVGPOOL-
+ING and LSTM, accuracies gradually increase when more
+
+For classiﬁcation,
+
+Figure 3: Mean average precision vs. computational cost.
+Comparisons of AdaFrame with FrameGlimpse [36], Fast-
+Forward [3], and alternative frame selection methods based
+on heuristics.
+
+computation (frames) is used and then become saturated.
+Note that the computational cost for video classiﬁcation
+grows linearly with the number of frames used, as the most
+expensive operation is extracting features with CNNs. For
+ResNet-101 it needs 7.82 GFLOPs to compute features and
+for AdaFrame, it takes an extra 1.32 GFLOPs due to the
+computation in global memory. Therefore, we expect more
+savings from AdaFrame when more frames are used.
+
+Compared with AVGPOOLING and LSTM using 25
+frames, AdaFrame-10 achieves better results while requir-
+ing 58.9% and 63.3% less computation on average on
+FCVID (80.2 vs. ∼195 GFLOPs 2) and ACTIVITYNET
+(71.5 vs. ∼195 GFLOPs), respectively. Similar trends can
+also be found for AdaFrame-5 and AdaFrame-3 on both
+datasets. While the computational saving of AdaFrame
+over AVGPOOLING and LSTM reduces when fewer frames
+are used, accuracies of AdaFrame are still clearly better,
+i.e., 66.1% vs. 64.2% on FCVID, and 56.3% vs. 53.0%
+on ACTIVITYNET. Further, AdaFrame also outperforms
+FrameGlimpse [36] and FastForward [3] that aim to learn
+frame usage by clear margins, demonstrating that coupling
+the training of frame selection and learning to stop with re-
+inforcement learning on large-scale datasets without sufﬁ-
+
+2195.5 GFLOPS for AVGPOOLING and 195.8 GFLOPs for LSTM.
+
+1283
+
+(a) FCVID(b) ActivityNetFigure 4: Dataﬂow through AdaFrame over time. Each
+circle represents, by size, the percentage of samples that are
+classiﬁed at the corresponding time step.
+
+cient background videos is difﬁcult. In addition, the use of
+a global memory, providing context information improves
+accuracies of the original model in both frameworks.
+
+We can also see that changing the threshold µ within the
+same model can also adjust computation needed; the perfor-
+mance and average frame usage declines simultaneously as
+the threshold becomes smaller, forcing the model to make
+predictions as early as possible. But the resulting policies
+with different thresholds still outperform alternative coun-
+terparts in both accuracy and computation required.
+
+Comparing across different models of AdaFrame, we
+observe that the best model of AdaFrame trained with
+a smaller K achieves better or comparable results over
+AdaFrame optimized with a large K using a smaller thresh-
+old. For example, AdaFrame-3 with µ = 0.7 achieves an
+mAP of 76.5% using 25.1 GFLOPs on FCVID, which is
+better than AdaFrame-5 with µ = 0.5 that produces an mAP
+of 76.6% with 31.6 GFLOPs on average. This possibly re-
+sults from the discrepancies between training and testing—
+during training a large K allows the model to “ponder” be-
+fore emitting predictions. While computation can be ad-
+justed with varying thresholds at test time, AdaFrame-10 is
+not fully optimized for classiﬁcation with extremely limited
+information as is AdaFrame-3. This highlights the need to
+use different models based on computational requirements.
+
+Analyses of learned policies. To gain a better understand-
+ing of what is learned in AdaFrame, we take the trained
+AdaFrame-10 model and vary the threshold to accommo-
+date different computational needs. And we visualize in
+Figure 4, at each time step, how many samples are classi-
+ﬁed, and the prediction accuracies of these samples. We can
+see high prediction accuracies tend to appear in early time
+steps, pushing difﬁcult decisions that require more scrutiny
+downstream. And more samples emit predictions at later
+time steps when computational budget increases (larger µ).
+We further investigate whether computations vary for
+
+Figure 5: Learned inference policies for different classes
+over time. Each square, by density, indicates the fraction
+of samples that are classiﬁed at the corresponding time step
+from a certain class in FCVID.
+
+different categories. To this end, we show the fraction of
+samples from a subset of classes in FCVID that are classi-
+ﬁed at each time step in Figure 5. We observe that, for sim-
+ple classes like objects (e.g., “gorilla” and “elephants”) and
+scenes (“Eiffel tower” and “cathedral exterior”), AdaFrame
+makes predictions for most of the samples in the ﬁrst three
+steps; while for some complicated DIY categories (e.g.,
+“making ice cream” and “making egg tarts”), it tends to
+classify in the middle of the entire time horizon. In addition,
+AdaFrame takes additional time steps to differentiate very
+confusing classes like “dining at restaurant” and “dining at
+home”. Figure 6 further illustrates samples using different
+numbers of frames for inference. We can see that frame us-
+age varies not only across different classes but also within
+the same category (see the top two rows of Figure 6) due
+to large intra-class variations. For example, for the “mak-
+ing cookies” category, it takes AdaFrame four steps to make
+correct predictions when the video contains severe camera
+motions and cluttered backgrounds.
+
+In addition, we also examine where the model jumps
+at each step; for AdaFrame-10 with µ = 0.7, we found
+that it goes backward at least once for 42.8% of videos on
+FCVID to re-examine past information instead of always
+going forward, conﬁrming the ﬂexibility AdaFrame enjoys
+when searching over time.
+
+4.3. Discussions
+
+In this section, we conduct a set of experiments to justify
+
+our design choices of AdaFrame.
+
+Global memory. We perform an ablation study to see how
+many frames are needed in the global memory. Table 2
+presents the results. The use of a global memory module
+improves the non-memory model with clear margins. In ad-
+dition, we observe using 16 frames offers the best trade-off
+between computational overheads and accuracies.
+
+1284
+
+12345678910accordionPerformanceamericanFootballAmateurbadmintonbowlingbungeeJumpingcathedralExteriorcowdebatedesertdiningAtRestaurantdinnerAtHomeeiffelTowerelephantgiraffegolfinggorillakidsMakingFaceslaptopmakingCeramicCraftmakingEggTartsmakingFrenchFriesmakingHotdogmakingIcecreammarchingBandmarriageProposalpianoPerformanceplaygroundplayingChesssingingInKtvsnakesnowballFightsumoWrestlingsunsettailgatePartytrumpetPerformanceyoga10987654321time step0.00.10.20.30.40.50.60.70.80.91.0Figure 6: Validation videos from FCVID using different number of frames for inference. Frame usage differs not only
+among different categories but also within the same class (e.g., “making cookies” and “hiking”).
+
+Global Memory
+
+Inference
+
+# Frames Overhead
+
+mAP
+
+# Frames
+
+0
+12
+32
+
+16
+
+0
+
+0.98
+2.61
+
+1.32
+
+77.9
+79.2
+80.2
+
+80.2
+
+8.40
+8.53
+8.24
+
+8.21
+
+Table 2: Results of using different global memories on
+FCVID. Different number of frames are used to generate
+different global memories. The overhead is measured for
+each frame compared to a standard ResNet-101.
+
+Reward function
+
+mAP
+
+# Frames
+
+PREDICTION REWARD
+
+PREDICTION TRANSITION REWARD
+
+Ours
+
+78.7
+78.9
+
+80.2
+
+8.34
+8.31
+
+8.21
+
+Table 3: Comparisons of different reward functions on
+FCVID. Frames used on average and the resulting mAP.
+
+t − pgt
+
+Reward function. Our reward function forces the model
+to increase its conﬁdence when seeing more frames, to
+measure the transition from the last time step. We fur-
+ther compare with two reward functions:
+(1) PREDIC-
+TION REWARD, that uses the prediction conﬁdence of the
+ground-truth class pgt
+t as reward; (2) PREDICTION TRANSI-
+TION REWARD, that uses pgt
+t−1 as reward. The results
+are summarized in Table 3. We can see that our reward func-
+tion and PREDICTION TRANSITION REWARD, both mod-
+eling prediction differences over time, outperform PREDIC-
+TION REWARD that is simply based on predictions from the
+current step. This veriﬁes that forcing the model to increase
+its conﬁdence when viewing more frames can provide feed-
+back about the quality of selected frames. Our result is also
+better than PREDICTION TRANSITION REWARD by further
+introducing a margin between predictions from the ground-
+truth class and other classes.
+
+Stop criterion.
+In our framework, we use the predicted
+utility, measuring future rewards of seeing more frames, to
+decide whether to continue inference or not. An alternative
+is to simply rely on the entropy of predictions, as a proxy
+to measure the conﬁdence of classiﬁers. We also experi-
+mented with entropy to stop inference, however we found
+that it cannot enable adaptive inference based on different
+thresholds. We observed that predictions over time are not
+as smooth as predicted utilities, i.e., high entropies in early
+steps and extremely low entropies in the last few steps. In
+contrast, utilities are computed to measure future rewards,
+explicitly considering future information from the very ﬁrst
+step, which leads to smooth transitions over time.
+
+5. Conclusion
+
+In this paper, we presented AdaFrame, an approach that
+derives an effective frame usage policy so as to use a small
+number of frames on a per-video basis with an aim to re-
+duce the overall computational cost. It contains an LSTM
+network augmented with a global memory to inject global
+context information. AdaFrame is trained with policy gradi-
+ent methods to predict which frame to use and calculate fu-
+ture utilities. During testing, we leverage the predicted util-
+ity for adaptive inference. Extensive results provide strong
+qualitative and quantitative evidence that AdaFrame can de-
+rive strong frame usage policies based on inputs.
+
+Acknowledgment ZW and LSD are supported by the Intelligence Ad-
+
+vanced Research Projects Activity (IARPA) via Department of Inte-
+
+rior/Interior Business Center (DOI/IBC) contract number D17PC00345.
+
+The U.S. Government is authorized to reproduce and distribute reprints
+
+for Governmental purposes not withstanding any copyright annotation
+
+thereon. Disclaimer: The views and conclusions contained herein are those
+
+of the authors and should not be interpreted as necessarily representing the
+
+ofﬁcial policies or endorsements, either expressed or implied of IARPA,
+
+DOI/IBC or the U.S. Government.
+
+1285
+
+MakingCookiesEasy: 1 frameMedium: 3 framesHard: 4 framesMarriageProposalVery Hard: 8 framesHikingEasy: 1 frameMedium: 3 framesHard: 4 framesReferences
+
+[1] Jasmine Collins, Jascha Sohl-Dickstein, and David
+Sussillo. Capacity and trainability in recurrent neural
+networks. In ICLR, 2017. 3
+
+[2] Marc Peter Deisenroth, Gerhard Neumann, Jan Peters,
+et al. A survey on policy search for robotics. Founda-
+tions and Trends R(cid:13) in Robotics, 2013. 2
+
+[3] Hehe Fan, Zhongwen Xu, Linchao Zhu, Chenggang
+Yan, Jianjun Ge, and Yi Yang. Watching a small por-
+tion could be as good as watching all: Towards efﬁ-
+cient video classiﬁcation. In IJCAI, 2018. 2, 5, 6
+
+[4] Michael Figurnov, Maxwell D Collins, Yukun Zhu, Li
+Zhang, Jonathan Huang, Dmitry Vetrov, and Ruslan
+Salakhutdinov. Spatially adaptive computation time
+for residual networks. In CVPR, 2017. 2
+
+[5] Mingfei Gao, Ruichi Yu, Ang Li, Vlad I Morariu, and
+Larry S Davis. Dynamic zoom-in network for fast ob-
+ject detection in large images. In CVPR, 2018. 2
+
+[6] Alex Graves. Adaptive computation time for recurrent
+neural networks. arXiv preprint arXiv:1603.08983,
+2016. 2
+
+[7] Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian
+Sun. Deep residual learning for image recognition. In
+CVPR, 2016. 1, 5
+
+[8] Fabian Caba Heilbron, Victor Escorcia, Bernard
+Ghanem, and Juan Carlos Niebles. Activitynet: A
+large-scale video benchmark for human activity un-
+derstanding. In CVPR, 2015. 2, 5
+
+[9] Gao Huang, Danlu Chen, Tianhong Li, Felix Wu, Lau-
+rens van der Maaten, and Kilian Q Weinberger. Multi-
+scale dense convolutional networks for efﬁcient pre-
+diction. In ICLR, 2018. 2
+
+[10] Y.-G. Jiang, Q. Dai, T. Mei, Y. Rui, and S.-F. Chang.
+Super fast event recognition in internet videos. IEEE
+TMM, 2015. 2
+
+[11] Y.-G. Jiang, Z. Wu, J. Wang, X. Xue, and S.-F. Chang.
+Exploiting feature and class relationships in video cat-
+egorization with regularized deep neural networks.
+IEEE TPAMI, 2018. 2, 5
+
+[12] Shugao Ma, Leonid Sigal, and Stan Sclaroff. Learning
+activity progression in lstms for activity detection and
+early detection. In CVPR, 2016. 4
+
+[13] Mason McGill and Pietro Perona. Deciding how to
+decide: Dynamic routing in artiﬁcial neural networks.
+In ICML, 2017. 2
+
+[15] Mahyar Najibi, Bharat Singh, and Larry S Davis. Aut-
+ofocus: Efﬁcient multi-scale inference. arXiv preprint
+arXiv:1812.01600, 2018. 2
+
+[16] Joe Yue-Hei Ng, Matthew Hausknecht, Sudheendra
+Vijayanarasimhan, Oriol Vinyals, Rajat Monga, and
+George Toderici. Beyond short snippets: Deep net-
+works for video classiﬁcation. In CVPR, 2015. 1
+
+[17] Bowen Pan, Wuwei Lin, Xiaolin Fang, Chaoqin
+Huang, Bolei Zhou, and Cewu Lu. Recurrent residual
+module for fast inference in videos. In CVPR, 2018. 2
+
+[18] Mark Sandler, Andrew Howard, Menglong Zhu, An-
+drey Zhmoginov, and Liang-Chieh Chen. Mo-
+bilenetv2: Inverted residuals and linear bottlenecks.
+In CVPR, 2018. 5
+
+[19] Karen Simonyan and Andrew Zisserman.
+
+Two-
+stream convolutional networks for action recognition
+in videos. In NIPS, 2014. 1, 2
+
+[20] Yu-Chuan Su and Kristen Grauman. Leaving some
+stones unturned: dynamic feature prioritization for ac-
+tivity detection in streaming video. In ECCV, 2016. 2
+
+[21] Richard S Sutton and Andrew G Barto. Reinforcement
+learning: An introduction. MIT press Cambridge,
+1998. 4
+
+[22] Christian Szegedy, Sergey Ioffe, Vincent Vanhoucke,
+Inception-v4, inception-
+and Alexander A Alemi.
+resnet and the impact of residual connections on learn-
+ing. In AAAI, 2017. 1
+
+[23] Surat Teerapittayanon, Bradley McDanel, and HT
+Kung. Branchynet: Fast inference via early exiting
+from deep neural networks. In ICPR, 2016. 2
+
+[24] Du Tran, Lubomir D Bourdev, Rob Fergus, Lorenzo
+Torresani, and Manohar Paluri. C3d: Generic features
+for video analysis. In ICCV, 2015. 1, 2
+
+[25] Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob
+Uszkoreit, Llion Jones, Aidan N Gomez, Łukasz
+Kaiser, and Illia Polosukhin. Attention is all you need.
+In NIPS, 2017. 3
+
+[26] Andreas Veit and Serge Belongie. Convolutional net-
+works with adaptive inference graphs. In ECCV, 2018.
+2
+
+[27] Paul Viola and Michael J Jones. Robust real-time face
+
+detection. IJCV, 2004. 2
+
+[28] Limin Wang, Yuanjun Xiong, Zhe Wang, Yu Qiao,
+Dahua Lin, Xiaoou Tang, and Luc Van Gool. Tem-
+poral segment networks: Towards good practices for
+deep action recognition. In ECCV, 2016. 1, 2
+
+[29] Xiaolong Wang, Ross Girshick, Abhinav Gupta, and
+
+Kaiming He. Non-local neural networks, 2018. 1, 2
+
+[14] Volodymyr Mnih, Nicolas Heess, Alex Graves, et al.
+Recurrent models of visual attention. In NIPS, 2014.
+4
+
+[30] Xin Wang, Fisher Yu, Zi-Yi Dou, and Joseph E Gon-
+zalez. Skipnet: Learning dynamic routing in convolu-
+tional networks. In ECCV, 2018. 2
+
+1286
+
+[31] Chao-Yuan Wu, Manzil Zaheer, Hexiang Hu, R Man-
+matha, Alexander J Smola, and Philipp Kr¨ahenb¨uhl.
+Compressed video action recognition. In CVPR, 2018.
+1, 2
+
+[32] Zuxuan Wu, Tushar Nagarajan, Abhishek Kumar,
+Steven Rennie, Larry S Davis, Kristen Grauman, and
+Rogerio Feris. Blockdrop: Dynamic inference paths
+in residual networks. In CVPR, 2018. 2
+
+[33] Zuxuan Wu, Ting Yao, Yanwei Fu, and Yu-Gang
+Jiang. Frontiers of multimedia research.
+chapter
+Deep Learning for Video Classiﬁcation and Caption-
+ing. 2018. 2
+
+[34] Saining Xie, Ross Girshick, Piotr Doll´ar, Zhuowen Tu,
+and Kaiming He. Aggregated residual transformations
+for deep neural networks. In CVPR, 2017. 1
+
+[35] Saining Xie, Chen Sun, Jonathan Huang, Zhuowen
+Tu, and Kevin Murphy. Rethinking spatiotemporal
+feature learning: Speed-accuracy trade-offs in video
+classiﬁcation. In ECCV, 2018. 2
+
+[36] Serena Yeung, Olga Russakovsky, Greg Mori, and Li
+Fei-Fei. End-to-end learning of action detection from
+frame glimpses in videos. In CVPR, 2016. 2, 5, 6
+
+[37] Dani Yogatama, Yishu Miao, Gabor Melis, Wang
+Ling, Adhiguna Kuncoro, Chris Dyer, and Phil Blun-
+som. Memory architectures in recurrent neural net-
+work language models. In ICLR, 2018. 3
+
+[38] Bowen Zhang, Limin Wang, Zhe Wang, Yu Qiao, and
+Hanli Wang. Real-time action recognition with en-
+hanced motion vector cnns. In CVPR, 2016. 1, 2
+
+[39] Xizhou Zhu, Yuwen Xiong, Jifeng Dai, Lu Yuan, and
+Yichen Wei. Deep feature ﬂow for video recognition.
+In CVPR, 2017. 2
+
+[40] Mohammadreza Zolfaghari, Kamaljeet Singh, and
+Thomas Brox. Eco: Efﬁcient convolutional network
+for online video understanding. In ECCV, 2018. 2
+
+1287
+
+

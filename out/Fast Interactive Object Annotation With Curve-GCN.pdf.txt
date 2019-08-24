@@ -1,0 +1,1556 @@
+Fast Interactive Object Annotation with Curve-GCN
+
+Huan Ling1,2 ∗
+
+Jun Gao1,2 ∗
+1University of Toronto
+
+Amlan Kar1,2
+
+2Vector Institute
+
+3NVIDIA
+
+Wenzheng Chen 1,2
+
+Sanja Fidler1,2,3
+
+{linghuan, jungao, amlan, wenzheng, fidler}@cs.toronto.edu
+
+Abstract
+
+Curve-GCN 
+
+Interactive Object Annotation Tool  
+
+Manually labeling objects by tracing their boundaries is
+a laborious process. In [7, 2], the authors proposed Polygon-
+RNN that produces polygonal annotations in a recurrent
+manner using a CNN-RNN architecture, allowing interac-
+tive correction via humans-in-the-loop. We propose a new
+framework that alleviates the sequential nature of Polygon-
+RNN, by predicting all vertices simultaneously using a Graph
+Convolutional Network (GCN). Our model is trained end-
+to-end. It supports object annotation by either polygons or
+splines, facilitating labeling efﬁciency for both line-based
+and curved objects. We show that Curve-GCN outperforms
+all existing approaches in automatic mode, including the
+powerful PSP-DeepLab [8, 23] and is signiﬁcantly more efﬁ-
+cient in interactive mode than Polygon-RNN++. Our model
+runs at 29.3ms in automatic, and 2.6ms in interactive mode,
+making it 10x and 100x faster than Polygon-RNN++.
+
+1. Introduction
+
+Object instance segmentation is the problem of outlining
+all objects of a given class in an image, a task that has been
+receiving increased attention in the past few years [15, 36,
+20, 3, 21]. Current approaches are all data hungry, and
+beneﬁt from large annotated datasets for training. However,
+manually tracing object boundaries is a laborious process,
+taking up to 40sec per object [2, 9]. To alleviate this problem,
+a number of interactive image segmentation techniques have
+been proposed [28, 23, 7, 2], speeding up annotation by a
+signiﬁcant factor. We follow this line of work.
+
+In DEXTR [23], the authors build upon the Deeplab ar-
+chitecture [8] by incorporating a simple encoding of human
+clicks in the form of heat maps. This is a pixel-wise ap-
+proach, i.e. it predicts a foreground-background label for
+each pixel. DEXTR showed that by incorporating user clicks
+as a soft constraint, the model learns to interactively improve
+its prediction. Yet, since the approach is pixel-wise, the
+worst case scenario still requires many clicks.
+
+Polygon-RNN [7, 2] frames human-in-the-loop annota-
+tion as a recurrent process, during which the model sequen-
+
+∗authors contributed equally
+
+https://richardkleincpa.com/new-york-city-street-wallpaper/ 
+
+Add box 
+
+Polygon 
+
+Spline 
+
+Figure 1: We propose Curve-GCN for interactive object annota-
+tion. In contrast to Polygon-RNN [7, 2], our model parametrizes
+objects with either polygons or splines and is trained end-to-end at
+a high output resolution.
+
+tially predicts vertices of a polygon. The annotator can
+intervene whenever an error occurs, by correcting the wrong
+vertex. The model continues its prediction by conditioning
+on the correction. Polygon-RNN was shown to produce an-
+notations at human level of agreement with only a few clicks
+per object instance. The worst case scenario here is bounded
+by the number of polygon vertices, which for most objects
+ranges up to 30-40 points. However, the recurrent nature
+of the model limits scalability to more complex shapes, re-
+sulting in harder training and longer inference. Furthermore,
+the annotator is expected to correct mistakes in a sequential
+order, which is often challenging in practice.
+
+In this paper, we frame object annotation as a regres-
+sion problem, where the locations of all vertices are pre-
+dicted simultaneously. We represent the object as a graph
+with a ﬁxed topology, and perform prediction using a Graph
+Convolutional Network. We show how the model can be
+used and optimized for interactive annotation. Our frame-
+work further allows us to parametrize objects with either
+polygons or splines, adding additional ﬂexibility and efﬁ-
+ciency to the interactive annotation process. The proposed
+approach, which we refer to as Curve-GCN, is end-to-end
+differentiable, and runs in real time. We evaluate our Curve-
+GCN on the challenging Cityscapes dataset [10], where we
+outperform Polygon-RNN++ and PSP-Deeplab/DEXTR in
+both automatic and interactive settings. We also show that
+our model outperforms the baselines in cross-domain an-
+notation, that is, a model trained on Cityscapes is used to
+
+15257
+
+annotate general scenes [38], aerial [31], and medical im-
+agery [16, 14]. Code is available: https://github.com/
+fidler-lab/curve-gcn.
+
+2. Related Work
+
+Pixel-wise methods.
+
+Interactive object segmentation
+has typically been formulated as a pixel-wise foreground-
+background segmentation. Most of the early work relies on
+optimization by graph-cuts to solve an energy function that
+depends on various color and texture cues [28, 4, 9]. The
+user is required to draw a box around the object, and can
+interact with the method by placing additional scribbles on
+the foreground or background, until the object is carved out
+correctly. However, in ambiguous cases where object bound-
+aries blend with background, these methods often require
+many clicks from the user [2].
+
+Recently, DEXTR [23] incorporated user clicks by stack-
+ing them as additional heatmap channels to image features,
+and exploited the powerful Deeplab architecture to perform
+user-guided segmentation. The annotator is expected to click
+on the four extreme points of the object, and if necessary,
+iteratively add clicks on the boundary to reﬁne prediction.
+Our work differs from the above methods in that it directly
+predicts a polygon or spline around the object, and avoids
+pixel-labeling altogether. We show this to be a more efﬁcient
+way to perform object instance segmentation, both in the
+automatic and in the interactive settings.
+
+Contour-based methods. Another line of work to ob-
+ject segmentation aims to trace closed contours. Oldest
+techniques are based on level sets [6], which ﬁnd object
+boundaries via front propagation by solving a corresponding
+partial differential equation. Several smoothing terms help
+the contour evolution to be well behaved, producing accu-
+rate and regularized boundaries. In [1], levelset evolution
+with carefully designed boundary prediction was used to ﬁnd
+accurate object boundaries from coarse annotations. This
+speeds up annotation since the annotators are only required
+to perform very coarse labeling. [34] combines CNN fea-
+ture learning with level set optimization in an end-to-end
+fashion, and exploits extreme points as a form of user in-
+teraction. While most level set-based methods were not
+interactive, [11] proposed to incorporate user clicks into the
+energy function. Recently, [24] proposed a structure predic-
+tion framework to learn CNN features jointly with the active
+contour parameters by optimizing an approximate IoU loss.
+Rather than relying on the regularized contour evolution
+which may lead to overly smooth predictions, our approach
+learns to perform inference using a GCN. We further tackle
+the human-in-the-loop scenario, not addressed in [24].
+
+Intelligent Scissors [25] is a technique that allows the user
+to place “seeds” along the boundary and ﬁnds the minimal
+cost contour starting from the last seed up to the mouse
+cursor, by tracing along the object’s boundary. In the case of
+
+error, the user is required to place more seeds.
+
+Polygon-RNN [7, 2] adopted a similar idea of sequentially
+tracing a boundary, by exploiting a CNN-RNN architecture.
+Speciﬁcally, the RNN predicts a polygon by outputting one
+vertex at a time. However, the recurrent structure limits the
+scaleability with respect to the number of vertices, and also
+results in slower inference times. Our work is a conceptual
+departure from Polygon-RNN in that we frame object an-
+notation as a regression problem, where the locations of all
+vertices of the polygon are predicted simultaneously. The key
+advantages of our approach is that our model is signiﬁcantly
+faster, and can be trained end-to-end using a differentiable
+loss function. Furthermore, our model is designed to be
+invariant to order, thus allowing the annotator to correct any
+vertex, and further control the inﬂuence of the correction.
+
+Our approach shares similarities with Pixel2Mesh [33],
+which predicts 3D meshes of objects from single images.
+We exploit their iterative inference regime, but propose a
+different parametrization based on splines and a loss function
+better suited for our (2D annotation) task. Moreover, we
+tackle the human-in-the-loop scenario, not addressed in [33].
+Splines have been used to parametrize shapes in older
+work on active shape models [32]. However, these models
+are not end-to-end, while also requiring a dataset of aligned
+shapes to compute the PCA basis. Furthermore, interactivity
+comes from the fact that the prediction is a spline that the user
+can modify. In our approach, every modiﬁcation leads to re-
+prediction, resulting in much faster interactive annotation.
+
+3. Object Annotation via Curve-GCN
+
+In order to approximate a curved contour outlining an
+object, one can either draw a polygon or a spline. Splines are
+a more efﬁcient form of representation as they allow precise
+approximation of the shape with fewer control points. Our
+framework is designed to enable both a polygon and a spline
+representation of an object contour.
+
+We follow the typical labeling scenario where we assume
+that the annotator has selected the object of interest by plac-
+ing a bounding box around it [7, 2]. We crop the image
+around this box and frame object annotation in the crop as
+a regression problem; to predict the locations of all control
+points (vertices) simultaneously, from an initialization with
+a ﬁxed topology. We describe our model from represen-
+tation to inference in Subsec. 3.1, and discuss training in
+Subsec 3.2. In Subsec. 3.3, we explain how our model can
+be used for human-in-the loop annotation, by formulating
+both inference as well as training in the interactive regime.
+
+3.1. Polygon/Spline GCN
+
+We assume our target object shapes can be well repre-
+sented using N control points, which are connected to form
+a cycle. The induced shape is rendered by either connect-
+ing them with straight lines (thus forming a polygon), or
+
+5258
+
+Feature map F 
+
+CNN 
+
+Encoder 
+
+GCN 
+
+GCN 
+
+image 
+
+Boundary 
+Prediction 
+
+initialization 
+
+Feature 
+
+Extraction 
+
+Feature 
+
+Extraction 
+
+prediction 
+
+Figure 2: Curve-GCN: We initialize N control points (that form a closed curve) along a circle centered in the image crop with a diameter of 70% of image
+height. We form a graph and propagate messages via a Graph Convolutional Network (GCN) to predict a location shift for each node. This is done iteratively
+(3 times in our work). At each iteration we extract a feature vector for each node from the CNN’s features F , using a bilinear interpolation kernel.
+
+higher order curves (forming a spline). We treat the loca-
+tion of each control point as a continuous random variable,
+and learn to predict these via a Graph Neural Network that
+takes image evidence as input. In [2], the authors exploited
+Gated Graph Neural Networks (GGNN) [19] as a polygon
+reﬁnement step, in order to upscale the vertices output by the
+RNN to a higher resolution. In similar vein, Pixel2Mesh [33]
+exploited a Graph Convolutional Network (GCN) to predict
+vertex locations of a 3D mesh. The key difference between a
+GGNN and a GCN is in the graph information propagation;
+a GGNN shares propagation matrices through time akin to a
+gated recurrent unit (GRU), whereas a GCN has propagation
+steps implemented as unshared “layers”, similar to a typical
+CNN architecture. We adopt the GCN in our model due to
+its higher capacity. Hence, we name our model, Curve-GCN,
+which includes Polygon or Spline-GCN.
+
+Notation: We initialize the nodes of the GCN to be at a
+static initial central position in the given image crop (Fig. 2).
+Our GCN predicts a location offset for each node, aiming
+to move the node correctly onto the object’s boundary. Let
+cpi = [xi, yi]T denote the location of the i-th control point
+and V = {cp0, cp1, · · · , cpN −1} be the set of all control
+points. We deﬁne the graph to be G = (V, E), with V
+deﬁning the nodes and E the edges in the graph. We form
+E by connecting each vertex in V with its four neighboring
+vertices. This graph structure deﬁnes how the information
+propagates in the GCN. Connecting 4-way allows faster
+exchange of information between the nodes in the graph.
+
+Extracting Features: Given a bounding box, we crop the
+corresponding area of the image and encode it using a CNN,
+the speciﬁc choice of which we defer to experiments. We
+denote the feature map obtained from the last convolutional
+layer of the CNN encoder applied on the image crop as Fc.
+In order to help the model see image boundaries, we super-
+vise two additional branches, i.e. an edge branch and a vertex
+branch, on top of the CNN encoder’s feature map Fc, both
+of which consist of one 3 × 3 convolutional layer and one
+fully-connected layer. These branches are trained to predict
+the probability of existence of an object edge/vertex on a
+28 × 28 grid. We train these two branches with the binary
+cross entropy loss. The predicted edge and vertices outputs
+are concatenated with Fc, to create an augmented feature
+
+map F . The input feature for a node cpi in the GCN is
+a concatenation of the node’s current coordinates (xi, yi),
+where top-left of the cropped images is (0, 0) and image
+length is 1, and features extracted from the corresponding lo-
+cation in F :f 0
+i = concat{F (xi, yi), xi, yi}. Here, F (xi, yi)
+is computed using bilinear interpolation.
+
+GCN Model: We utilize a multi-layer GCN. The graph
+propagation step for a node cpi at layer l is expressed as:
+
+f l+1
+i = wl
+
+0f l
+
+i + X
+
+wl
+
+1f l
+
+j
+
+(1)
+
+cpj ∈N (cpi)
+
+0, wl
+
+where N (cpi) denotes the nodes that are connected to
+cpi in the graph, and wl
+1 are the weight matrices.
+Following [5, 33], we utilize a Graph-ResNet to propagate
+information between the nodes in the graph as a residual
+function. The propagation step in one full iteration at layer l
+then takes the following form:
+rl
+i = ReLU(cid:0)wl
+
+i + X
+
+1f l
+j(cid:1)
+
+0f l
+
+wl
+
+(2)
+
+cpj ∈N (cpi)
+
+rl+1
+i
+
+f l+1
+i
+
+= ˜wl
+
+0rl
+
+i + X
+
+= ReLU (rl+1
+
+cpj ∈N (cpi)
+i + f l
+
+i ),
+
+˜wl
+
+1rl
+
+j
+
+(3)
+
+(4)
+
+i, y′
+
+where w0, w1, ˜w0, ˜w1 are weight matrices for the residual.
+On top of the last GCN layer, we apply a single fully con-
+nected layer to take the output feature and predict a relative
+location shift, (∆xi, ∆yi), for each node, placing it into lo-
+cation [x′
+i] = [xi +∆xi, yi +∆yi]. We also perform itera-
+tive inference similar to the coarse-to-ﬁne prediction in [33].
+To be speciﬁc, the new node locations [x′
+i] are used to
+re-extract features for the nodes, and another GCN predicts
+a new set of offsets using these features. This mimics the
+process of the initial polygon/spline iteratively “walking”
+towards the object’s boundaries.
+
+i, y′
+
+Spline Parametrization: The choice of spline is impor-
+tant, particularly for the annotator’s experience. The two
+most common splines, i.e. the cubic Bezier spline and the uni-
+form B-Spline [27, 12], are deﬁned by control points which
+do not lie on the curve, which could potentially confuse an
+annotator that needs to make edits. Following [32], we use
+
+5259
+
+the centripetal Catmull-Rom spline (CRS) [35], which has
+control points along the curve. We refer the reader to [35]
+for a detailed visualization of different types of splines.
+
+For a curve segment Si deﬁned by control points cpi−1,
+cpi, cpi+1, cpi+2 and a knot sequence ti−1, ti, ti+1, ti+2,
+the CRS is interpolated by:
+
+Si = ti+1−t
+ti+1−ti
+
+L012 + t−ti
+ti+1−ti
+
+L123
+
+where
+
+L01 + t−ti−1
+ti+1−ti−1
+
+L12
+
+ti+1−ti−1
+
+ti+1−t
+
+L012 =
+L123 = ti+2−t
+ti+2−ti
+ti−t
+
+L01 =
+ti−ti−1
+L12 = ti+1−t
+ti+1−ti
+ti+2−t
+
+L23 =
+
+ti+2−ti+1
+
+L23
+
+L12 + t−ti
+ti+2−ti
+cpi−1 + t−ti−1
+ti−ti−1
+cpi + t−ti
+ti+1−ti
+
+cpi+1
+cpi+1 + t−ti+1
+ti+2−ti+1
+
+cpi
+
+(5)
+
+(6)
+
+(7)
+
+(8)
+
+(9)
+
+cpi+2,
+
+(10)
+
+and ti+1 = ||cpi+1 − cpi||α
+2 + ti, t0 = 0. Here, α ranges
+from 0 to 1. We choose α = 0.5 following [32], which in the-
+ory produces splines without cusps or self-intersections [35].
+To make the spline a closed and C 1-continuous curve, we
+add three additional control points:
+
+cpN = cp0
+
+||cpN −1−cp0||2
+
+cpN +1 = cp0 +
+||cp1−cp0||2
+cp−1 = cp0 + ||cp1−cp0||2
+||cpN −1−cp0||2
+
+(cp1 − cp0)
+
+(11)
+
+(12)
+
+(cpN −1 − cp0). (13)
+
+3.2. Training
+
+We train our model with two different loss functions.
+First, we train with a Point Matching Loss which we intro-
+duce in Subsec. 3.2.1, and then ﬁne-tune it with a Differen-
+tiable Accuracy Loss described in Subsec. 3.2.2. Details and
+ablations are provided in Experiments.
+
+3.2.1 Point Matching Loss
+
+Typical point-set matching losses, such as the Chamfer
+Loss, assumed unordered sets of points (i.e. they are
+permutation invariant). A polygon/spline, however, has a
+well deﬁned ordering, which an ideal point set matching loss
+would obey. Assumuing equal sized and similarly ordered
+(clockwise or counter-clockwise) prediction and ground
+truth point sets, denoted as p = {p0, p1, · · · , pK−1}, and
+p′ = {p′
+K−1} respectively (K is the number of
+points), we deﬁne our matching loss as:
+
+1, · · · , p′
+
+0, p′
+
+Sampling equal sized point sets. Since annotations may
+vary in the number of vertices, while our model always
+assumes N , we sample additional points along boundaries
+of both ground-truth polygons and our predictions. For
+Polygon-GCN, we uniformly sample K points along edges
+of the predicted polygons, while for Spline-GCN, we sample
+K points along the spline by uniformly ranging t from ti
+to ti+1. We also uniformly sample the same number of
+points along the edges of the ground-truth polygon. We
+use K = 1280 in our experiments. Sampling more points
+would have a higher computational cost, while sampling
+fewer points would make curve approximation less accurate.
+Note that the sampling only involves interpolating the control
+points, ensuring differentiability.
+
+3.2.2 Differentiable Accuracy Loss
+
+Note that training with the point matching loss results in
+overly smooth predictions. To perfectly align the predicted
+polygon and the ground-truth silhouette, we employ a differ-
+entiable rendering loss, which encourages masks rendered
+from the predicted control points to agree with ground-truth
+masks by directly optimizing for accuracy. This has been
+used previously to optimize 3D mesh vertices to render cor-
+rectly onto a 2D image [17, 22].
+
+The rendering process can be described as a function R;
+M (θ) = R(p(θ)), where p is the sampled point sequence
+on the curve, and M is the corresponding mask rendered
+from p. The predicted and the ground-truth masks can be
+compared by computing their difference with the L1 loss:
+
+Lrender(θ) = kM (θ) − Mgtk1
+
+(15)
+
+Note that Lrender is exactly the pixel-wise accuracy of the
+predicted mask M (θ) with respect to the ground truth Mgt.
+We now describe the method for obtaining M in the for-
+ward pass and back-propagating the gradients through the
+rendering process R, from ∂L
+∂p in the backward pass.
+
+∂M to ∂L
+
+Forward Pass: We render p into a mask using OpenGL.
+As shown in Fig. 3, we decompose the shape into triangle
+fans fj and assign positive or negative values to their area
+based on their orientation. We render each face with the
+assigned value, and sum over the rendering of all the triangles
+to get the ﬁnal mask. We note that this works for both convex
+and concave polygons [29].
+
+Lmatch(p, p′) =
+
+min
+
+j∈[0··· ,K−1]
+
+K−1
+X
+
+i=0
+
+kpi − p′
+
+(j+i)%Kk
+1
+
+(14)
+
+Notice that this loss explicitly ensures an order in the vertices
+in the loss computation. Training with an unordered point
+set loss function, while maintaining the topology of the
+polygon could result in self-intersections, while the ordered
+loss function discourages it.
+
+5260
+
+Figure 3: We decompose the poly-
+gon ABCDE into 3 triangle fans ABC,
+ACD and ADE, and render them sep-
+arately. We assign positive value for
+clock wise triangles (ABC, ACD) and
+negative value for the others (ADE).
+Finally we sum over all the renderings.
+The sum retains only the interior of
+the polygon.
+
+InteractiveGCN 
+
+Algorithm 1 Learning to Incorporate Human-in-the-Loop
+
+Figure 4: Human-in-the-Loop: An annotator can choose any wrong
+control point and move it onto the boundary. Only its immediate neighbors
+(k = 2 in our experiments) will be re-predicted based on this interaction.
+
+Feature 
+Extraction 
+
+is
+
+process
+
+rendering
+
+Backward Pass: The
+non-
+differentiable in OpenGL due to rasterization, which
+truncates all ﬂoat values to integers. However, follow-
+ing [22], we compute its gradient with ﬁrst order Taylor
+expansion. We reutilize the triangle fans from the decom-
+position in the forward pass (see Fig. 3) and analyze each
+triangle fan separately. Taking a small shift of the fan fj , we
+calculate the gradient w.r.t. the j-th triangle as:
+
+∂Mj
+∂fj
+
+=
+
+R(fj + ∆t) − R(fj)
+
+∆t
+
+,
+
+(16)
+
+where Mj is the mask corresponding to the fan fj . Here, ∆t
+can be either in the x or y direction. For simplicity, we let ∆t
+to be a 1 pixel shift, which alleviates the need to render twice,
+and lets us calculate gradients by subtracting neighboring
+pixels. Next, we pass the gradient ∂Mj
+to its three vertices
+∂fj
+fj,0, fj,1 and fj,2:
+
+∂Mj
+∂fj,k
+
+= X
+
+wi
+k
+
+i
+
+∂M i
+j
+∂fj
+
+k ∈ [0, 1, 2]
+
+(17)
+
+where we sum over all pixels i. For the i-th pixel M i
+j in the
+1 and wi
+rendered image Mj , we compute its weight wi
+2
+with respect to the vertices of the face fj as its barycentric
+coordinates. For more details, please refer to [22].
+
+0, wi
+
+3.3. Annotator in The Loop
+
+The drawback of Polygon-RNN is that once the anno-
+tator corrects one point, all of the subsequent points will
+be affected due to the model’s recurrent structure. This is
+often undesirable, as the changes can be drastic. In our work,
+we want the ﬂexibility to change any point, and further con-
+strain that only the neighboring points can change. As in
+Polygon-RNN, the correction is assumed to be in the form
+of drag-and-drop of a point.
+
+To make our model interactive, we train another GCN
+that consumes the annotator’s correction and predicts the
+relative shifts of the other control points. We refer to it as
+the InteractiveGCN. We keep the network’s architecture the
+same as the original GCN, except that we now append two
+additional dimensions to the corrected node’s (say node i)
+input feature, representing the annotator’s correction:
+
+f 0
+i = concat{F (xi, yi), xi, yi, ∆xi, ∆yi},
+
+(18)
+
+(rawImage, gtCurve) = Sample(Dataset)
+(predCurve, F ) = Predict(rawImage)
+data = []
+for i in range(c) do
+
+1: while not converged do
+2:
+3:
+4:
+5:
+6:
+7:
+8:
+9:
+
+corrPoint = Annotator(predictedCurve)
+data += (predCurve, corrPoint, gtCurve, F )
+predCurve = InteractiveGCN(predCurve, corrPoint)
+
+⊲ Do not stop gradients
+
+10:
+
+TrainInteractiveGCN(data)
+
+where (∆xi, ∆yi) is the shift given by the annotator. For
+all other nodes, we set (∆xi, ∆yi) to zero. We do not
+perform iterative inference here. Our InteractiveGCN
+allows a radius of inﬂuence by simply masking predictions
+In particular, we let k
+of nodes outside the radius to 0.
+neighbors on either side of node i to be predicted, i.e.,
+cp(i−k)%N , . . . , cp(i−1)%N , cp(i+1)%N , . . . , cp(i+k)%N .
+We set k = 2 in our experiments, while noting that in
+principle, the annotator could vary k at test time.
+
+We train InteractiveGCN by mimicking an annotator that
+iteratively moves wrong control points onto their correct
+locations. We assume that the annotator always chooses
+to correct the worst predicted point. This is computed by
+ﬁrst aligning the predicted polygon with GT, by ﬁnding the
+minimum of our point matching loss (Sec. 3.2.1). We then
+ﬁnd the point with the largest manhattan distance to the
+corresponding GT point. The network is trained to move
+the neighboring points to their corresponding ground-truth
+positions. We then iterate between the annotator choosing
+the worst prediction, and training to correct its neighbors. In
+every iteration, the GCN ﬁrst predicts the correction for the
+neighbors based on the last annotator’s correction, and then
+the annotator corrects the next worst point. We let the gradi-
+ent back-propagate through the iterative procedure, helping
+the InteractiveGCN to learn to incorporate possibly many
+user interactions. The training procedure is summarized in
+Alg. 1, where c denotes the number of iterations.
+
+4. Experimental Results
+
+In this section, we extensively evaluate our Curve-GCN
+for both in-domain and cross-domain instance annotation.
+We use the Cityscapes dataset [10] as the main benchmark
+to train and test our model. We analyze both automatic and
+interactive regimes, and compare to state-of-the-art baselines
+for both. For cross-domain experiments, we evaluate the
+generalization capability of our Cityscapes-trained model
+on the KITTI dataset [13] and four out-of-domain datasets,
+ADE20K [38], Aerial Rooftop [31], Cardiac MR [30], and
+ssTEM [14], following Polygon-RNN++ [2].
+
+To indicate whether our model uses polygons or splines,
+we name them Polygon-GCN and Spline-GCN, respectively.
+
+5261
+
+Model
+
+Polygon-RNN++
+Polygon-RNN++ (with BS)
+PSP-DeepLab
+
+Polygon-GCN (MLoss)
+
++ DiffAcc
+
+Spline-GCN (MLoss)
+
++ DiffAcc
+
+Bicycle
+
+57.38
+63.06
+67.18
+
+63.68
+66.55
+64.75
+67.36
+
+Bus
+
+75.99
+81.38
+83.81
+
+81.42
+85.01
+81.71
+85.43
+
+Person
+
+68.45
+72.41
+72.62
+
+72.25
+72.94
+72.53
+73.72
+
+Train
+
+59.65
+64.28
+68.76
+
+61.45
+60.99
+65.87
+64.40
+
+Truck
+
+Motorcycle
+
+76.31
+78.90
+80.48
+
+79.88
+79.78
+79.14
+80.22
+
+58.26
+62.01
+65.94
+
+60.86
+63.87
+62.00
+64.86
+
+Car
+
+75.68
+79.08
+80.45
+
+79.84
+81.09
+80.16
+81.88
+
+Rider
+
+65.65
+69.95
+70.00
+
+70.17
+71.00
+70.57
+71.73
+
+Mean
+
+67.17
+71.38
+73.66
+
+71.19
+72.66
+72.09
+73.70
+
+Table 1: Automatic Mode on Cityscapes. We compare our Polygon and Spline-GCN to Polygon-RNN++ and PSP-DeepLab. Here, BS indicates that the
+model uses beam search, which we do not employ.
+
+Model
+Polyrnn++ (BS)
+PSP-DeepLab
+Spline-GCN
+
+mIOU F at 1px F at 2px
+71.38
+73.66
+73.70
+
+46.57
+47.10
+47.72
+
+62.26
+62.82
+63.64
+
+DEXTR
+79.40
+Spline-GCN-EXTR 79.88
+
+55.38
+57.56
+
+69.84
+71.89
+
+Spline Polygon
+Model
+GCN
+68.55
++ Iterative Inference 70.00
+72.09
++ Boundary Pred.
+73.70
++ DiffAcc
+
+67.79
+70.78
+71.19
+72.66
+
+Table 2: Different Metrics. We report IoU & F bound-
+ary score. We favorably cross-validate PSP-DeepLab and
+DEXTR for each metric on val. Spline-GCN-EXTR uses
+extreme points as additional input as in DEXTR.
+
+Table 3: Ablation study on Cityscapes.
+We use 3 steps when performing iterative in-
+ference. Boundary Pred adds the boundary
+prediction branch to our CNN.
+
+Model
+Polygon-RNN++
+Polygon-RNN++ (Corr.)
+PSP-Deeplab
+Polygon-GCN
+Spline-GCN
+Polygon-GCN (Corr.)
+Spline-GCN (Corr.)
+
+Time(ms)
+
+298.0
+270.0
+71.3
+28.7
+29.3
+2.0
+2.6
+
+Table 4: Avg. Inference Time per object. We
+are 10× faster than Polygon-RNN++ in forward
+pass, and 100× for every human correction.
+
+.
+
+Image Encoder: Following Polygon-RNN++ [2], we use
+the ResNet-50 backbone architecture as our image encoder.
+
+Training Details: We ﬁrst train our model via the match-
+ing loss, followed by ﬁne-tuning with the differentiable ac-
+curacy loss. The former is signiﬁcantly faster, but has less
+ﬂexibility, i.e. points are forced to exactly match the GT
+points along the boundary. Our differentiable accuracy loss
+provides a remedy as it directly optimizes for accuracy. How-
+ever, since it requires a considerably higher training time we
+employ it only in the ﬁne-tuning stage. For speed issues we
+use the matching loss to train the InteractiveGCN. We use a
+learning rate of 3e-5 which we decay every 7 epochs.
+
+We note that the Cityscapes dataset contains a signiﬁcant
+number of occluded objects, which causes many objects to
+be split into disconnected components. Since the matching
+loss operates on single polygons, we train our model on
+single component instances ﬁrst. We ﬁne-tune with the
+differentiable accuracy loss on all instances.
+
+Baselines: Since Curve-GCN operates in two different
+regimes, we compare it with the relevant baselines in each.
+For the automatic mode, we compare our approach to
+Polygon-RNN++ [2], and PSP-DeepLab [8, 37]. We use the
+provided DeepLab-v2 model by [23], which is pre-trained
+on ImageNet, and ﬁne-tuned on PASCAL for semantic seg-
+mentation. We stack Pyramid scene parsing [37] to en-
+hance performance. For the interactive mode, we benchmark
+against Polygon-RNN++ and DEXTR [23]. We ﬁne-tune
+both PSP-DeepLab and DEXTR on the Cityscapes dataset.
+We cross-validate their thresholds that decide between fore-
+ground/background on the validation set.
+
+Evaluation Metrics: We follow Polygon-RNN [7] to eval-
+uate performance by computing Intersection-over-Union
+(IoU) of the predicted and ground-truth masks. However,
+as noted in [18], IoU focuses on the full region and is less
+
+sensitive to the inaccuracies along the object boundaries. We
+argue that for the purpose of object annotation boundaries
+are very important – even slight deviations may not escape
+the eye of an annotator. We thus also compute the Bound-
+ary F score [26] which calculates precision/recall between
+the predicted and ground-truth boundary, by allowing some
+slack wrt misalignment. Since Cityscapes is ﬁnely annotated,
+we report results at stringent thresholds of 1 and 2 pixels.
+
+4.1. In Domain Annotation
+
+We ﬁrst evaluate our model when both training and infer-
+ence are performed on Cityscapes [10]. This dataset contains
+2975/500/1525 images for training, validation and test, re-
+spectively. For a fair comparison, we follow the same split
+and data preprocessing procedure as in Polygon-RNN++ [7].
+
+Automatic Mode: Table 1 reports results of our Curve-
+GCN and compares with baselines, in terms of IoU. Note
+that PSP-DeepLab uses a more powerful image encoder,
+which is pretrained on PASCAL for segmentation. Our
+Spline-GCN outperforms Polygon-RNN++ and is on par
+with PSP-DeepLab. It also wins over Polygon-GCN, likely
+because most Cityscapes objects are curved. The results
+also show the signiﬁcance of our differentiable accuracy loss
+(diffAcc) which leads to large improvements over the model
+trained with the matching loss alone (denoted with MLoss
+in Table). Our model mostly loses against PSP-DeepLab
+on the train category, which we believe is due to the fact
+that trains in Cityscapes are often occluded and broken into
+multiple components. Since our approach predicts only a
+single connected component, it struggles in such cases.
+
+Table 2 compares models with respect to F boundary
+metrics. We can observe that while Spline-GCN is on par
+with PSP-DeepLab under the IoU metric, it is signiﬁcantly
+better in the more precise F score. This means that our model
+more accurately aligns with the object boundaries. We show
+
+5262
+
+Figure 5: Automatic Mode on Cityscapes. The input to our model are bounding boxes for objects.
+
+Figure 6: Automatic mode on Cityscapes. We show results for individual instances. (top) Spline-GCN, (bottom) ground-truth. We can observe that our
+model ﬁts object boundaries accurately, and surprisingly ﬁnds a way to “cheat" in order to annotate multi-component instances.
+
+Figure 7: Comparison in Automatic Mode. From left to right: ground-truth, Polygon-GCN, Spline-GCN, PSP-DeepLab.
+
+qualitative results in Fig 5, 6, and 7.
+Ablation Study: We study each component of our model
+and provide results for both Polygon and Spline-GCN in
+Table 3. Performing iterative inference leads to a signiﬁcant
+boost, and adding the boundary branch to our CNN further
+improves performance.
+
+Additional Human Input:
+In DEXTR [23], the authors
+proposed to use 4 extreme points on the object boundary as
+an effective information provided by the annotator. Com-
+pared to just a box, extreme points require 2 additional clicks.
+We compare to DEXTR in this regime, and follow their strat-
+egy in how this information is provided to the model. To be
+speciﬁc, points (in the form of a heat map) are stacked with
+the image, and passed to a CNN. To compare with DEXTR,
+we use DeepLab-v2 in this experiment, as they do. We refer
+to our models with such input by appending EXTR.
+
+We notice that the image crops used in Polygon-RNN,
+are obtained by extracting an image inside a square box (and
+not the actual box provided by the annotator). However,
+due to signiﬁcant occlusion in Cityscapes, doing so leads
+to ambiguities, since multiple objects can easily fall in the
+same box. By providing 4 extreme points, the annotator
+more accurately points to the target object. To verify how
+much accuracy is really due to the additional two clicks,
+we also test an instantiation of our model to which the four
+corners of the bounding box are provided as input. This is
+still a 2-click (box) interaction from the user, however, it
+reduces the ambiguity of which object to annotate. We refer
+
+to this model by appending BOX.
+
+Since DEXTR labels pixels and thus more easily deals
+with multiple component instances, we propose another in-
+stantiation of our model which still exploits 4 clicks on aver-
+age, yet collects these differently. Speciﬁcally, we request
+the annotator to provide a box around each component, rather
+than just a single box around the full object. On average, this
+leads to 2.4 clicks per object. This model is referred to with
+MBOX. To match the 4-click budget, our annotator clicks
+on the worst predicted boundary point for each component,
+which leads to 3.6 clicks per object, on average.
+
+Table 5 shows that in the extreme point regime, our model
+is already better than DEXTR, whereas our alternative strat-
+egy is even better, yielding an 0.8% improvement overall
+with fewer clicks on average. Our method also signiﬁcantly
+outperforms DEXTR in the boundary metrics (Table 2).
+
+Interactive Mode: We simulate an annotator correcting
+vertices, following the protocol in [2]. In particular, the an-
+notator iteratively makes corrections until the IoU is greater
+than a threshold T , or the model stops improving its predic-
+tion. We consider the predicted curve achieving agreement
+above T as a satisfactory annotation.
+
+Plots 8 and 9 show IoU vs number of clicks at different
+thresholds T . We compare to Polygon-RNN++. Our results
+show signiﬁcant improvements over the baseline, highlight-
+ing our model as a more efﬁcient annotation tool. We further
+analyze performance when using 40 vs 20 control points.
+The version with fewer control points is slightly worse in
+
+5263
+
+Model
+
+Bicycle
+
+Spline-GCN-BOX
+
+PSP-DEXTR
+Spline-GCN-EXTR
+
+Spline-GCN-MBOX
+
++ One click
+
+69.53
+
+74.42
+75.09
+
+70.45
+73.28
+
+Bus
+
+84.40
+
+87.30
+87.40
+
+88.02
+89.18
+
+Person
+
+76.33
+
+79.30
+79.88
+
+75.87
+78.45
+
+Train
+
+69.05
+
+73.51
+72.78
+
+76.35
+79.89
+
+Truck
+
+Mcycle
+
+85.08
+
+85.42
+86.76
+
+82.73
+85.02
+
+68.75
+
+73.69
+73.93
+
+70.76
+74.33
+
+Car
+
+83.80
+
+85.57
+86.13
+
+83.32
+85.15
+
+Rider
+
+73.38
+
+76.24
+77.12
+
+73.49
+76.22
+
+Mean
+
+76.29
+
+79.40
+79.88
+
+77.62
+80.19
+
+# clicks
+
+2
+
+4
+4
+
+2.4
+3.6
+
+Table 5: Additional Human Input. We follow DEXTR [23] and provide a budget of 4 clicks to the models. Please see text for details.
+
+Figure 8: Interactive Mode on Cityscapes: (left) 40 control points, (right) 20 control points.
+
+Figure 9: Inter. Mode on KITTI: 40 cps
+
+Figure 10: Annotator in the Loop: GT, 2nd column is the initial prediction from Spline-GCN, and the following columns show results after (simulated)
+annotator’s corrections. Our corrections are local, and thus give more control to the annotator. However, they sometimes require more clicks (right).
+
+Model
+
+KITTI ADE Rooftop Card.MR ssTEM
+
+Square Box (Perfect)
+Ellipse (Perfect)
+
+-
+-
+
+69.35
+69.53
+
+Polygon-RNN++ (BS) 83.14 71.82
+83.35 72.70
+PSP-DeepLab
+84.09 72.94
+Spline-GCN
+84.81 77.35
++ ﬁnetune
+83.66 72.31
+84.71 77.41
+
+Polygon-GCN
+
++ ﬁnetune
+
+62.11
+66.82
+
+65.67
+57.91
+68.33
+78.21
+66.78
+75.56
+
+79.11
+92.44
+
+80.63
+74.11
+78.54
+91.33
+81.55
+90.91
+
+66.53
+71.32
+
+53.12
+47.65
+58.46
+
+-
+
+60.91
+
+-
+
+Table 6: Automatic Mode on Cross-Domain. We outperform PSP-
+DeepLab out-of-the-box. Fine-tuning on 10% is effective.
+
+Table 7: Automatic Mode for Cross-Domain. (top) Out-of-the-box output of
+Cityscapes-trained models, (bottom) ﬁne-tuned with 10% of data from new domain.
+
+automatic mode (see Appendix), however, it is almost on par
+in the interactive mode. This may suggest that coarse-to-ﬁne
+interactive correction may be the optimal approach.
+Inference Times: Timings are reported in Table 4. Our
+model
+is an order of magnitude faster than Polygon-
+RNN++, running at 29.3 ms, while Polygon-RNN++ re-
+quires 298.0ms. In the interactive mode, our model re-uses
+the computed image features computed in the forward pass,
+and thus only requires 2.6ms to incorporate each correction.
+On the other hand, Polygon-RNN requires to run an RNN
+after every correction, thus still requiring 270ms.
+
+ADE20k [38] (general scenes), Rooftop [31] (aerial im-
+agery), and two medical datasets [30, 16, 14].
+
+Quantitative Results. Table 6 provides results. We adopt
+simple baselines from [2]. We further ﬁne-tune (with dif-
+fAcc) the models with 10% randomly sampled training data
+from the new domain. Note that ssTEM does not have a train-
+ing split, and thus we omit this experiment for this dataset.
+Results show that our model generalizes better than PSP-
+DeepLab, and that ﬁne-tuning on very little annotated data
+effectively adapts our model to new domains. Fig. 7 shows a
+few qualitative results before and after ﬁne-tuning.
+
+4.2. Cross Domain Evaluation
+
+5. Conclusion
+
+We now evaluate the ability of our model to generalize to
+new datasets. Generalization is crucial, in order to effectively
+annotate a variety of different imagery types. We further
+show that by ﬁne-tuning on only a small set of the new
+dataset (10%) leads to fast adaptation to new domains.
+
+We follow [2] and use our Cityscapes-trained model
+and test it on KITTI [13] (in-domain driving dataset),
+
+We presented Curve-GCN for efﬁcient interactive anno-
+tation. Our model improves over the state-of-the-art and is
+signiﬁcantly faster. We further allow interactive corrections
+that only have local effect, giving more control to the annota-
+tors. This leads to the better overall annotation strategy. We
+will release an annotation tool running our model, in order
+to facilitate faster collection of computer vision datasets.
+
+5264
+
+0246810121416AVG NUM CLICKS76788082848688AVG IOUAnnotator in the loopOur T = 1Our T = 0.9Our T = 0.8Our T = 0.7PolyRNN++ 0.7PolyRNN++ 0.8PolyRNN++ 0.9PolyRNN++ 1PolyRNN0246810121416AVG NUM CLICKS767880828486AVG IOUAnnotator in the loopOur T = 1Our T = 0.9Our T = 0.8Our T = 0.7PolyRNN++ 0.7PolyRNN++ 0.8PolyRNN++ 0.9PolyRNN++ 1PolyRNN024681012AVG NUM CLICKS8486889092AVG IOUAnnotator in the loopOur T = 1Our T = 0.9Our T = 0.8Our T = 0.7PolyRNN++ 0.7PolyRNN++ 0.8PolyRNN++ 0.9PolyRNN++ 1PolyRNNReferences
+
+[1] D. Acuna, A. Kar, and S. Fidler. Devil is in the edges: Learn-
+ing semantic boundaries from noisy annotations. In CVPR,
+2019.
+
+[2] D. Acuna, H. Ling, A. Kar, and S. Fidler. Efﬁcient interactive
+annotation of segmentation datasets with polygon-rnn++. In
+CVPR, 2018.
+
+[3] M. Bai and R. Urtasun. Deep watershed transform for instance
+
+segmentation. In CVPR, 2017.
+
+[4] Y. Boykov and M.-P. Jolly. Interactive graph cuts for optimal
+boundary & region segmentation of objects in nd images. In
+ICCV, 2001.
+
+[5] M. M. Bronstein, J. Bruna, Y. LeCun, A. Szlam, and P. Van-
+dergheynst. Geometric deep learning: going beyond euclidean
+data. In CVPR, 2017.
+
+[6] V. Caselles, R. Kimmel, and G. Sapiro. Geodesic active
+
+contours. IJCV, 22(1):61–79, 1997.
+
+[7] L. Castrejon, K. Kundu, R. Urtasun, and S. Fidler. Annotating
+
+object instances with a polygon-rnn. In CVPR, 2017.
+
+[8] L. Chen, G. Papandreou, I. Kokkinos, K. Murphy, and A. L.
+Yuille. Deeplab: Semantic image segmentation with deep
+convolutional nets, atrous convolution, and fully connected
+crfs. PAMI, 40(4):834–848, 2018.
+
+[9] L.-C. Chen, S. Fidler, A. Yuille, and R. Urtasun. Beat the
+mturkers: Automatic image labeling from weak 3d supervi-
+sion. In CVPR, 2014.
+
+[10] M. Cordts, M. Omran, S. Ramos, T. Rehfeld, M. Enzweiler,
+R. Benenson, U. Franke, S. Roth, and B. Schiele. The
+cityscapes dataset for semantic urban scene understanding. In
+CVPR, 2016.
+
+[11] D. Cremers, O. Fluck, M. Rousson, and S. Aharon. A proba-
+bilistic level set formulation for interactive organ segmenta-
+tion. In SPIE, 2007.
+
+[12] J. Gao, C. Tang, V. Ganapathi-Subramanian, J. Huang,
+H. Su, and L. J. Guibas. Deepspline: Data-driven recon-
+struction of parametric curves and surfaces. arXiv preprint
+arXiv:1901.03781, 2019.
+
+[13] A. Geiger, P. Lenz, and R. Urtasun. Are we ready for Au-
+tonomous Driving? The KITTI Vision Benchmark Suite. In
+CVPR, 2012.
+
+[14] S. Gerhard, J. Funke, J. Martel, A. Cardona, and R. Fetter.
+Segmented anisotropic ssTEM dataset of neural tissue. 11
+2013.
+
+[15] K. He, G. Gkioxari, P. Dollár, and R. Girshick. Mask R-CNN.
+
+ICCV, 2017.
+
+[16] A. H. Kadish, D. Bello, J. P. Finn, R. O. Bonow, A. Schaechter,
+H. Subacius, C. Albert, J. P. Daubert, C. G. Fonseca, and J. J.
+Goldberger. Rationale and Design for the Deﬁbrillators to Re-
+duce Risk by Magnetic Resonance Imaging Evaluation (DE-
+TERMINE) Trial. J Cardiovasc Electrophysiol, 20(9):982–7,
+2009.
+
+[17] H. Kato, Y. Ushiku, and T. Harada. Neural 3d mesh renderer.
+
+In ECCV, 2018.
+
+[18] P. Krähenbühl and V. Koltun. Geodesic object proposals. In
+D. Fleet, T. Pajdla, B. Schiele, and T. Tuytelaars, editors,
+ECCV, pages 725–739, 2014.
+
+[19] Y. Li, D. Tarlow, M. Brockschmidt, and R. Zemel. Gated
+
+graph sequence neural networks. In ICLR, 2016.
+
+[20] S. Liu, J. Jia, S. Fidler, and R. Urtasun. Sequential grouping
+
+networks for instance segmentation. In ICCV, 2017.
+
+[21] S. Liu, L. Qi, H. Qin, J. Shi, and J. Jia. Path aggregation
+
+network for instance segmentation. In CVPR, 2018.
+
+[22] M. M. Loper and M. J. Black. Opendr: An approximate
+differentiable renderer. In D. Fleet, T. Pajdla, B. Schiele, and
+T. Tuytelaars, editors, ECCV, pages 154–169, 2014.
+
+[23] K.-K. Maninis, S. Caelles, J. Pont-Tuset, and L. Van Gool.
+Deep extreme cut: From extreme points to object segmenta-
+tion. In CVPR, 2018.
+
+[24] D. Marcos, D. Tuia, B. Kellenberger, L. Zhang, M. Bai,
+R. Liao, and R. Urtasun. Learning deep structured active
+contours end-to-end. In CVPR, pages 8877–8885, 2018.
+
+[25] E. N. Mortensen and W. A. Barrett. Intelligent scissors for
+
+image composition. In SIGGRAPH, pages 191–198, 1995.
+
+[26] F. Perazzi, J. Pont-Tuset, B. McWilliams, L. V. Gool,
+M. Gross, and A. Sorkine-Hornung. A benchmark dataset
+and evaluation methodology for video object segmentation.
+In The IEEE Conference on Computer Vision and Pattern
+Recognition (CVPR), 2016.
+
+[27] H. Prautzsch, W. Boehm, and M. Paluszny. Bézier and B-
+spline techniques. Springer Science & Business Media, 2013.
+[28] C. Rother, V. Kolmogorov, and A. Blake. Grabcut: Inter-
+In
+
+active foreground extraction using iterated graph cuts.
+SIGGRAPH, 2004.
+
+[29] D. Shreiner and T. K. O. A. W. Group. OpenGL Programming
+Guide: The Ofﬁcial Guide to Learning OpenGL, Versions 3.0
+and 3.1. Addison-Wesley Professional, 7th edition, 2009.
+
+[30] A. Suinesiaputra, B. R. Cowan, A. O. Al-Agamy, M. A. Elat-
+tar, N. Ayache, A. S. Fahmy, A. M. Khalifa, P. Medrano-
+Gracia, M.-P. Jolly, A. H. Kadish, et al. A collaborative
+resource to build consensus for automated left ventricular
+segmentation of cardiac mr images. Medical image analysis,
+18(1):50–62, 2014.
+
+[31] X. Sun, C. M. Christoudias, and P. Fua. Free-shape polygonal
+object localization. In European Conference on Computer
+Vision, pages 317–332. Springer, 2014.
+
+[32] J. H. Tan and U. R. Acharya. Active spline model: a shape
+based model interactive segmentation. Digital Signal Pro-
+cessing, 35:64–74, 2014.
+
+[33] N. Wang, Y. Zhang, Z. Li, Y. Fu, W. Liu, and Y. Jiang.
+Pixel2mesh: Generating 3d mesh models from single RGB
+images. In ECCV, volume 11215, pages 55–71. Springer,
+2018.
+
+[34] Z. Wang, D. Acuna, H. Ling, A. Kar, and S. Fidler. Object
+instance annotation with deep extreme level set evolution. In
+CVPR, 2019.
+
+[35] C. Yuksel, S. Schaefer, and J. Keyser. Parameterization and
+applications of catmull–rom curves. Computer-Aided Design,
+43(7):747–755, 2011.
+
+[36] Z. Zhang, S. Fidler, and R. Urtasun. Instance-level segmen-
+tation for autonomous driving with deep densely connected
+mrfs. In CVPR, 2016.
+
+[37] H. Zhao, J. Shi, X. Qi, X. Wang, and J. Jia. Pyramid scene
+
+parsing network. In CVPR, 2017.
+
+5265
+
+[38] B. Zhou, H. Zhao, X. Puig, S. Fidler, A. Barriuso, and A. Tor-
+ralba. Scene parsing through ade20k dataset. In CVPR, 2017.
+
+5266
+
+

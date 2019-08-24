@@ -1,0 +1,1549 @@
+ScratchDet: Training Single-Shot Object Detectors from Scratch
+
+Rui Zhu1,4∗, Shifeng Zhang2∗, Xiaobo Wang1, Longyin Wen3, Hailin Shi1†, Liefeng Bo3, Tao Mei1
+1JD AI Research, China; 2CASIA, UCAS, China; 3JD Digits, USA; 4Sun Yat-sen University, China
+
+{zhurui10,wangxiaobo8,longyin.wen,shihailin,liefeng.bo,tmei}@jd.com, shifeng.zhang@nlpr.ia.ac.cn
+
+Abstract
+
+Current state-of-the-art object objectors are ﬁne-tuned
+from the off-the-shelf networks pretrained on large-scale
+classiﬁcation dataset ImageNet, which incurs some addi-
+tional problems: 1) The classiﬁcation and detection have
+different degrees of sensitivity to translation, resulting in the
+learning objective bias; 2) The architecture is limited by the
+classiﬁcation network, leading to the inconvenience of mod-
+iﬁcation. To cope with these problems, training detectors
+from scratch is a feasible solution. However, the detectors
+trained from scratch generally perform worse than the pre-
+trained ones, even suffer from the convergence issue in train-
+ing. In this paper, we explore to train object detectors from
+scratch robustly. By analysing the previous work on opti-
+mization landscape, we ﬁnd that one of the overlooked points
+in current trained-from-scratch detector is the BatchNorm.
+Resorting to the stable and predictable gradient brought
+by BatchNorm, detectors can be trained from scratch stably
+while keeping the favourable performance independent to the
+network architecture. Taking this advantage, we are able to
+explore various types of networks for object detection, with-
+out suffering from the poor convergence. By extensive experi-
+ments and analyses on downsampling factor, we propose the
+Root-ResNet backbone network, which makes full use of the
+information from original images. Our ScratchDet achieves
+the state-of-the-art accuracy on PASCAL VOC 2007, 2012
+and MS COCO among all the train-from-scratch detectors
+and even performs better than several one-stage pretrained
+methods. Codes will be made publicly available at https:
+//github.com/KimSoybean/ScratchDet.
+
+1. Introduction
+
+Object detection has made great progress in the frame-
+work of convolutional neural networks (CNNs). The cur-
+rent state-of-the-art detectors are generally ﬁne-tuned from
+high accuracy classiﬁcation networks, e.g., VGGNet [36],
+ResNet [12] and GoogLeNet [37] pretrained on ImageNet
+
+∗Equally-contributed and this work was done at JD AI Research.
+†Corresponding author.
+
+[29] dataset. The ﬁne-tuning transfers the classiﬁcation
+knowledge learned from the source domain to handle the
+object detection task. In general, ﬁne-tuning from pretrained
+networks can achieve better performance than training from
+scratch.
+
+However, there is no such thing as a free lunch. Fine-
+tuning pretrained networks to object detection has some
+critical limitations. On the one hand, the classiﬁcation and
+detection tasks have different degrees of sensitivity to transla-
+tion. The classiﬁcation task prefers to translation invariance,
+and thus needs downsampling operations (e.g., max-pooling
+and convolution with stride 2) for better performance. In
+contrast, the local texture information is more critical for
+object detection, making the usage of translation-invariant
+operations (e.g., downsampling operations) with caution. On
+the other hand, it is inconvenient to change the architecture
+of networks (even small changes) in ﬁne-tuning process. If
+we employ a new architecture, the pretraining should be
+re-conducted on the large-scale dataset (e.g., ImageNet), re-
+quiring high computational cost.
+
+Fortunately, training detectors from scratch is able to
+eliminate the aforementioned limitations. DSOD [32] is the
+ﬁrst to train CNN detectors from scratch, in which the deep
+supervision plays a critical role. Deep supervision is intro-
+duced in DenseNet [13] as the dense layer-wise connection.
+However, DSOD is also limited by the predeﬁned architec-
+ture of DenseNet. If DSOD employs other types of network
+(e.g., VGGNet and ResNet), the performance decreases dra-
+matically (sometimes even crashes in training). Besides, the
+currently best performance of trained-from-scratch detectors
+still remains in a lower place compared with the pretrained
+ones. Therefore, if we hope to take advantage of training
+detectors from scratch, it needs to achieve two improvement:
+(1) free the architecture limitations for any type of network
+while guarantee the training convergence, (2) give perfor-
+mance as good as pretrained networks (or even better).
+
+To this end, we study the elements that make major impact
+to the optimization of detector given the randomly initialized
+network. As pointed out in [30], BatchNorm reparameterizes
+the optimization problem to make its landscape signiﬁcantly
+smoother instead of reducing the internal covariate shift.
+
+2268
+
+Based on this theory, we assume that the lack of BatchNorm
+in training detector from scratch is the main reason for poor
+convergence. Thus, we integrate BatchNorm into both the
+backbone and detection head subnetworks (Figure 2), and
+ﬁnd that BatchNorm helps the detector converge well in any
+form of network (including VGGNet and ResNet) without
+pretraining and surpass the accuracy of the pretrained base-
+lines. Thereby, we are free to modify the architecture without
+restrictions from pretrained models. By taking this advan-
+tage, we analyze the performance of the ResNet and VG-
+GNet based SSD[24] detectors with various conﬁgurations,
+and discover that the sampling stride in the ﬁrst convolution
+layer has a great impact on detection performance. Based
+on this point, we redesign the architecture of the detector
+by introducing a new root block, which keeps the abundant
+information for detection feature maps and substantially im-
+proves the detection accuracy, especially for small objects.
+We report extensive experiments on PASCAL VOC 2007 [6],
+PASCAL VOC 2012 [7] and MS COCO [23] datasets, to
+demonstrate that our ScratchDet performs better than some
+pretrained based detectors and all the state-of-the-art train-
+from-scratch detectors, e.g., improving the state-of-the-art
+mAP by 1.7% on VOC 2007, 1.5% on VOC 2012, and 2.7%
+of AP on COCO.
+
+The main contributions of this paper are summarized
+(1) We present a single-shot object detector
+as follows.
+trained from scratch, named ScratchDet, which integrates
+BatchNorm to help the detector converge well from scratch,
+independent to the type of network. (2) We introduce a new
+Root-ResNet backbone network based on the new designed
+root block, which noticeably improves the detection accu-
+racy, especially for small objects. (3) ScratchDet performs
+favourably against the state-of-the-art train-from-scratch de-
+tectors and some pretrained based detectors.
+
+2. Related Work
+
+Object detectors with pretrained network. Most of CNN-
+based object detectors are ﬁne-tuned from pretrained net-
+works on ImageNet. Generally, they can be divided into
+two categories: the two-stage and the one-stage approach.
+The two-stage approach ﬁrst generates a set of candidate ob-
+ject proposals, and then predicts the accurate object regions
+and the corresponding class labels. With the gradual im-
+provements from Faster R-CNN [28], R-FCN [4], FPN [21]
+to Mask R-CNN [11], the two-stage methods achieve top
+performance on several challenging datasets, e.g., PASCAL
+VOC and MS COCO. Recent developments of two-stage
+approach focus on redesigning architecture diagram [20],
+convolution form [5], re-ranking detection scores [3], using
+contextual reasoning [1] and exploiting multiple layers for
+prediction [19].
+
+Pursuing high efﬁciency, the one-stage approach attracts
+much attention in recent years, which simultaneously re-
+
+gresses the object locations and sizes, and the corresponding
+class labels. OverFeat [31] is one of the ﬁrst one-stage
+detectors and since then, several other methods have been
+proposed, such as YOLO [26, 27] and SSD [24]. Recent re-
+searches on one-stage approach focus on enriching features
+for detection [8], designing different architecture [39] and
+addressing class imbalance issue [41, 22, 40].
+Train-from-scratch object detectors. DSOD [32] ﬁrst
+trains the one-stage object detector from scratch and presents
+a series of principles to produce good performance. GRP-
+DSOD [33] improves the DSOD algorithm by applying the
+Gated Recurrent Feature Pyramid. These two methods focus
+on deep supervision of DenseNet but lose sight of the effect
+of BatchNorm on optimization and the ﬂexibility of network
+architecture for training detectors from scratch.
+Batch normalization. BatchNorm[14] addresses the in-
+ternal covariate shift problem by normalizing layer inputs,
+which makes using large learning rate to accelerate network
+training feasible. More recently, Santurkar et al. [30] pro-
+vides both empirical demonstration and theoretical justiﬁca-
+tion for the explanation that BatchNorm makes the optimiza-
+tion landscape signiﬁcantly smoother instead of reducing
+internal covariate shift.
+
+3. ScratchDet
+
+In this section, we ﬁrst study the effectiveness of Batch-
+Norm for training SSD from scratch. Then, we redesign the
+backbone network by analyzing the detection performance
+of the ResNet and VGGNet based SSD.
+
+3.1. BatchNorm for train from scratch
+
+Without losing generality, we consider to apply Batch-
+Norm in SSD which is the most common framework of one
+stage. SSD is formed by the backbone subnetwork (e.g.,
+truncated VGGNet-16 with several additional convolution
+blocks) and the detection head subnetwork (i.e., the predic-
+tion blocks after each detection layer, which consists of one
+3 × 3 bounding box regression convolution layer and one
+3 × 3 class label prediction convolution layer). Notice that
+there is no BatchNorm in the original SSD framework. Moti-
+vated by recent work [30], we believe that using BatchNorm
+is helpful to train SSD from scratch. BatchNorm makes
+the optimization landscape signiﬁcantly smoother, inducing
+a more predictable and stable behaviour of the gradients
+to allow for larger searching space and faster convergence.
+DSOD successfully trains detectors from scratch, however,
+it attributes the results to deep supervision of DenseNet with-
+out emphasizing the effect of BatchNorm. We believe that it
+is necessary to study the impact of BatchNorm on training
+detectors from scratch. To verify our argument, we train
+SSD from scratch using batch size 128 without BatchNorm
+as our baseline. As listed in the ﬁrst column of Table 1, our
+baseline produces 67.6% mAP on VOC 2007 test set.
+
+2269
+
+(a) Loss Value
+
+(b) L2 Norm of Gradient
+
+(c) Fluctuation of L2 Norm of Gradient
+
+Figure 1. Optimization landscape analysis. (a) The training loss value. (b) L2 Norm of gradient. (c) Fluctuation of L2 Norm of gradient
+(smoothed). Blue curve is the original SSD, red and green curves represent the SSD trained with BatchNorm in head subnetwork with 1×
+and 10× base learning rate, respectively. The BatchNorm makes smoother optimization landscape and has more stable gradients (red v.s
+blue). With this advantage, we are able to set larger learning rate (green) to search larger space and converge faster, and thus better solution.
+
+BatchNorm in the backbone subnetwork. We add Batch-
+Norm in each convolution layer in the backbone subnetwork
+and then train it from scratch. As shown in Table 1, us-
+ing BatchNorm in the backbone network improves 5.2%
+of mAP. More importantly, adding BatchNorm in the back-
+bone network makes the optimization landscape signiﬁcantly
+smoother. Thus, we can use larger learning rates (0.01 and
+0.05) to further improve the performance (i.e., mAP is im-
+proved from 72.8% to 77.8% and 78.0%). Both of them out-
+perform SSD ﬁne-tuned from the pretrained VGG-16 model
+(77.2% [24]). These results indicate that adding BatchNorm
+in the backbone subnetwork is one of the critical issues to
+train SSD from scratch.
+BatchNorm in the detection head subnetwork. To ana-
+lyze the effect of BatchNorm in the detection head subnet-
+work, we plot the training loss value, L2 Norm of gradient,
+and ﬂuctuation of L2 Norm of gradient v.s training steps.
+As shown by the blue curve in Figure 1(b) and 1(c), train-
+ing SSD from scratch with default learning rate 0.001 has
+a large ﬂuctuation of L2 norm of gradient, especially in the
+initial phase of training, which makes the loss value suddenly
+change and converge to a bad local minima (i.e., relatively
+high loss at the end of training process in Figure 1(a) and
+bad detection result 67.6% mAP). These results are useful
+to explain the phenomenon that using large learning rate
+to train SSD with the original architecture from scratch or
+pretrained networks usually leads to gradient explosion, poor
+stability and weak prediction of gradients (see Table 1) .
+
+In contrast, integrating BatchNorm in the detection head
+subnetwork makes the loss landscape smoother (see red
+curves in Figure 1), which improves mAP from 67.6% to
+71.0% (listed in Table 1). The smooth landscape allows us to
+set larger learning rate, which brings about larger searching
+
+space and faster convergence (see Figure 1(a) and 1(c)). As
+a result, the mAP improves from 71.0% to 75.6%. Besides,
+with BatchNorm, larger learning rate is also helpful to jump
+out of the bad local minima and produce stable gradients
+(green curve in Figure 1(b) and 1(c)).
+BatchNorm in the whole network. We also study the per-
+formance of the detector using BatchNorm in both the back-
+bone and detection head subnetworks. After using Batch-
+Norm in the whole network of detector, we are able to use
+a larger base learning rate (0.05) to train the detector from
+scratch, which produces 1.5% higher mAP comparing to the
+detector initialized with the pretrained VGG-16 backbone
+(78.7% v.s 77.2%). Please see Table 1 for more details.
+
+3.2. Backbone Network
+
+As described above, we train SSD with BatchNorm from
+scratch and achieve better accuracy than the pretrained SSD.
+This encourages us to train detector from scratch while keep-
+ing the performance independent to the network architecture.
+By taking this advantage, we are able to explore various
+types of network for the object detection task.
+Performance analysis of ResNet and VGGNet. The trun-
+cated VGG-16 and ResNet-101 are two popular backbone
+networks used in SSD (a brief structure overview in Figure 2).
+In general, ResNet-101 produces better classiﬁcation results
+than VGG-16 (e.g., 5.99% v.s 8.68%, 2.69% top-5 classi-
+ﬁcation error lower on ImageNet). However, as indicated
+in DSSD [8], the VGG-16 based SSD performs favourably
+than the ResNet-101 based SSD with relatively small in-
+put size (e.g., 300 × 300) on PASCAL VOC. We argue that
+this phenomenon is caused by the downsampling operation
+in the ﬁrst convolution layer (i.e., conv1 x with stride 2)
+of ResNet-101. This operation signiﬁcantly affects the de-
+
+2270
+
+020k40k60k80k100k120kSteps02468101214TrainingLossbaselr:67.6mAPbaselr+BNondetectionhead:71.0mAP10xbaselr+BNondetectionhead:75.6mAP020k40k60k80k100k120kSteps510152025ℓ2NormofGradientbaselr:67.6mAPbaselr+BNondetectionhead:71.0mAP10xbaselr+BNondetectionhead:75.6mAP020k40k60k80k100k120kSteps1.21.41.61.82.02.2Fluctuationofℓ2NormofGradientbaselr:67.6mAPbaselr+BNondetectionhead:71.0mAP10xbaselr+BNondetectionhead:75.6mAPFigure 2. Brief overview of SSD based on VGG-16 and ResNet-
+101. The BatchNorm is covered for clearness. As shown in Figure
+3 and Table 2, the ﬁrst stride 2 of ResNet makes worse performance
+on PASCAL VOC with small input size.
+
+tection accuracy, especially for small objects (see Table 2).
+After we remove the downsampling operation in conv1 x of
+ResNet-18 to form ResNet-18-B in Figure 3(c), the detection
+performance improves by a big margin from 73.1% to 77.6%
+mAP. We also remove the second downsampling operation
+to form ResNet-18-A in Figure 3(b), whose improvement is
+relatively small. In summary, the downsampling operation in
+the ﬁrst convolution layer has a bad impact on the detection
+accuracy, especially for small objects.
+Backbone network redesign for object detection. To over-
+come the disadvantages of ResNet based backbone network
+for object detection while retaining its powerful classiﬁcation
+ability, we design a new architecture, named Root-ResNet,
+which is an improvement of the truncated ResNet in the
+original SSD detector, shown in Figure 3(d). We remove the
+downsampling operation in the ﬁrst conv layer and replace
+the 7 × 7 convolution kernel by a stack of 3 × 3 convolution
+ﬁlters (similar as the stem block in DSOD[32], but denoted
+as the root block due to the large inﬂuence from the ﬁrst
+stride). With abundant inputs, Root-ResNet is able to exploit
+more local information from the image, so as to extract pow-
+erful features for small object detection. Furthermore, we
+replace the four convolution blocks (added by SSD to extract
+the feature maps with different scales) with four residual
+blocks to the end of the Root-ResNet. Each residual block is
+formed by two branches. One branch is a 1 × 1 convolution
+layer with stride 2 and the other one consists of a 3×3 convo-
+lution layer with stride 2 and a 3 × 3 convolution layer with
+stride 1. The number of output channels in each convolution
+layer is set to 128. These residual blocks bring efﬁciency in
+parameters and computation without performance dropout.
+
+4. Experiment
+
+We conduct several experiments on the PASCAL VOC
+and MS COCO datasets, including 20 and 80 object classes.
+The proposed ScratchDet is implemented in Caffe library
+[15] and all the codes and the trained models will be made
+publicly available.
+
+4.1. Training details
+
+All models are trained from scratch using SGD with
+0.0005 weight decay and 0.9 momentum on 4 NVIDIA
+
+Figure 3. Illustration of networks in Section 4.2.2. (a) ResNet-18:
+original structure. (b) ResNet-18-A: removing the ﬁrst max-pooling
+layer. (c) ResNet-18-B: changing the stride size in the ﬁrst conv
+layer from 2 to 1. (d) Root-ResNet-18: replacing the 7 × 7 conv
+layer with three stacked 3 × 3 conv layers in ResNet-18-B. The
+corresponding mAPs on PASCAL 2007 test (training on “07+12”
+from scratch) are 73.1%, 75.3%, 77.6% and 78.5%, respectively.
+Notably, for a fairy comparison, no matter how we modify the
+structure, the spatial sizes of our selected detection layers are the
+same as SSD300 and DSOD300 (i.e., 38 × 38, 19 × 19, 10 × 10,
+5 × 5, 3 × 3, 1 × 1).
+
+Tesla P40 GPUs. For a fair comparison, we use the same
+training settings as the original SSD, including data augmen-
+tation, anchor settings and loss function. We remove the
+L2 normalization [25]. Notably, all experiments select the
+detection layers with the ﬁxed spatial size same as SSD300
+and DSOD300, i.e., do not use larger-size feature maps for
+detection. Following DSOD, we use a relatively large batch
+size 128 to train our ScratchDet from scratch, in order to
+ensure the stable statistical results of BatchNorm in training
+phase. Meanwhile, we use the default batch size 32 for the
+pretrained model based SSD (We also try 128 batch size for
+the pretrained model, but the performance has not improved).
+Notably, we use the “Root-ResNet-18” redesigned from
+ResNet-18 as the backbone network in the model analysis by
+considering the computational cost in experiments. Whereas,
+in comparison with the state-of-the-art detectors, we use
+
+2271
+
+Table 1. Analysis of BatchNorm and learning rate for SSD trained from scratch on VOC 2007 test set. All the networks are based on the
+truncated VGG-16 backbone network. The best performance (78.7% mAP) is achieved when three conditions are satisﬁed: (1) BatchNorm
+in backbone and head, (2) non pretraining, (3) larger learning rate. “NAN” indicates that the training is non-convergent.
+
+Component
+
+pretraining
+
+BN in backbone
+
+BN in head
+mAP (%)
+
+lr 0.001
+
+✦ ✦
+
+✦ ✦
+✦
+✦ ✦ ✦
+
+✦
+
+lr 0.01
+
+✦ ✦
+
+✦ ✦
+✦
+✦ ✦ ✦
+
+✦
+
+lr 0.05
+
+✦ ✦
+✦
+
+✦
+
+✦
+
+✦
+
+✦
+✦
+✦
+
+67.6
+
+71.0
+
+72.8
+
+71.8
+
+77.1
+
+77.6 NAN 75.6
+
+77.8
+
+77.3
+
+76.9
+
+78.2 NAN NAN 78.0
+
+78.7 NAN 75.5
+
+a deeper backbone network “Root-ResNet-34” for better
+performance. All the parameters in our ScratchDet are ini-
+tialized by the “xavier” method [10]. Besides, all the models
+are trained with the 300 × 300 input size and we believe that
+the accuracy of ScratchDet can be further improved using
+larger input size.
+
+4.2. PASCAL VOC 2007
+
+For PASCAL VOC 2007, all models are trained on the
+VOC 2007 and VOC 2012 trainval sets (16, 551 images),
+and tested on the VOC 2007 test set (4, 952 images). We
+use the same settings and conﬁgurations except for some
+speciﬁed changes of model components.
+
+4.2.1 Analysis of BatchNorm
+
+We construct several variants of the original SSD and evalu-
+ate them on VOC 2007 to demonstrate the effectiveness of
+BatchNorm in training SSD from scratch, shown in Table 1.
+Without BatchNorm. We train the original SSD from
+scratch with the batch size 128. All the other settings are
+the same as that in [24]. As shown in the ﬁrst column of
+Table 1, we get 67.6% mAP, which is 9.6% worse than the
+detector initialized by the pretrained classiﬁcation network
+(i.e., 77.2%). In addition, due to the unstable gradient and
+unsmooth optimization landscape, the training is able to
+successfully converge only with the learning rate 0.001 and
+goes to a bad local minima (see blue curves in Figure 1). As
+shown in Table 1, if we use larger learning rates (0.01 and
+0.05), the training process will not converge.
+BatchNorm in the backbone subnetwork. BatchNorm is
+a widely used to enable fast and stable training of deep neu-
+ral networks. To validate the effectiveness of BatchNorm in
+the backbone subnetwork, we add the BatchNorm operation
+to each convolution layer in the truncated VGG-16 network,
+denoted as VGG-16-BN, and train the VGG-16-BN model
+based SSD from scratch. As shown in Table 1, using Batch-
+Norm in the backbone network with relative large learning
+rate (0.05) improves mAP from 67.6% to 78.0%.
+BatchNorm in the detection head subnetwork. We also
+study the effectiveness of BatchNorm in the detection head
+subnetwork. As described before, the detection head subnet-
+work in SSD is used to predict the locations, sizes and class
+labels of objects. The original SSD method [24] do not use
+BatchNorm in detection head subnetwork. As presented in
+
+Table 1, we ﬁnd that using BatchNorm only on the detection
+head subnetwork improves 3.4% mAP from 67.6% to 71.0%.
+After using the 10 times larger base learning rate 0.01, the
+performance can be further improved from 71.0% to 75.6%.
+This noticeable improvement (8.0%) demonstrates the impor-
+tance of using BatchNorm in the detection head subnetwork.
+BatchNorm in the whole network. We use BatchNorm on
+every convolution layer in SSD and train it from scratch with
+three different base learning rates (0.001, 0.01 and 0.05). For
+the 0.001 and 0.01 base learning rates, we achieve 71.8%
+and 77.3% mAPs, respectively. When we use the largest
+learning rate 0.05, the performance will be further improved
+by 1.4% mAP to 78.7%, which outperforms the pretrained
+network based SSD detector (78.7% v.s 77.2%). These re-
+sults indicate that using BatchNorm on each convolution
+layers in SSD is critical to train it from scratch.
+BatchNorm for the pretrained network. To validate the
+effect of BatchNorm for SSD ﬁnetuning from pretrained net-
+works, we construct a variant of the original SSD, i.e., adding
+the BatchNorm operation to every convolution layer. The
+layers in backbone network are initialized by the pretrained
+VGG-16-BN model from ImageNet, which is converted from
+the PyTorch ofﬁcial model. As shown in Table 1, we ob-
+serve that the best result achieves 78.2% with learning rate
+0.01. Comparing to the original SSD ﬁne-tuned from the
+pretrained network, BatchNorm improves only 1.0% mAP
+(77.2% v.s 78.2%) of the detector, which is rather small com-
+pared to the improvement of the trained-from-scratch detec-
+tor (i.e., 11.1% mAP improvement from 67.6% to 78.7%)1.
+We would also like to emphasize that ScratchDet produces
+better performance than the BatchNorm based SSD trained
+from the pretrained network (i.e., 78.7% v.s 78.2%). The
+results demonstrate that BatchNorm is more critical for SSD
+trained from scratch than ﬁne-tuned from pretrained models.
+BatchNorm in DSOD. DSOD attributes its success to deep
+supervision of DenseNet and ignores the effect of Batch-
+Norm. After removing all BatchNorm layers in DSOD, the
+mAP drops 6.2% from 77.7% to 71.5% on VOC 2007. Thus,
+we argue BatchNorm rather than deep supervision is the key
+to train detectors form scratch and experiments in Table 1
+validate this point. Besides, training VGG16-based Faster
+R-CNN without BatchNorm from scratch cannot converge
+
+1we also try the batch size 128 with default settings of SSD, produc-
+ing 78.2% mAP for VGG-16-BN and 76.8% mAP for VGG-16 without
+improvement.
+
+2272
+
+in the DSOD paper, but with BatchNorm it can converge
+successfully to 67.2% mAP, although it is still lower than
+the pretrained one (73.2% mAP).
+
+4.2.2 Analysis of the backbone subnetwork.
+
+We analyze the pros and cons of the ResNet and VGGNet
+based SSD detectors and redesign the backbone network,
+called Root-ResNet. Speciﬁcally, all the models are designed
+based on the ResNet-18 backbone network in experiments.
+We also use BatchNorm in the detection head subnetwork.
+In the training phase, the learning rate is set to 0.05 for the
+ﬁrst 45k iterations, and is divided by 10 successively for
+another 30k, 20k and 5k iterations, respectively. As shown
+in Table 2, training SSD from scratch based on ResNet-
+18 only produces 73.1% mAP. We analyze the reasons as
+follows.
+Kernel size in the ﬁrst layer. In contrast to VGG16, the ﬁrst
+convolution layer in ResNet-18 uses relatively large kernel
+size 7 × 7 with stride 2. We aim to explore the effect of
+the kernel size of the ﬁrst convolution layer on the detector
+trained from scratch. As shown in the ﬁrst two rows of Table
+2, the kernel size of convolution layer has no impact on the
+performance (i.e., 73.1% for 7×7 v.s 73.2% for 3×3). Using
+smaller kernel size 3 × 3 produces a slightly better results
+with faster speed. The same conclusion can be obtained
+when we set the stride size of the ﬁrst convolution layer to
+1 without downsampling, see the ﬁfth and the sixth row of
+Table 2 for more details.
+Downsampling in the ﬁrst layer. Compared to VGGNet,
+ResNet-18 uses downsampling on the ﬁrst convolution layer,
+leading to considerable local information loss, which greatly
+impacts the detection performance, especially for small ob-
+jects. As shown in Table 2, after removing the downsampling
+operation in the ﬁrst layer (i.e., ResNet-18-B in Figure 3),
+we can improve 4.5% and 4.6% mAPs for the 7 × 7 and 3 × 3
+kernel sizes, respectively. When we only remove the second
+downsampling operation and keep the ﬁrst stride = 2 (i.e.,
+ResNet-18-A in Figure 3), the performance achieves 75.3%
+mAP, 2.3% lower than modifying the ﬁrst layer (77.6%
+mAP). These results demonstrate that the downsampling
+operation in the ﬁrst convolution layer is the obstacle for
+good results. We need to remove this operation when train-
+ing ResNet based SSD from scratch.
+Number of layers in the root block. Inspired by DSOD
+and GoogLeNet-V3 [38], we use several convolution layers
+with kernel size 3 × 3 to replace the 7 × 7 convolution layers
+(i.e., Root-ResNet-18 in Figure 3). Here, we study the impact
+of number of stacked convolution layers in the root block
+on the detection performance in Table 2. As the number of
+convolution layers increasing from 1 to 3, the mAP scores
+are improved from 77.8% to 78.5%. However, the accuracy
+decreases as the number of stacked layers becoming larger
+
+Root block
+
+First conv layer
+
+with downsmapling
+
+Table 2. Analysis of backbone network for SSD trained from scratch
+on VOC 2007 test set. All models are based on the ResNet-18
+backbone. FPS is measured on one Tesla P40 GPU.
+FPS
+59.5
+62.9
+58.1
+54.5
+37.0
+37.2
+31.5
+26.9
+24.3
+21.8
+
+1: 7×7
+1: 3×3
+2: 3×3
+3: 3×3
+1: 7×7
+1: 3×3
+2: 3×3
+3: 3×3
+4: 3×3
+5: 3×3
+
+mAP
+73.1
+73.2
+74.9
+75.4
+77.6
+77.8
+78.1
+78.5
+78.4
+78.5
+
+without downsmapling
+
+than 3. We believe that three 3 × 3 convolution layers in
+the root block are enough to learn the information from
+raw images, and adding more 3 × 3 layers cannot boost
+the accuracy any more. Empirically, we use three 3 × 3
+convolution layers for detection task on PASCAL VOC 2007,
+2012 and MS COCO datasets with 300 × 300 input size.
+
+The aforementioned conclusions can be also extended
+to deeper ResNet backbone network, e.g., ResNet-34. As
+shown in Table 3, using Root-ResNet-34, the mAP of our
+ScratchDet is improved from 78.5% to 80.4%, which is
+the best results with 300 × 300 input size. In comparison
+experiments on the benchmarks, we use Root-ResNet-34 as
+the backbone network.
+
+4.2.3 Results
+
+We compare ScratchDet to the state-of-the-art detectors
+in Table 3. With small input 300 × 300, ScratchDet pro-
+duces 80.4% mAP without bells and whistles, better than
+several state-of-the-art one-stage pretrained object detec-
+tors (e.g., 80.0% mAP of ReﬁneDet320 and 79.7% mAP
+of DES300). Note that we keep most of original SSD
+conﬁgurations and the same epochs with DSOD. The re-
+sult is much better than SSD300-VGG16 (80.4% v.s 77.2%
+and 3.2% mAP higher) and SSD321-ResNet101 (80.4% v.s
+77.1%, 3.3% mAP higher). ScratchDet outperforms the
+state-of-the-art train-from-scratch detector with 1.7% im-
+provements on mAP score (i.e., 80.4% v.s 78.7% of GRP-
+DSOD). In the multi-scale testing, our ScratchDet achieves
+84.1% (ScratchDet300+) mAP, which is the state-of-the-art.
+
+4.3. PASCAL VOC 2012
+
+Following the evaluation protocol of VOC 2012, we use
+VOC 2012 trainval set, and VOC 2007 trainval and
+test sets (21, 503 images) to train our ScratchDet from
+scratch, and test on VOC 2012 test set (10, 991 images).
+The detection results of ScratchDet are submitted to the
+public testing server for evaluation. The learning rate and
+batch size are set the same as that in VOC 2007.
+
+Table 3 reports the accuracy of ScratchDet as well
+
+2273
+
+Table 3. Detection results on the PASCAL VOC datasets. For VOC 2007, all methods are trained on the VOC 2007 and 2012 trainval sets
+and tested on the VOC 2007 test set. For VOC 2012, all methods are trained on the VOC 2007 and 2012 trainval sets plus the VOC
+2007 test set, and tested on the VOC 2012 test set. The FPS of ScratchDet is measured on one TITAN X GPU for the fair comparison.
+†: http://host.robots.ox.ac.uk:8080/anonymous/0HPCHC.html
+
+‡: http://host.robots.ox.ac.uk:8080/anonymous/JSL6ZY.html
+
+Method
+
+Backbone
+
+Input size
+
+pretrained two-stage:
+
+HyperNet [19]
+
+Faster R-CNN[28]
+
+ION[1]
+
+MR-CNN[9]
+
+R-FCN[4]
+
+CoupleNet[43]
+
+pretrained one-stage:
+
+RON384[18]
+SSD321[8]
+SSD300∗[24]
+YOLOv2[27]
+DSSD321[8]
+DES300[42]
+
+ReﬁneDet320[39]
+
+trained from scratch:
+
+DSOD300[32]
+
+GRP-DSOD320[33]
+
+ScratchDet300
+ScratchDet300+
+
+VGG-16
+
+ResNet-101
+
+VGG-16
+VGG-16
+
+ResNet-101
+ResNet-101
+
+VGG-16
+
+ResNet-101
+
+VGG16
+
+Darknet-19
+ResNet-101
+
+VGG-16
+VGG-16
+
+DS/64-192-48-1
+DS/64-192-48-1
+Root-ResNet-34
+Root-ResNet-34
+
+∼ 1000 × 600
+∼ 1000 × 600
+∼ 1000 × 600
+∼ 1000 × 600
+∼ 1000 × 600
+∼ 1000 × 600
+
+384 × 384
+321 × 321
+300 × 300
+544 × 544
+321 × 321
+300 × 300
+320 × 320
+
+300 × 300
+300 × 300
+300 × 300
+
+-
+
+FPS
+
+0.88
+2.4
+1.25
+0.03
+
+9
+8.2
+
+15
+11.2
+46
+40
+9.5
+29.9
+40.3
+
+17.4
+16.7
+17.8
+
+-
+
+mAP (%)
+
+VOC 2007
+
+VOC 2012
+
+76.3
+76.4
+76.5
+78.2
+80.5
+82.7
+
+74.2
+77.1
+77.2
+78.6
+78.6
+79.7
+80.0
+
+77.7
+78.7
+80.4
+84.1
+
+71.4
+73.8
+76.4
+73.9
+77.6
+80.4
+
+71.7
+75.4
+75.8
+73.4
+76.3
+77.1
+78.1
+
+76.3
+77.0
+78.5†
+83.6‡
+
+as the state-of-the-art methods. Using small input size
+300 × 300, ScratchDet produces 78.5% mAP, surpass-
+ing some one-stage methods with similar input size, e.g.,
+SSD321-ResNet101 (75.4%, 3.1% higher mAP), DES300-
+VGG16 (77.1%, 1.4% higher mAP), and ReﬁneDet320-
+VGG16 (78.1%, 0.4% higher mAP). Meanwhile, comparing
+to the two-stage methods based on pretrained networks with
+∼ 1000 × 600 input size, ScratchDet also produces better
+results than R-FCN (77.6%, 0.9% higher mAP). In addition,
+our ScratchDet outperforms all the train-from-scratch de-
+tectors. It outperforms DSOD by 2.2% mAP with 60 less
+training epochs and surpasses GRP-DSOD by 1.5% mAP.
+Notably, in the multi-scale testing, ScratchDet obtains 83.6%
+mAP, much better than the state-of-the-arts of both one-stage
+and two-stage methods.
+
+4.4. MS COCO
+
+We also evaluate ScratchDet on MS COCO dataset.
+The model is trained from scratch on the MS COCO
+trainval35k set and tested on the test-dev set. We
+set the base learning rate to 0.05 for the ﬁrst 150k iterations,
+and divide it by 10 successively for another 100k, 60k and
+10k iterations respectively.
+
+Table 4 shows the results on the MS COCO test-dev
+set. ScratchDet produces 32.7% AP that is better than all
+the other methods with similar input size by a large mar-
+gin, such as SSD300 (25.1%, 7.6% higher AP), SSD321
+(28.0%, 4.7% higher AP), GRP-DSOD320 (30.0%, 2.7%
+higher AP), DSSD321 (28.0%, 4.7% higher AP), DES300
+(28.3%, 4.4% higher AP), ReﬁneDet320-VGG16 (29.4%,
+
+3.3% higher AP), RetinaNet400 (31.9%, 0.8% higher AP)
+and ReﬁneDet320-ResNet101 (32.0%, 0.7% higher AP).
+Notably, with the same input size, DSOD300 trains on
+the trainval set, which contains 5000 more images
+than trainval35k (i.e., 123, 287 v.s 118, 287), and our
+ScratchDet produces a much better result (32.7% v.s 29.3%,
+3.4% higher AP). Some methods use much bigger input
+sizes for both training and testing (∼ 1000 × 600) than
+our ScratchDet300, e.g., CoupleNet, Faster R-CNN and De-
+formable R-FCN. For a fair comparison, we also report the
+multi-scale testing AP results of ScratchDet300 in Table 4,
+i.e., 39.1%, which is currently the best result, surpassing
+those prominent two-stage and one-stage approaches with
+large input image sizes.
+
+Comparing to the state-of-the-art methods with similar
+input image size, ScratchDet300 produces the best APS
+(13.0%) for small objects, outperforming SSD321 by 6.8%.
+The signiﬁcant improvement in small object demonstrates
+the superiority of our ScratchDet architecture for small ob-
+ject detection.
+
+4.5. From MS COCO to PASCAL VOC
+
+We also study how the MS COCO dataset help the detec-
+tion on PASCAL VOC. Since the object classes in PASCAL
+VOC are from an subset of MS COCO, we directly ﬁne-
+tune the detection models pretrained on MS COCO by sub-
+sampling parameters. As shown in Table 5, ScratchDet300
+achieves 84.0% and 82.1% mAP on the VOC 2007 test set
+and VOC 2012 test set, outperforming other train-from-
+scratch methods. In the multi-scale testing, the detection
+
+2274
+
+Table 4. Detection results on the MS COCO test-dev set.
+
+Backbone
+
+AP
+
+AP50
+
+AP75
+
+APS
+
+APM
+
+APL
+
+Method
+
+pretrained two-stage:
+
+ION[1]
+
+OHEM++ [34]
+
+R-FCN[4]
+
+CoupleNet[43]
+
+Faster R-CNN+++ [12]
+
+Faster R-CNN w FPN [21]
+Faster R-CNN w TDM[35]
+
+Deformable R-FCN[5]
+
+Data
+
+train
+
+trainval
+trainval
+trainval
+trainval
+
+trainval35k
+
+trainval
+trainval
+
+VGG-16
+VGG-16
+
+ResNet-101
+ResNet-101
+
+ResNet-101-C4
+ResNet-101-FPN
+
+Inception-ResNet-v2-TDM
+Aligned-Inception-ResNet
+
+Mask R-CNN[11]
+
+trainval35k
+
+ResNet-101-FPN
+
+pretrained one-stage:
+
+YOLOv2[27]
+SSD300∗[24]
+RON384++[18]
+
+SSD321[8]
+DSSD321[8]
+DES300[42]
+DFPR300 [17]
+
+ReﬁneDet320[39]
+
+DFPR300 [17]
+
+PFPNet-R320 [16]
+RetinaNet400[22]
+ReﬁneDet320[39]
+
+trained from scratch:
+
+DSOD300[32]
+
+GRP-DSOD320[33]
+
+ScratchDet300
+ScratchDet300+
+
+trainval35k
+trainval35k
+
+trainval
+
+trainval35k
+trainval35k
+trainval35k
+
+trainval
+
+trainval35k
+
+trainval
+
+trainval35k
+trainval35k
+trainval35k
+
+trainval
+trainval
+
+trainval35k
+trainval35k
+
+DarkNet-19
+
+VGG16
+VGG-16
+
+ResNet-101
+ResNet-101
+
+VGG-16
+VGG-16
+VGG-16
+
+ResNet-101
+
+VGG-16
+
+ResNet-101
+ResNet-101
+
+DS/64-192-48-1
+DS/64-192-48-1
+Root-ResNet-34
+Root-ResNet-34
+
+23.6
+25.5
+29.9
+34.4
+34.9
+36.2
+36.8
+37.5
+38.2
+
+21.6
+25.1
+27.4
+28.0
+28.0
+28.3
+28.4
+29.4
+31.3
+31.8
+31.9
+32.0
+
+29.3
+30.0
+32.7
+39.1
+
+43.2
+45.9
+51.9
+54.8
+55.7
+59.1
+57.7
+58.0
+60.3
+
+44.0
+43.1
+49.5
+45.4
+46.1
+47.3
+48.2
+49.2
+50.5
+52.9
+49.5
+51.4
+
+47.3
+47.9
+52.0
+59.2
+
+23.6
+26.1
+
+-
+
+37.2
+37.4
+39.0
+39.2
+40.8
+41.7
+
+19.2
+25.8
+27.1
+29.3
+29.2
+29.4
+29.1
+31.3
+32.0
+33.6
+34.1
+34.2
+
+30.6
+31.8
+34.9
+42.6
+
+6.4
+7.4
+10.8
+13.4
+15.6
+18.2
+16.2
+19.4
+20.1
+
+5.0
+6.6
+
+-
+
+6.2
+7.4
+8.5
+8.2
+10.0
+10.5
+12.0
+11.6
+10.5
+
+9.4
+10.9
+13.0
+23.1
+
+24.1
+27.7
+32.8
+38.1
+38.7
+39.0
+39.8
+40.1
+43.2
+
+22.4
+25.9
+
+-
+
+28.3
+28.1
+29.9
+30.1
+32.0
+33.8
+35.5
+35.8
+34.7
+
+31.5
+33.6
+35.6
+43.5
+
+38.3
+40.3
+45.0
+50.8
+50.9
+48.2
+52.1
+52.5
+51.2
+
+35.5
+41.4
+
+-
+
+49.3
+47.6
+45.2
+44.2
+44.4
+49.9
+46.1
+48.5
+50.4
+
+47.0
+46.3
+49.0
+51.0
+
+Table 5. Detection results on PASCAL VOC dataset. All models
+are pretrained on MS COCO, and ﬁne-tuned on PASCAL VOC.
+†: http://host.robots.ox.ac.uk:8080/anonymous/ZVCMYN.html
+‡: http://host.robots.ox.ac.uk:8080/anonymous/OFHUPV.html
+
+Method
+
+Backbone
+
+mAP (%)
+
+VOC 2007 VOC 2012
+
+considering several weeks and millions of images involved
+in the pretraining phase, training detectors from scratch is
+more attractive than the pretrained detector. Notice that
+the comparison of training time is based on mmdetection
+framework [2].
+
+pretrained two-stage:
+
+Faster R-CNN[28]
+
+OHEM++[34]
+
+R-FCN[4]
+
+pretrained one-stage:
+
+SSD300[24]
+
+RON384++[18]
+ReﬁneDet320[39]
+
+VGG-16
+VGG-16
+
+ResNet-101
+
+VGG-16
+VGG-16
+VGG-16
+
+trained without ImageNet:
+
+DSOD300[32]
+ScratchDet300
+ScratchDet300+
+
+DS/64-192-48-1
+Root-ResNet-34
+Root-ResNet-34
+
+78.8
+
+-
+
+83.6
+
+81.2
+81.3
+84.0
+
+81.7
+84.0
+86.3
+
+75.9
+80.1
+82.0
+
+79.3
+80.7
+82.7
+
+79.3
+82.1†
+86.3‡
+
+accuracies are promoted to 86.3% and 86.3%, respectively.
+By using the training data in MS COCO and PASCAL VOC,
+our ScratchDet obtains the top mAP scores on both VOC
+2007 and 2012 datasets.
+
+4.6. Comparison of the training time
+
+ScratchDet uses obviously more time than ﬁne-tuning
+a pretrained classiﬁer on the 4 NVIDIA Tesla P40 GPUs
+workstation with the 300 × 300 input image size for the
+MS COCO dataset (i.e., 84.6 vs. 29.7 hours). However,
+
+5. Conclusion
+
+In this work, we focus on training object detectors from
+scratch in order to tackle the problems caused by ﬁne-tuning
+from pretrained networks. We study the effects of Batch-
+Norm in the backbone and detection head subnetworks, and
+successfully train detectors from scratch. By taking the
+pretaining-free advantage, we are able to explore various
+architectures for detector designing. After analyzing the
+performance of the ResNet and VGGNet based SSD, we
+propose a new Root-ResNet backbone network to further
+improve the detection accuracy, especially for small objects.
+As a consequence, the proposed detector sets a new state-
+of-the-art performance on the PASCAL VOC 2007, 2012
+and MS COCO datasets for the train-from-scratch detectors,
+even outperforming some one-stage pretrained methods.
+
+Acknowledgements
+
+We thank the engineers Jianhao Zhang and Peng Cheng
+in JD AI Research for their helpful suggestions for this work.
+
+2275
+
+References
+
+[1] Sean Bell, C Lawrence Zitnick, Kavita Bala, and Ross Gir-
+shick. Inside-outside net: Detecting objects in context with
+skip pooling and recurrent neural networks. In CVPR, 2016.
+
+[2] Kai Chen, Jiangmiao Pang, Jiaqi Wang, Yu Xiong, Xiaox-
+iao Li, Shuyang Sun, Wansen Feng, Ziwei Liu, Jianping
+Shi, Wanli Ouyang, Chen Change Loy, and Dahua Lin.
+mmdetection. https://github.com/open-mmlab/
+mmdetection, 2018.
+
+[3] Bowen Cheng, Yunchao Wei, Honghui Shi, Rogerio Feris,
+Jinjun Xiong, and Thomas Huang. Revisiting rcnn: On awak-
+ening the classiﬁcation power of faster rcnn. In ECCV, 2018.
+
+[4] Jifeng Dai, Yi Li, Kaiming He, and Jian Sun. R-fcn: Object
+detection via region-based fully convolutional networks. In
+NIPS, 2016.
+
+[5] Jifeng Dai, Haozhi Qi, Yuwen Xiong, Yi Li, Guodong Zhang,
+Han Hu, and Yichen Wei. Deformable convolutional networks.
+In CVPR, 2017.
+
+[6] M. Everingham, L. Van Gool, C. K. I. Williams, J. Winn, and
+A. Zisserman. The PASCAL Visual Object Classes Challenge
+2007 (VOC2007) Results.
+
+[7] M. Everingham, L. Van Gool, C. K. I. Williams, J.
+Winn, and A. Zisserman. The PASCAL Visual Object
+Classes Challenge 2012 (VOC2012) Results.
+http:
+//www.pascal-network.org/challenges/VOC/
+voc2012/workshop/index.html.
+
+[8] Cheng-Yang Fu, Wei Liu, Ananth Ranga, Ambrish Tyagi,
+and Alexander C Berg. Dssd: Deconvolutional single shot
+detector. CoRR, 2017.
+
+[9] Spyros Gidaris and Nikos Komodakis. Object detection via a
+multi-region and semantic segmentation-aware cnn model. In
+ICCV, 2015.
+
+[10] Xavier Glorot and Yoshua Bengio. Understanding the dif-
+In
+
+ﬁculty of training deep feedforward neural networks.
+AISTATS, 2010.
+
+[11] Kaiming He, Georgia Gkioxari, Piotr Doll´ar, and Ross Gir-
+
+shick. Mask r-cnn. In ICCV, 2017.
+
+[12] Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun.
+Deep residual learning for image recognition. In CVPR, 2016.
+
+[13] Gao Huang, Zhuang Liu, Kilian Q Weinberger, and Laurens
+van der Maaten. Densely connected convolutional networks.
+In CVPR, 2017.
+
+[14] Sergey Ioffe and Christian Szegedy. Batch normalization:
+Accelerating deep network training by reducing internal co-
+variate shift. In ICML, 2015.
+
+[15] Yangqing Jia, Evan Shelhamer, Jeff Donahue, Sergey Karayev,
+Jonathan Long, Ross Girshick, Sergio Guadarrama, and
+Trevor Darrell. Caffe: Convolutional architecture for fast
+feature embedding. In ACMMM, 2014.
+
+[16] Seung-Wook Kim, Hyong-Keun Kook, Jee-Young Sun, Mun-
+Cheon Kang, and Sung-Jea Ko. Parallel feature pyramid
+network for object detection. In ECCV, 2018.
+
+[18] Tao Kong, Fuchun Sun, Anbang Yao, Huaping Liu, Ming Lu,
+and Yurong Chen. Ron: Reverse connection with objectness
+prior networks for object detection. In CVPR, 2017.
+
+[19] Tao Kong, Anbang Yao, Yurong Chen, and Fuchun Sun. Hy-
+pernet: Towards accurate region proposal generation and joint
+object detection. In CVPR, 2016.
+
+[20] Zeming Li, Chao Peng, Gang Yu, Xiangyu Zhang, Yangdong
+Deng, and Jian Sun. Detnet: A backbone network for object
+detection. In ECCV, 2018.
+
+[21] Tsung-Yi Lin, Piotr Doll´ar, Ross Girshick, Kaiming He,
+Bharath Hariharan, and Serge Belongie. Feature pyramid
+networks for object detection. In CVPR, 2017.
+
+[22] Tsung-Yi Lin, Priya Goyal, Ross Girshick, Kaiming He, and
+Piotr Dollar. Focal loss for dense object detection. In ICCV,
+2017.
+
+[23] Tsung-Yi Lin, Michael Maire, Serge Belongie, James Hays,
+Pietro Perona, Deva Ramanan, Piotr Doll´ar, and C Lawrence
+Zitnick. Microsoft coco: Common objects in context. In
+ECCV, 2014.
+
+[24] Wei Liu, Dragomir Anguelov, Dumitru Erhan, Christian
+Szegedy, Scott Reed, Cheng-Yang Fu, and Alexander C Berg.
+Ssd: Single shot multibox detector. In ECCV, 2016.
+
+[25] Wei Liu, Andrew Rabinovich, and Alexander C Berg.
+Parsenet: Looking wider to see better. In ICLR workshop,
+2016.
+
+[26] Joseph Redmon, Santosh Divvala, Ross Girshick, and Ali
+Farhadi. You only look once: Uniﬁed, real-time object detec-
+tion. In CVPR, 2016.
+
+[27] Joseph Redmon and Ali Farhadi. Yolo9000: Better, faster,
+
+stronger. In CVPR, 2017.
+
+[28] Shaoqing Ren, Kaiming He, Ross Girshick, and Jian Sun.
+Faster r-cnn: Towards real-time object detection with region
+proposal networks. In NIPS, 2015.
+
+[29] Olga Russakovsky, Jia Deng, Hao Su, Jonathan Krause, San-
+jeev Satheesh, Sean Ma, Zhiheng Huang, Andrej Karpathy,
+Aditya Khosla, Michael Bernstein, et al. Imagenet large scale
+visual recognition challenge. IJCV, 2015.
+
+[30] Shibani Santurkar, Dimitris Tsipras, Andrew Ilyas, and Alek-
+sander Madry. How does batch normalization help optimiza-
+tion? (no, it is not about internal covariate shift). In NIPS,
+2018.
+
+[31] Pierre Sermanet, David Eigen, Xiang Zhang, Micha¨el Math-
+ieu, Rob Fergus, and Yann LeCun. Overfeat: Integrated
+recognition, localization and detection using convolutional
+networks. In ICLR, 2013.
+
+[32] Zhiqiang Shen, Zhuang Liu, Jianguo Li, Yu-Gang Jiang,
+Yurong Chen, and Xiangyang Xue. Dsod: Learning deeply
+supervised object detectors from scratch. In ICCV, 2017.
+
+[33] Zhiqiang Shen, Honghui Shi, Rogerio Feris, Liangliang Cao,
+Shuicheng Yan, Ding Liu, Xinchao Wang, Xiangyang Xue,
+and Thomas S Huang. Learning object detectors from scratch
+with gated recurrent feature pyramids. CoRR, 2017.
+
+[34] Abhinav Shrivastava, Abhinav Gupta, and Ross Girshick.
+Training region-based object detectors with online hard ex-
+ample mining. In CVPR, 2016.
+
+[17] Tao Kong, Fuchun Sun, Wenbing Huang, and Huaping Liu.
+Deep feature pyramid reconﬁguration for object detection. In
+ECCV, 2018.
+
+[35] Abhinav Shrivastava, Rahul Sukthankar, Jitendra Malik, and
+Abhinav Gupta. Beyond skip connections: Top-down modu-
+lation for object detection. CoRR, 2016.
+
+2276
+
+[36] Karen Simonyan and Andrew Zisserman. Very deep convolu-
+tional networks for large-scale image recognition. In ICLR,
+2015.
+
+[37] Christian Szegedy, Wei Liu, Yangqing Jia, Pierre Sermanet,
+Scott Reed, Dragomir Anguelov, Dumitru Erhan, Vincent
+Vanhoucke, and Andrew Rabinovich. Going deeper with
+convolutions. In CVPR, 2015.
+
+[38] Christian Szegedy, Vincent Vanhoucke, Sergey Ioffe, Jon
+Shlens, and Zbigniew Wojna. Rethinking the inception archi-
+tecture for computer vision. In CVPR, 2016.
+
+[39] Shifeng Zhang, Longyin Wen, Xiao Bian, Zhen Lei, and
+Stan Z Li. Single-shot reﬁnement neural network for object
+detection. In CVPR, 2018.
+
+[40] Shifeng Zhang, Longyin Wen, Hailin Shi, Zhen Lei, Siwei
+Lyu, and Stan Z Li. Single-shot scale-aware network for
+real-time face detection. IJCV, 2019.
+
+[41] Shifeng Zhang, Xiangyu Zhu, Zhen Lei, Hailin Shi, Xiaobo
+Wang, and Stan Z Li. S3FD: Single shot scale-invariant face
+detector. In ICCV, 2017.
+
+[42] Zhishuai Zhang, Siyuan Qiao, Cihang Xie, Wei Shen, Bo
+Wang, and Alan L Yuille. Single-shot object detection with
+enriched semantics. In CVPR, 2018.
+
+[43] Yousong Zhu, Chaoyang Zhao, Jinqiao Wang, Xu Zhao, Yi
+Wu, Hanqing Lu, et al. Couplenet: Coupling global structure
+with local parts for object detection. In ICCV, 2017.
+
+2277
+
+

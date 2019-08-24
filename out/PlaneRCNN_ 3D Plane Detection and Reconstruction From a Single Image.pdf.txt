@@ -1,0 +1,1095 @@
+PlaneRCNN: 3D Plane Detection and Reconstruction from a Single Image
+
+Chen Liu1
+
+2 ∗
+
+,
+
+Kihwan Kim1
+1NVIDIA
+
+3 ∗
+
+Jinwei Gu1
+2Washington University in St. Louis
+
+Yasutaka Furukawa4
+
+,
+
+Jan Kautz1
+
+3SenseTime
+
+4Simon Fraser University
+
+Figure 1. This paper proposes a deep neural architecture, PlaneRCNN, that detects planar regions and reconstructs a piecewise planar
+depthmap from a single RGB image. From left to right, an input image, segmented planar regions, estimated depthmap, and reconstructed
+planar surfaces.
+
+Abstract
+
+This paper proposes a deep neural architecture, PlaneR-
+CNN, that detects and reconstructs piecewise planar sur-
+faces from a single RGB image. PlaneRCNN employs a
+variant of Mask R-CNN to detect planes with their plane
+parameters and segmentation masks. PlaneRCNN then
+jointly reﬁnes all the segmentation masks with a novel
+loss enforcing the consistency with a nearby view during
+training. The paper also presents a new benchmark with
+more ﬁne-grained plane segmentations in the ground-truth,
+in which, PlaneRCNN outperforms existing state-of-the-
+art methods with signiﬁcant margins in the plane detec-
+tion, segmentation, and reconstruction metrics. PlaneR-
+CNN makes an important step towards robust plane extrac-
+tion, which would have an immediate impact on a wide
+range of applications including Robotics, Augmented Re-
+ality, and Virtual Reality. Code and data are available at
+https://research.nvidia.com/publication/2019-06 PlaneRCNN.
+
+1. Introduction
+
+Planar regions in 3D scenes offer important geometric
+cues in a variety of 3D perception tasks such as scene un-
+derstanding [42], scene reconstruction [3], and robot nav-
+igation [18, 56]. Accordingly, piecewise planar scene re-
+construction has been a focus of computer vision research
+
+∗The authors contributed to this work when they were at NVIDIA.
+
+for many years, for example, plausible recovery of planar
+structures from a single image [16], volumetric piecewise
+planar reconstruction from point clouds [3], and Manhattan
+depthmap reconstruction from multiple images [11].
+
+A difﬁcult yet fundamental task is the inference of a
+piecewise planar structure from a single RGB image, pos-
+ing two key challenges. First, 3D plane reconstruction from
+a single image is an ill-posed problem, requiring rich scene
+priors. Second, planar structures abundant in man-made en-
+vironments often lack textures, requiring global image un-
+derstanding as opposed to local texture analysis. Recently,
+PlaneNet [27] and PlaneRecover [49] made a breakthrough
+by introducing the use of Convolutional Neural Networks
+(CNNs) and formulating the problem as a plane segmenta-
+tion task. While generating promising results, they suffer
+from three major limitations: 1) Missing small surfaces; 2)
+Requiring the maximum number of planes in a single image
+a priori; and 3) Poor generalization across domains (e.g.,
+trained for indoors images and tested outdoors).
+
+This paper proposes a novel deep neural architecture,
+PlaneRCNN, that addresses these issues and more effec-
+tively infers piecewise planar structure from a single RGB
+image (Fig. 1). PlaneRCNN consists of three components.
+The ﬁrst component is a plane detection network built
+upon Mask R-CNN [14]. Besides an instance mask for each
+planar region, we also estimate the plane normal and per-
+pixel depth values. With known camera intrinsics, we can
+further reconstruct the 3D planes from the detected planar
+regions. This detection framework is more ﬂexible and can
+
+14450
+
+handle an arbitrary number of planar regions in an image.
+To the best of our knowledge, this paper is the ﬁrst to intro-
+duce a detection network, common in object recognition, to
+the depthmap reconstruction task. The second component
+is a segmentation reﬁnement network that jointly optimizes
+extracted segmentation masks to more coherently explain
+a scene as a whole. The reﬁnement network is designed to
+handle an arbitrary number of regions via a simple yet effec-
+tive neural module. The third component, the warping-loss
+module, enforces the consistency of reconstructions with
+another view observing the same scene during training and
+improves the plane parameter and depthmap accuracy in the
+detection network via end-to-end training.
+
+The paper also presents a new benchmark for the piece-
+wise planar depthmap reconstruction task. We collected
+100,000 images from ScanNet [6] and generated the corre-
+sponding ground-truth by utilizing the associated 3D scans.
+The new benchmark offers 14.7 plane instances per image
+on the average, in contrast to roughly 6 instances per image
+in the existing benchmark [27].
+
+The performance is evaluated via plane detection, seg-
+mentation, and reconstruction metrics, in which PlaneR-
+CNN outperforms the current state-of-the-art with signif-
+icant margins. Especially, PlaneRCNN is able to detect
+small planar surfaces and generalize well to new scene
+types.
+
+The contributions of the paper are two-fold:
+
+Technical Contribution: The paper proposes a novel neu-
+ral architecture PlaneRCNN, where 1) a detection network
+extracts an arbitrary number of planar regions; 2) a re-
+ﬁnement network jointly improves all the segmentation
+masks; and 3) a warping loss improves plane-parameter and
+depthmap accuracy via end-to-end training.
+System Contribution: The paper provides a new bench-
+mark for the piecewise planar depthmap reconstruction task
+with much more ﬁne-grained annotations than before, in
+which PlaneRCNN makes signiﬁcant improvements over
+the current state-of-the-art.
+
+2. Related Work
+
+For 3D plane detection and reconstruction, most tradi-
+tional approaches [10, 12, 37, 38, 52] require multiple views
+or depth information as input. They generate plane propos-
+als by ﬁtting planes to 3D points, then assign a proposal to
+each pixel via a global inference. Deng et al. [7] proposed
+a learning-based approach to recover planar regions, while
+still requiring depth information as input.
+
+Recently, PlaneNet [27] revisited the piecewise planar
+depthmap reconstruction problem with an end-to-end learn-
+ing framework from a single indoor RGB image. PlaneRe-
+cover [49] later proposed an un-supervised learning ap-
+proach for outdoor scenes. Both PlaneNet and PlaneRe-
+cover formulated the task as a pixel-wise segmentation
+
+problem with a ﬁxed number of planar regions (i.e., 10 in
+PlaneNet and 5 in PlaneRecover), which severely limits the
+expressiveness of their reconstructions and generalization
+capabilities to different scene types. We address these limi-
+tations by utilizing a detection network, commonly used for
+object recognition.
+
+Detection-based framework has been successfully ap-
+plied to many 3D understanding tasks for objects, for ex-
+ample, predicting object shapes in the form of bounding
+boxes [5, 9, 32], wire-frames [22, 47, 57], or template-based
+shape compositions [2, 21, 31, 48]. However, the coarse
+representation employed in these methods lack the ability
+to accurately model complex and cluttered indoor scenes.
+
+In addition to the detection, joint reﬁnement of segmen-
+tation masks is also a key to many applications that require
+precise plane parameters or boundaries. In recent semantic
+segmentation techniques, fully connected conditional ran-
+dom ﬁeld (CRF) is proven to be effective for localizing
+segmentation boundaries [4, 20]. CRFasRNN [55] further
+makes it differentiable for end-to-end training. CRF only
+utilizes low-level information, and global context is fur-
+ther exploited via RNNs [1, 23, 36], more general graph-
+ical models [30, 24], or novel neural architectural de-
+signs [53, 54, 51]. These segmentation reﬁnement tech-
+niques are NOT instance-aware, merely inferring a semantic
+label at each pixel and cannot distinguish multiple instances
+belonging to the same semantic category.
+
+Instance-aware joint segmentation reﬁnement poses
+more challenges. Traditional methods [39, 40, 41, 43, 50]
+model the scene as a graph and use graphical model infer-
+ence techniques to jointly optimize all instance masks. With
+a sequence of heuristics, these methods are often not robust.
+To this end, we will propose a segmentation reﬁnement net-
+work that jointly optimizes an arbitrary number of segmen-
+tation masks on top of a detection network.
+
+3. Approach
+
+PlaneRCNN consists of three main components (See
+Fig. 2): a plane detection network, a segmentation reﬁne-
+ment network, and a warping loss module. Built upon Mask
+R-CNN [14], the plane proposal network (Sec. 3.1) de-
+tects planar regions given a single RGB image and predicts
+3D plane parameters together with a segmentation mask
+for each planar region. The reﬁnement network (Sec. 3.2)
+takes all detected planar regions and jointly optimizes their
+masks. The warping loss module (Sec. 3.3) enforces the
+consistency of reconstructed planes with another view ob-
+serving the same scene to further improve the accuracy of
+plane parameters and depthmap during training.
+
+3.1. Plane Detection Network
+
+Mask R-CNN was originally designed for semantic seg-
+mentation, where images contain instances of varying cat-
+
+4451
+
+Figure 2. Our framework consists of three building blocks: 1) a plane detection network based on Mask R-CNN [14], 2) a segmentation
+reﬁnement network that jointly optimizes extracted segmentation masks, and 3) a warping loss module that enforces the consistency of
+reconstructions with a nearby view during training.
+
+egories (e.g., person, car, train, bicycle and more). Our
+problem has only two categories ”planar” or ”non-planar”,
+deﬁned in a geometric sense. Nonetheless, Mask R-CNN
+works surprisingly well in detecting planes in our experi-
+ments. It also enables us to handle an arbitrary number of
+planes, where existing approaches need the maximum num-
+ber of planes in an image a priori (i.e., 10 for PlaneNet [27]
+and 5 for PlaneRecover [49]).
+
+We treat each planar region as an object instance and let
+Mask R-CNN detect such instances and estimate their seg-
+mentation masks. The remaining task is to infer 3D plane
+parameters, which consists of the normal n and the offset in-
+formation d (See Fig. 3). While CNNs have been success-
+ful for depthmap [28] and surface normal [45] estimation,
+direct regression of plane offset turns out to be a challenge
+(even with the use of CoordConv [29]). Instead of direct re-
+gression, we solve it in three steps: (1) predict a normal per
+planar instance, (2) estimate a depthmap for an entire im-
+age, and (3) use a simple algebraic formula (Eq. 1) to calcu-
+late the plane offset (which is differentiable for end-to-end
+training). We now explain how we modify Mask-RCNN to
+perform these three steps.
+
+Plane normal estimation: Directly attaching a parameter
+regression module after the ROI pooling produces reason-
+able results, but we borrow the idea of 2D anchor boxes
+for bounding box regression [14] to further improve accu-
+racy. More precisely, we consider anchor normals and esti-
+mate a plane normal in the local camera coordinate frame by
+1) picking an anchor normal, 2) regressing the residual 3D
+vector, and 3) normalizing the sum to a unit-length vector.
+
+Anchor normals are deﬁned by running the K-means
+clustering algorithm on the plane normals in 10, 000 ran-
+domly sampled training images. We use k = 7 and the clus-
+ter centers become anchor normals, which are up-facing,
+down-facing, and horizontal vectors roughly separated by
+45◦ in our experiments (See Fig. 3).
+
+We replace the object category prediction in the original
+Mask R-CNN with the anchor ID prediction, and append
+
+one separate fully-connected layer to regress the 3D resid-
+ual vector for each anchor normal (i.e., 21 = 3 × 7 out-
+put values). To generate supervision for each ground-truth
+plane normal, we ﬁnd the closest anchor normal and com-
+pute the residual vector. We use the cross-entropy loss for
+the anchor normal selection, and the smooth L1 loss for the
+residual vector regression as in the bounding box regression
+of Mask R-CNN.
+
+Figure 3. A 3D point x on the plane follows the equation nx =
+d. We estimate a plane normal n by ﬁrst picking one of the 7
+anchor normals and then regressing the residual 3D vector. Anchor
+normals are deﬁned by running the K-means clustering algorithm
+on the ground-truth plane normal vectors.
+
+Depthmap estimation: While local image analysis per re-
+gion sufﬁces for surface normal prediction, global image
+analysis is crucial for depthmap inference. We add a de-
+coder after the feature pyramid network (FPN) [25] in Mask
+R-CNN to estimate the depthmap D for the entire image
+with the same resolution. Details of the decoder network
+can be found in the supplementary document.
+
+Plane offset estimation: Given a plane normal n, it is
+straightforward to estimate the plane offset d:
+
+d =
+
+Pi mi(n⊺(ziK −1
+
+xi))
+
+Pi mi
+
+(1)
+
+where K is the 3 × 3 camera intrinsic matrix, xi is the
+ith pixel coordinate in a homogeneous representation, zi is
+its predicted depth value, and mi is an indicator variable,
+
+4452
+
+which becomes 1 if the pixel belongs to the plane. The sum-
+mation is over all the pixels in the image. Note that we do
+not have a loss on the plane offset parameter, which did not
+make differences in the results. However, the plane offset
+inﬂuences the warping loss module below.
+
+ground-truth depthmap for the nearby view ˆDn.
+
+To compute Dw, we warp every pixel in the nearby
+view to the current view given camera intrinsics K, rotation
+R, translation t, and ground-truth depthmap for the nearby
+view ˆDn,
+
+3.2. Segmentation Reﬁnement Network
+
+(uw, vw) = warp((un, vn)|K, R, t, ˆDn)
+
+(2)
+
+The plane detection network predicts segmentation
+masks independently. The segmentation reﬁnement net-
+work jointly optimizes all the masks, where the major chal-
+lenge is in the varying number of detected planes. One so-
+lution is to assume the maximum number of planes in an
+image, concatenate all the masks, and pad zero in the miss-
+ing entries. However, this does not scale to large number of
+planes, and is prone to missing small planes.
+
+Instead, we propose a simple yet effective module, Con-
+vAccu, by combining a U-Net [33] and the idea of non-local
+module [46]. ConvAccu processes each plane segmentation
+mask represented in the entire image window with a con-
+volution layer. We then calculate and concatenate the mean
+feature volumes over all the other planes at the same layer
+before passing to the next layer (See Fig. 2). As its name
+indicates, ConvAccu combines a convolution layer and an
+accumulation scheme, which resembles the non-local mod-
+ule and can effectively aggregate information from all the
+masks.
+
+Reﬁned plane masks are concatenated at the end and
+compared against target masks with a cross-entropy loss.
+Each of the target mask is generated by ﬁnding the ground
+truth mask which has the maximum overlap with the pre-
+dicted mask. The target mask is set to be empty if the over-
+lap is smaller than half of the predicted mask. Note that be-
+sides the plane mask, the reﬁnement network also takes the
+original image, the union of all the other plane masks, the
+depthmap derived from plane detection results, the pixel-
+wise depthmap, and a 3D coordinate map for the speciﬁc
+plane (i.e., a three-channel image representing the corre-
+sponding 3D coordinates computed using the plane equa-
+tion) as input. We refer to the supplementary document for
+the speciﬁcation of all the network parameters.
+
+3.3. Warping Loss Module
+
+The warping loss module enforces the consistency of
+reconstructed 3D planes with a nearby view during train-
+ing. Speciﬁcally, our training samples come from RGB-D
+videos in ScanNet [6], and the nearby view is deﬁned to be
+the one 20 frames ahead from the current. The module ﬁrst
+builds a depthmap Dc of the current view by 1) comput-
+ing depth values from the plane equations of existing planar
+regions and 2) using pixel-wise depth values predicted in-
+side the plane detection network for the remaining pixels.
+The reconstructed depth Dc is then warped from the current
+view to the nearby view Dw which is compared against the
+
+where (un, vn) is a pixel in the nearby view and (uw, vw)
+is the warped pixel in the current view. The details of the
+warp function can be found in the supplementary document.
+(uw, vw) is then used to retrieve a depth value from Dc via
+bilinear interpolation, and unprojected to 3D space based
+on the retrieved depth value. The unprojected 3D point is
+transformed back to the nearby view, and its depth is as-
+signed to Dw at pixel (un, vn). The ﬁnal warping loss is
+deﬁned as,
+
+Losswarp = ||Dw − ˆDn||
+
+(3)
+
+The projection, un-projection, and coordinate frame
+transformation are all simple algebraic operations, whose
+gradients can be passed for training. Note that the warp-
+ing loss module and the nearby view is utilized only during
+training to boost geometric reconstruction accuracy, and the
+system runs on a single image at test time.
+
+4. Benchmark construction
+
+Following steps described in PlaneNet [27], we build
+a new benchmark from RGB-D videos in ScanNet [6].
+We add the following three modiﬁcations to recover more
+ﬁne-grained planar regions, yielding 14.7 plane instances
+per image on the average, which is more than double the
+PlaneNet dataset containing 6.0 plane instances per image.
+• First, we keep more small planar regions by reducing the
+plane area threshold from 1% of the image size to 0.16%
+(i.e., 500 pixels) and not dropping small planes when the
+total number is larger than 10.
+• Second, PlaneNet merges co-planar planes into a single
+region as they share the same plane label. The merging of
+two co-planar planes from different objects causes loss of
+semantics. We skip the merging process and keep all in-
+stance segmentation masks.
+
+• Third, the camera pose quality in ScanNet degrades in
+facing 3D tracking failures, which causes misalignment be-
+tween image and the projected ground-truth planes. Since
+we use camera poses and aligned 3D models to generate
+ground-truth planes, we detect such failures by the dis-
+crepancy between our ground-truth 3D planes and the raw
+depthmap from a sensor. More precisely, we do not use im-
+ages if the average depth discrepancy over planar regions
+is larger than 0.1m. This simple strategy removes approxi-
+mately 10% of the images.
+
+4453
+
+alization for 3D geometries is harder than the generalization
+of region masks. In Fig. 5, we show depth visualization for
+four examples from unseen datasets.
+
+Figure 4. Plane-wise accuracy against baselines. PlaneRCNN out-
+performs all the competing methods except when the depth thresh-
+old is very small and MWS-G can ﬁt 3D planes extremely accu-
+rately by utilizing the ground-truth depth values.
+
+5. Experimental results
+
+We have implemented our network in PyTorch. We use
+pre-trained Mask R-CNN [14] and initialize the segmenta-
+tion reﬁnement network with the existing model [15]. We
+train the network end-to-end on an NVIDIA V100 GPU for
+10 epochs with 100,000 randomly sampled images from
+training scenes in ScanNet. We use the same scale factor
+for all losses. For the detection network, we scale the image
+to 640 × 480 and pad zero values to get a 640 × 640 input
+image. For the reﬁnement network, we scale the image to
+256 × 192 and align the detected instance masks with the
+image based on the predicted bounding boxes.
+
+5.1. Qualitative evaluations
+
+Fig. 6 demonstrates our reconstructions results for Scan-
+Net testing scenes. PlaneRCNN is able to recover planar
+surfaces even for small objects. We include more examples
+in the supplementary document.
+
+Fig. 7 compares PlaneRCNN against two competing
+methods, PlaneNet [27] and PlaneRecover [49], on a variety
+of scene types from unseen datasets (except the SYNTHIA
+dataset is used for training by PlaneRecover). Note that
+PlaneRCNN and PlaneNet are trained on the ScanNet which
+contains indoor scenes, while PlaneRecover is trained on
+the SYNTHIA dataset (i.e., the 7th and 8th rows in the ﬁg-
+ure) which consist of synthetic outdoor scenes. The ﬁgure
+shows that PlaneRCNN is able to reconstruct most planes in
+varying scene types from unseen datasets regardless of their
+sizes, shapes, and textures. In particular, our results on the
+KITTI dataset are surprisingly better than PlaneRecover for
+planes close to the camera. In indoor scenes, our results are
+consistently better than both PlaneNet and PlaneRecover.
+
+While the detection network is able to robustly extract
+planar regions for images from unseen datasets, the gener-
+
+Figure 5. We show input images and depth reconstruction results
+on unseen datasets without ﬁne-tuning. From left to right: we
+show one examples from each dataset in the order of KITTI [13],
+SYNTHIA [34], Tank and Temple [19], and PhotoPopup [17].
+
+5.2. Plane reconstruction accuracy
+
+Following PlaneNet [27], we evaluate plane detection
+accuracy by measuring the plane recall with a ﬁxed In-
+tersection over Union (IOU) threshold 0.5 and a varying
+depth error threshold (from 0 to 1m with an increment
+of 0.05m). The accuracy is measured inside the overlap-
+ping regions between the ground-truth and inferred planes.
+Besides PlaneNet, we compare against Manhattan World
+Stereo (MWS) [10], which is the most competitive tradi-
+tional MRF-based approach as demonstrated in prior eval-
+uations [27]. MWS requires a 3D point cloud as an in-
+put, and we either use the point cloud from the ground-
+truth 3D planes (MWS-G) or the point cloud inferred by our
+depthmap estimation module in the plane detection network
+(MWS). PlaneRecover [49] was originally trained with the
+assumption of at most 5 planes in an image. We ﬁnd it difﬁ-
+cult to train PlaneRecover successfully for cluttered indoor
+scenes by simply increasing the threshold. We believe that
+PlaneNet, which is explicitly trained on ScanNet, serves as
+a stronger competitor for the evaluation.
+
+We randomly sample 100 images from ScanNet testing
+scenes for the evaluation. As demonstrated in Fig. 4, Plan-
+eRCNN signiﬁcantly outperforms all other methods, ex-
+cept when the depth threshold is small and MWS-G can
+ﬁt planes extremely accurately with the ground-truth depth
+values. Nonetheless, even with ground-truth depth infor-
+mation, MWS-G fails in extracting planar regions robustly,
+leading to lower recalls in general. Our results are superior
+also qualitatively as shown in Fig. 8.
+
+5.3. Geometric accuracy
+
+We propose a new metric in evaluating the quality of
+piecewise planar surface reconstruction by mixing the in-
+ferred depthmaps and the ground-truth plane segmentations.
+More precisely, we ﬁrst generate a depthmap from our re-
+construction by following the process in the warping loss
+
+4454
+
+Figure 6. piecewise planar reconstruction results by PlaneRCNN.
+From left to right: input image, plane segmentation, depthmap re-
+construction, and 3D rendering of our depthmap (rendered from a
+new view with -0.4m and 0.3m translation along x-axis and z-axis
+respectively and 10
+
+rotation along both x-axis and z-axis).
+
+◦
+
+Figure 7. Plane segmentation results on unseen datasets without
+ﬁne-tuning. From left to right: input image, PlaneNet [27] results,
+PlaneRecover [49] results, and ours. From top to the bottom, we
+show two examples from each dataset in the order of NYUv2 [37],
+7-scenes [35], KITTI [13], SYNTHIA [34], Tank and Temple [19],
+and PhotoPopup [17].
+
+4455
+
+Figure 8. Plane segmentation comparisons. From left to right: 1) input image, 2) MWS with inferred depths, 3) MWS with ground-truth
+depths, 4) PlaneNet, 5) Ours, and 6) ground-truth.
+
+evaluation (Sec. 3.3). Next, for every ground-truth pla-
+nar segment, we convert depth values in the reconstructed
+depthmap to 3D points, ﬁt a 3D plane by SVD, and nor-
+malize the plane coefﬁcients to make the normal compo-
+nent into a unit vector. Finally, we compute the mean
+and the area-weighted mean of the parameter differences
+to serve as the plane evaluation metrics. Besides the plane
+parameter metrics, we also consider depthmap metrics com-
+monly used in the literature [8]. We evaluate over the NYU
+dataset [37] for a fair comparison. Table 1 shows that, with
+more ﬂexible detection network, PlaneRCNN generalizes
+much better without ﬁne-tuning. PlaneRCNN also outper-
+forms PlaneNet [27] in every metric after ﬁne-tuning using
+the ground-truth depths from the NYU dataset.
+
+5.4. Ablation studies
+
+PlaneRCNN adds the following components to the Mask
+R-CNN [14] backbone: 1) the pixel-wise depth estima-
+tion network; 2) the anchor-based plane normal regression;
+3) the warping loss module; and 4) the segmentation re-
+ﬁnement network. To evaluate the contribution of each
+component, we measure performance changes while adding
+the components one by one. Following [49], we evalu-
+ate the plane segmentation quality by three clustering met-
+rics: variation of information (VOI), Rand index (RI), and
+segmentation covering (SC). To further assess the geomet-
+ric accuracy, we compute the average precision (AP) with
+IOU threshold 0.5 and three different depth error thresholds
+
+Table 1. Geometric accuracy comparison over the NYUv2 dataset.
+
+Method
+
+PlaneNet [27] Ours
+
+w/o ﬁne-tuning
+
+Rel
+log10
+RM SE
+Param.
+Param. (weighted)
+
+0.220
+0.114
+0.858
+0.939
+0.771
+
+w/ ﬁne-tuning
+
+Rel
+log10
+RM SE
+Param.
+Param. (weighted)
+
+0.129
+0.079
+0.397
+0.713
+0.532
+
+0.164
+0.077
+0.644
+0.776
+0.641
+
+0.124
+0.073
+0.395
+0.642
+0.505
+
+[0.3m, 0.6m, 0.9m]. Larger value means higher quality for
+all the metrics except for VOI.
+
+Table 2 shows that all the components have positive con-
+tribution to the ﬁnal performance. Fig. 9 further highlights
+the contributions of the warping loss module and the seg-
+mentation reﬁnement network qualitatively. The ﬁrst ex-
+ample shows that the segmentation reﬁnement network ﬁlls
+in gaps between adjacent planar regions, while the second
+example shows that the warping loss module improves re-
+construction accuracy with the help from the second view.
+
+4456
+
+Table 2. Ablation studies on the contributions of the four components in PlaneRCNN. Plane segmentation and detection metrics are
+calculated over the ScanNet dataset. PlaneNet represents the competing state-of-the-art.
+
+Plane segmentation metrics
+
+Plane detection metrics
+
+Method
+
+PlaneNet
+
+Ours (basic)
+Ours (depth)
+Ours (depth + anch.)
+Ours (depth + anch. + warp.)
+
+VOI ↓
+
+RI
+
+2.142
+
+0.797
+
+2.113
+2.041
+2.021
+1.990
+
+0.851
+0.856
+0.855
+0.855
+
+Ours (depth + anch. + warp. + reﬁne.)
+
+1.809
+
+0.880
+
+SC
+
+0.692
+
+0.719
+0.752
+0.761
+0.766
+
+0.810
+
+AP0.3m AP0.6m AP0.9m
+
+0.156
+
+0.269
+0.352
+0.352
+0.365
+
+0.365
+
+0.178
+
+0.329
+0.376
+0.378
+0.384
+
+0.386
+
+0.182
+
+0.355
+0.386
+0.392
+0.401
+
+0.405
+
+Figure 9. Effects of the surface reﬁnement network and the warp-
+ing loss module. Top: the segmentation reﬁnement network nar-
+rows the gap between adjacent planes. Bottom: the warping loss
+helps to correct erroneous plane geometries from the second view.
+
+5.5. Occlusion reasoning
+
+A simple modiﬁcation allows PlaneRCNN to infer oc-
+cluded/invisible surfaces and reconstruct layered depthmap
+models. First, ground-truth layered depthmaps are con-
+structed as follows. In our original process, we ﬁt planes
+to aligned 3D scans to obtain ground-truth 3D planar sur-
+faces, then rasterize the planes to an image with a depth
+testing. We simply remove the depth testing and generate
+a ”complete-mask” for each plane. Second, we add one
+more mask prediction module to PlaneRCNN to infer the
+complete-mask for each plane instance. Please refer to the
+supplementary document for the details of this experiment.
+Fig. 10 shows the new view synthesis examples, in which
+the modiﬁed PlaneRCNN successfully infers occluded sur-
+faces, for example, ﬂoor surfaces behind tables and chairs.
+Note that a depthmap is rendered as a depth mesh model
+(i.e., a collection of small triangles) in the ﬁgure. The
+layered depthmap representation enables new applications
+such as artifacts-free view synthesis, better scene comple-
+tion, and object removal [26, 44]. This experiment demon-
+strates yet another ﬂexibility and potential of the proposed
+PlaneRCNN architecture.
+
+Figure 10. New view synthesis results with the layered depthmap
+models. A simple modiﬁcation allows PlaneRCNN to also infer
+occluded surfaces and reconstruct layered depthmap models.
+
+6. Conclusion and future work
+
+This paper proposes PlaneRCNN, the ﬁrst detection-
+based neural network for piecewise planar reconstruction
+from a single RGB image. PlaneRCNN learns to detect pla-
+nar regions, regress plane parameters and instance masks,
+globally reﬁne segmentation masks, and utilize a neighbor-
+ing view during training for a performance boost. PlaneR-
+CNN outperforms competing methods by a large margin
+based on our new benchmark with ﬁne-grained plane an-
+notations.
+
+An interesting future direction is to process an image se-
+quence during inference which requires learning correspon-
+dences between plane detections. Another design choice
+worth exploring is to estimate pixel-wise normals and depth
+within the same module to share features.
+
+7. Acknowledgement
+
+This research is partially supported by National Science
+Foundation under grant IIS 1618685, NSERC Discovery
+Grants, and DND/NSERC Discovery Grant Supplement.
+
+4457
+
+References
+
+[1] W. Byeon, T. M. Breuel, F. Raue, and M. Liwicki. Scene
+labeling with lstm recurrent neural networks.
+In Proceed-
+ings of the IEEE Conference on Computer Vision and Pattern
+Recognition, pages 3547–3555, 2015. 2
+
+[2] F. Chabot, M. Chaouch, J. Rabarisoa, C. Teuli`ere, and
+T. Chateau. Deep manta: A coarse-to-ﬁne many-task net-
+work for joint 2d and 3d vehicle analysis from monocular
+image.
+In Proc. IEEE Conf. Comput. Vis. Pattern Recog-
+nit.(CVPR), pages 2040–2049, 2017. 2
+
+[3] A. Chauve, P. Labatut, and J. Pons. Robust piecewise-planar
+3d reconstruction and completion from large-scale unstruc-
+tured point data. In 2010 IEEE Computer Society Conference
+on Computer Vision and Pattern Recognition, pages 1261–
+1268, 2010. 1
+
+[4] L.-C. Chen, G. Papandreou, I. Kokkinos, K. Murphy, and
+A. L. Yuille. Semantic image segmentation with deep con-
+volutional nets and fully connected crfs.
+arXiv preprint
+arXiv:1412.7062, 2014. 2
+
+[5] X. Chen, K. Kundu, Z. Zhang, H. Ma, S. Fidler, and R. Urta-
+sun. Monocular 3d object detection for autonomous driving.
+In Proceedings of the IEEE Conference on Computer Vision
+and Pattern Recognition, pages 2147–2156, 2016. 2
+
+[6] A. Dai, A. X. Chang, M. Savva, M. Halber, T. Funkhouser,
+and M. Nießner. ScanNet: Richly-annotated 3D reconstruc-
+tions of indoor scenes. In IEEE Conf. on Computer Vision
+and Pattern Recognition (CVPR), 2017. 2, 4
+
+[7] Z. Deng, S. Todorovic, and L. J. Latecki. Unsupervised ob-
+ject region proposals for rgb-d indoor scenes. Computer Vi-
+sion and Image Understanding, 154:127–136, 2017. 2
+
+[8] D. Eigen and R. Fergus. Predicting depth, surface normals
+and semantic labels with a common multi-scale convolu-
+tional architecture. In Proceedings of the IEEE International
+Conference on Computer Vision, pages 2650–2658, 2015. 7
+[9] S. Fidler, S. Dickinson, and R. Urtasun. 3d object detec-
+tion and viewpoint estimation with a deformable 3d cuboid
+model.
+In Advances in neural information processing sys-
+tems, pages 611–619, 2012. 2
+
+[10] Y.
+
+S. M.
+
+Furukawa,
+
+B. Curless,
+
+Seitz,
+and
+In Computer
+R. Szeliski. Manhattan-world stereo.
+title=3d object detection
+V@inproceedingsﬁdler20123d,
+and viewpoint estimation with a deformable 3d cuboid
+model, author=Fidler, Sanja and Dickinson, Sven and
+Urtasun, Raquel, booktitle=Advances in neural information
+processing systems, pages=611–619, year=2012 ision and
+Pattern Recognition, 2009. CVPR 2009. IEEE Conference
+on, pages 1422–1429. IEEE, 2009. 2, 5
+
+[11] Y. Furukawa, B. Curless, S. M. Seitz, and R. Szeliski.
+Manhattan-world stereo. In 2009 IEEE Conference on Com-
+puter Vision and Pattern Recognition(CVPR), volume 00,
+pages 1422–1429, 2018. 1
+
+[12] D. Gallup, J.-M. Frahm, and M. Pollefeys. Piecewise planar
+and non-planar stereo for urban scene reconstruction. 2010.
+2
+
+[13] A. Geiger, P. Lenz, C. Stiller, and R. Urtasun. Vision meets
+robotics: The kitti dataset. The International Journal of
+Robotics Research, 32(11):1231–1237, 2013. 5, 6
+
+[14] K. He, G. Gkioxari, P. Doll´ar, and R. Girshick. Mask r-cnn.
+In Computer Vision (ICCV), 2017 IEEE International Con-
+ference on, pages 2980–2988. IEEE, 2017. 1, 2, 3, 5, 7
+
+[15] K. He, X. Zhang, S. Ren, and J. Sun. Delving deep into
+rectiﬁers: Surpassing human-level performance on imagenet
+classiﬁcation. In Proceedings of the IEEE international con-
+ference on computer vision, pages 1026–1034, 2015. 5
+
+[16] D. Hoiem, A. A. Efros, and M. Hebert. Automatic photo
+
+pop-up. ACM Trans. Graph., 24(3):577–584, July 2005. 1
+
+[17] D. Hoiem, A. A. Efros, and M. Hebert. Automatic photo
+pop-up. In ACM transactions on graphics (TOG), volume 24,
+pages 577–584. ACM, 2005. 5, 6
+
+[18] M. Kaess. Simultaneous localization and mapping with in-
+ﬁnite planes.
+In 2015 IEEE International Conference on
+Robotics and Automation (ICRA), pages 4605–4611, 2015.
+1
+
+[19] A. Knapitsch, J. Park, Q.-Y. Zhou, and V. Koltun. Tanks
+and temples: Benchmarking large-scale scene reconstruc-
+tion. ACM Transactions on Graphics (ToG), 36(4):78, 2017.
+5, 6
+
+[20] P. Kr¨ahenb¨uhl and V. Koltun. Efﬁcient inference in fully
+connected crfs with gaussian edge potentials. In Advances
+in neural information processing systems, pages 109–117,
+2011. 2
+
+[21] A. Kundu, Y. Li, and J. M. Rehg. 3d-rcnn: Instance-level
+3d object reconstruction via render-and-compare. In CVPR,
+2018. 2
+
+[22] C. Li, M. Z. Zia, Q.-H. Tran, X. Yu, G. D. Hager, and
+M. Chandraker. Deep supervision with shape concepts
+for occlusion-aware 3d object parsing.
+arXiv preprint
+arXiv:1612.02699, 2016. 2
+
+[23] X. Liang, X. Shen, D. Xiang, J. Feng, L. Lin, and S. Yan.
+Semantic object parsing with local-global long short-term
+memory. In Proceedings of the IEEE Conference on Com-
+puter Vision and Pattern Recognition, pages 3185–3193,
+2016. 2
+
+[24] G. Lin, C. Shen, A. Van Den Hengel, and I. Reid. Efﬁ-
+cient piecewise training of deep structured models for se-
+mantic segmentation.
+In Proceedings of the IEEE Confer-
+ence on Computer Vision and Pattern Recognition, pages
+3194–3203, 2016. 2
+
+[25] T.-Y. Lin, P. Doll´ar, R. B. Girshick, K. He, B. Hariharan, and
+S. J. Belongie. Feature pyramid networks for object detec-
+tion. In CVPR, volume 1, page 4, 2017. 3
+
+[26] C. Liu, P. Kohli, and Y. Furukawa. Layered scene decompo-
+sition via the occlusion-crf. In Proceedings of the IEEE Con-
+ference on Computer Vision and Pattern Recognition, pages
+165–173, 2016. 8
+
+[27] C. Liu, J. Yang, D. Ceylan, E. Yumer, and Y. Furukawa.
+Planenet: Piece-wise planar reconstruction from a single rgb
+image. In Proceedings of the IEEE Conference on Computer
+Vision and Pattern Recognition, pages 2579–2588, 2018. 1,
+2, 3, 4, 5, 6, 7
+
+[28] F. Liu, C. Shen, G. Lin, and I. D. Reid. Learning depth from
+single monocular images using deep convolutional neural
+ﬁelds. IEEE Trans. Pattern Anal. Mach. Intell., 38(10):2024–
+2039, 2016. 3
+
+4458
+
+[29] R. Liu, J. Lehman, P. Molino, F. P. Such, E. Frank,
+A. Sergeev, and J. Yosinski. An intriguing failing of convo-
+lutional neural networks and the coordconv solution. arXiv
+preprint arXiv:1807.03247, 2018. 3
+
+[30] Z. Liu, X. Li, P. Luo, C.-C. Loy, and X. Tang. Semantic im-
+age segmentation via deep parsing network. In Proceedings
+of the IEEE International Conference on Computer Vision,
+pages 1377–1385, 2015. 2
+
+[31] R. Mottaghi, Y. Xiang, and S. Savarese. A coarse-to-ﬁne
+model for 3d pose estimation and sub-category recognition.
+In Proceedings of the IEEE Conference on Computer Vision
+and Pattern Recognition, pages 418–426, 2015. 2
+
+[32] A. Mousavian, D. Anguelov, J. Flynn, and J. Koˇseck´a. 3d
+bounding box estimation using deep learning and geometry.
+In Computer Vision and Pattern Recognition (CVPR), 2017
+IEEE Conference on, pages 5632–5640. IEEE, 2017. 2
+
+[33] O. Ronneberger, P. Fischer, and T. Brox. U-net: Convo-
+lutional networks for biomedical image segmentation.
+In
+International Conference on Medical image computing and
+computer-assisted intervention, pages 234–241. Springer,
+2015. 4
+
+[34] G. Ros, L. Sellart, J. Materzynska, D. Vazquez, and A. M.
+Lopez. The synthia dataset: A large collection of synthetic
+images for semantic segmentation of urban scenes. In Pro-
+ceedings of the IEEE conference on computer vision and pat-
+tern recognition, pages 3234–3243, 2016. 5, 6
+
+[35] J. Shotton, B. Glocker, C. Zach, S. Izadi, A. Criminisi, and
+A. Fitzgibbon. Scene coordinate regression forests for cam-
+era relocalization in rgb-d images.
+In Proceedings of the
+IEEE Conference on Computer Vision and Pattern Recog-
+nition, pages 2930–2937, 2013. 6
+
+[36] B. Shuai, Z. Zuo, B. Wang, and G. Wang. Dag-recurrent
+In Proceedings of the
+neural networks for scene labeling.
+IEEE conference on computer vision and pattern recogni-
+tion, pages 3620–3629, 2016. 2
+
+[37] N. Silberman, D. Hoiem, P. Kohli, and R. Fergus.
+
+Indoor
+In
+segmentation and support inference from rgbd images.
+European Conference on Computer Vision, pages 746–760.
+Springer, 2012. 2, 6, 7
+
+[38] S. Sinha, D. Steedly, and R. Szeliski. Piecewise planar stereo
+for image-based rendering. In Proceedings of the IEEE In-
+ternational Conference on Computer Vision, 2009. 2
+
+[39] M. Sun, B.-s. Kim, P. Kohli, and S. Savarese. Relating things
+and stuff via objectproperty interactions. IEEE transactions
+on pattern analysis and machine intelligence, 36(7):1370–
+1383, 2014. 2
+
+[40] J. Tighe and S. Lazebnik. Finding things: Image parsing
+with regions and per-exemplar detectors. In Proceedings of
+the IEEE conference on computer vision and pattern recog-
+nition, pages 3001–3008, 2013. 2
+
+[41] J. Tighe, M. Niethammer, and S. Lazebnik. Scene parsing
+with object instances and occlusion ordering.
+In Proceed-
+ings of the IEEE Conference on Computer Vision and Pattern
+Recognition, pages 3748–3755, 2014. 2
+
+[42] G. Tsai, C. Xu, J. Liu, and B. Kuipers. Real-time indoor
+scene understanding using bayesian ﬁltering with motion
+cues. In 2011 International Conference on Computer Vision,
+pages 121–128, 2011. 1
+
+[43] Z. Tu, X. Chen, A. L. Yuille, and S.-C. Zhu. Image parsing:
+Unifying segmentation, detection, and recognition. Interna-
+tional Journal of computer vision, 63(2):113–140, 2005. 2
+
+[44] S. Tulsiani, R. Tucker, and N. Snavely. Layer-structured
+arXiv preprint
+
+3d scene inference via view synthesis.
+arXiv:1807.10264, 2018. 8
+
+[45] X. Wang, D. Fouhey, and A. Gupta. Designing deep net-
+works for surface normal estimation. In Proceedings of the
+IEEE Conference on Computer Vision and Pattern Recogni-
+tion, pages 539–547, 2015. 3
+
+[46] X. Wang, R. Girshick, A. Gupta, and K. He. Non-local neural
+networks. In The IEEE Conference on Computer Vision and
+Pattern Recognition (CVPR), 2018. 4
+
+[47] J. Wu, T. Xue, J. J. Lim, Y. Tian, J. B. Tenenbaum, A. Tor-
+ralba, and W. T. Freeman. Single image 3d interpreter net-
+work. In European Conference on Computer Vision, pages
+365–382. Springer, 2016. 2
+
+[48] Y. Xiang, W. Choi, Y. Lin, and S. Savarese. Data-driven 3d
+voxel patterns for object category recognition. In Proceed-
+ings of the IEEE Conference on Computer Vision and Pattern
+Recognition, pages 1903–1911, 2015. 2
+
+[49] F. Yang and Z. Zhou. Recovering 3d planes from a single
+image via convolutional neural networks.
+In Proceedings
+of the European Conference on Computer Vision (ECCV),
+pages 85–100, 2018. 1, 2, 3, 5, 6, 7
+
+[50] J. Yao, S. Fidler, and R. Urtasun. Describing the scene
+as a whole: Joint object detection, scene classiﬁcation and
+semantic segmentation.
+In Computer Vision and Pattern
+Recognition (CVPR), 2012 IEEE Conference on, pages 702–
+709. IEEE, 2012. 2
+
+[51] F. Yu and V. Koltun. Multi-scale context aggregation by di-
+lated convolutions. arXiv preprint arXiv:1511.07122, 2015.
+2
+
+[52] L. Zebedin, J. Bauer, K. Karner, and H. Bischof. Fusion of
+feature-and area-based information for urban buildings mod-
+eling from aerial imagery. In European conference on com-
+puter vision, pages 873–886. Springer, 2008. 2
+
+[53] R. Zhang, S. Tang, M. Lin, J. Li, and S. Yan. Global-
+residual and local-boundary reﬁnement networks for rectify-
+ing scene parsing predictions. In Proceedings of the 26th In-
+ternational Joint Conference on Artiﬁcial Intelligence, pages
+3427–3433. AAAI Press, 2017. 2
+
+[54] H. Zhao, J. Shi, X. Qi, X. Wang, and J. Jia. Pyramid scene
+In IEEE Conf. on Computer Vision and
+
+parsing network.
+Pattern Recognition (CVPR), pages 2881–2890, 2017. 2
+
+[55] S. Zheng, S. Jayasumana, B. Romera-Paredes, V. Vineet,
+Z. Su, D. Du, C. Huang, and P. H. Torr. Conditional ran-
+dom ﬁelds as recurrent neural networks. In Proceedings of
+the IEEE international conference on computer vision, pages
+1529–1537, 2015. 2
+
+[56] J. Zhou and B. Li. Homography-based ground detection for
+a mobile robot platform using a single camera. In Proceed-
+ings 2006 IEEE International Conference on Robotics and
+Automation, 2006. ICRA 2006., pages 4100–4105, 2006. 1
+
+[57] M. Z. Zia, M. Stark, B. Schiele, and K. Schindler. De-
+tailed 3d representations for object recognition and model-
+ing. IEEE transactions on pattern analysis and machine in-
+telligence, 35(11):2608–2623, 2013. 2
+
+4459
+
+

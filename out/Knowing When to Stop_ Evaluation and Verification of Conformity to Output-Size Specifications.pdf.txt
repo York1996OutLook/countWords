@@ -1,0 +1,1233 @@
+Evaluation and Veriﬁcation of Conformity to Output-size Speciﬁcations
+
+Knowing When to Stop:
+
+Chenglong Wang♠
+
+Rudy Bunel♠
+
+Krishnamurthy Dvijotham
+
+University of Washington
+
+University of Oxford
+
+DeepMind
+
+clwang@cs.washington.edu
+
+rudy@robots.ox.ac.uk
+
+dvij@google.com
+
+Po-Sen Huang
+
+DeepMind
+
+Edward Grefenstette♣
+
+DeepMind
+
+Pushmeet Kohli
+
+DeepMind
+
+posenhuang@google.com
+
+egrefen@fb.com
+
+pushmeet@google.com
+
+Abstract
+
+Models such as Sequence-to-Sequence and Image-to-
+Sequence are widely used in real world applications. While
+the ability of these neural architectures to produce variable-
+length outputs makes them extremely effective for problems
+like Machine Translation and Image Captioning, it also
+leaves them vulnerable to failures of the form where the
+model produces outputs of undesirable length. This be-
+haviour can have severe consequences such as usage of in-
+creased computation and induce faults in downstream mod-
+ules that expect outputs of a certain length. Motivated by
+the need to have a better understanding of the failures of
+these models, this paper proposes and studies the novel
+output-size modulation problem and makes two key tech-
+nical contributions. First, to evaluate model robustness,
+we develop an easy-to-compute differentiable proxy objec-
+tive that can be used with gradient-based algorithms to ﬁnd
+output-lengthening inputs. Second and more importantly,
+we develop a veriﬁcation approach that can formally verify
+whether a network always produces outputs within a cer-
+tain length. Experimental results on Machine Translation
+and Image Captioning show that our output-lengthening
+approach can produce outputs that are 50 times longer
+than the input, while our veriﬁcation approach can, given
+a model and input domain, prove that the output length is
+below a certain size.
+
+1. Introduction
+
+Neural networks with variable output lengths have be-
+come ubiquitous in several applications. In particular, re-
+current neural networks (RNNs) such as LSTMs [17], used
+
+work done during an internship at DeepMind
+|now at Facebook AI Research
+
+to form “sequence” models [30], have been successfully and
+extensively applied in in image captioning [34, 28, 21, 6,
+12, 37, 26, 24, 1], video captioning [33, 38, 35, 40, 41], ma-
+chine translation (MT) [30, 9], summarization [10], and in
+other sequence-based transduction tasks.
+
+The ability of these sequence neural models to generate
+variable-length outputs is key to their performance on com-
+plex prediction tasks. However, this ability also opens a
+powerful attack for adversaries that try to force the model
+to produce outputs of speciﬁc lengths that, for instance, lead
+to increased computation or affect the correct operation of
+down-stream modules. To address this issue, we introduce
+the output-length modulation problem where given a spec-
+iﬁcation of the form that the model should produce out-
+puts with less than a certain maximum length, we want to
+ﬁnd adversarial examples, i.e. search for inputs that lead
+the model to produce outputs with a larger length and thus
+show that the model under consideration violates the speci-
+ﬁcation. Different from existing work on targeted or untar-
+geted attacks where the goal is to perturb the input such that
+the output is another class or sequence in the development
+dataset (thus within the dataset distribution), the output-
+modulation problem requires solving a more challenging
+task of ﬁnding inputs such that the output sequences are
+outside of the training distribution, which was previously
+claimed difﬁcult [5].
+
+The naive approach to the solution of the output-length
+modulation problem involves a computationally intractable
+search over a large discrete search space. To overcome
+this, we develop an easy-to-compute differentiable proxy
+objective that can be used with gradient-based algorithms
+to ﬁnd output-lengthening inputs. Experimental results
+on Machine Translation show that our adversarial output-
+lengthening approach can produce outputs that are 50 times
+longer than the input. However, when evaluated on the
+image-to-text image captioning model, the method is less
+
+432112260
+
+successful. There could have been two potential reasons for
+this result: the image-to-text architecture is truly robust, or
+the adversarial approach is not powerful enough to ﬁnd ad-
+versarial examples for this model. To resolve this question,
+we develop a veriﬁcation method for checking and formally
+proving whether a network is consistent with the output-
+size speciﬁcation for the given range of inputs. To the best
+of our knowledge, our veriﬁcation algorithm is the ﬁrst for-
+mal veriﬁcation approach to check properties of recurrent
+models with variable output lengths.
+
+Our Contributions To summarize, the key contributions
+of this paper are as follows:
+
+• We propose and formulate the novel output-size mod-
+ulation problem to study the behaviour of neural archi-
+tectures capable of producing variable length outputs,
+and we study its evaluation and veriﬁcation problems.
+• For evaluation, we design an efﬁciently computable
+differentiable proxy for the expected length of the out-
+put sequence. Experiments show that this proxy can
+be optimized using gradient descent to efﬁciently ﬁnd
+inputs causing the model to produce long outputs.
+
+• We demonstrate that popular machine translation mod-
+els can be forced to produce long outputs that are 50
+times longer than the input sequence. The long output
+sequences help expose modes that the model can get
+stuck in, such as undesirable loops where they con-
+tinue to emit a speciﬁc token for several steps.
+
+• We demonstrate the feasibility of formal veriﬁcation
+of recurrent models by proposing the use of mixed-
+integer programming to formally verify that a certain
+neural image-captioning model will be consistent with
+the speciﬁcation for the given range of inputs.
+
+Motivations and Implications Our focus on studying the
+output-length modulation problem is motivated by the fol-
+lowing key considerations:
+
+• Achieving Computational Robustness: Many ML
+models are now offered as a service to customers via
+the cloud.
+In this context, ML services employing
+variable-output models could be vulnerable to denial-
+of-service attacks that cause the ML model to perform
+wasteful computations by feeding it inputs that induce
+long outputs. This is particularly relevant for vari-
+able compute models, like Seq2Seq [9, 30]. Given a
+trained instance of the model, no method is known to
+check for the consistency of the model with a speciﬁca-
+tion on the number of computation steps. Understand-
+ing the vulnerabilities of ML models to such output-
+lengthening and computation-increasing attacks is im-
+portant for the safe deployment of ML services.
+
+• Understanding and Debugging Models: By designing
+inputs that cause models to produce long outputs, it
+is possible to reason about the internal representations
+learned by the model and isolate where the model ex-
+hibits undesirable behavior. For example, we ﬁnd that
+an English to German sequence-to-sequence model
+can produce outputs that end with a long string of ques-
+tion marks (‘?’). This indicates that when the output
+decoder state is conditioned on a sequence of ‘?’s, it
+can end up stuck in the same state.
+
+• Uncovering security vulnerabilities through adversar-
+ial stress-testing: The adversarial approach to output-
+length modulation tries to ﬁnd parts of the space of
+inputs where the model exhibits improper behavior.
+Such inputs does not only reveal abnormal output size,
+but could also uncover other abnormalities like the pri-
+vacy violations of the kind that were recently revealed
+by [4] where an LSTM was forced to output memo-
+rized data.
+
+• Canonical speciﬁcation for testing generalization of
+variable-output models: Norm-bounded perturbations
+of images [31] have become the standard speciﬁca-
+tion to test attacks and defenses on image classiﬁers.
+While the practical relevance of this particular speci-
+ﬁcation can be questioned [14], it is still served as a
+useful canonical model encapsulating the essential dif-
+ﬁculty in developing robust image classiﬁers. We be-
+lieve stability of output-lengths can serve a similar pur-
+pose: as a canonical speciﬁcation for variable output-
+length models. The main difﬁculties in studying vari-
+able output length models in an adversarial sense (the
+non-differentiability of the objective with respect to in-
+puts) are exposed in output-lengthening attack, mak-
+ing it a fertile testing ground for both evaluating attack
+methods and defenses. We hope that advances made
+here will facilitate the study of robustness on variable
+compute models and other speciﬁcations for variable-
+output models such as monotonicity.
+
+2. Related Work
+
+There are several recent studies on generating adversarial
+perturbations on variable-output models. [27, 20] show that
+question answering and machine comprehension models are
+sensitive to attacks based on semantics preserving modiﬁca-
+tion or the introduction of unrelated information. [11, 39]
+ﬁnd that character-level classiﬁers are highly sensitive to
+small character manipulations. [29] shows that models pre-
+dicting the correctness of image captions struggle against
+perturbations consisting of a single word change. [5] and
+[8] further study adversarial attacks for sequential-output
+models (machine-translation, image captioning) with spe-
+ciﬁc target captions or keywords.
+
+432212261
+
+We focus on sequence output models and analyze
+the output-length modulation problem, where the models
+should produce outputs with at least a certain number of
+output tokens. We study whether a model can be adversar-
+ially perturbed to change the size of the output, which is a
+more challenging task compared to targeted attacks (see de-
+tails in Section 3). On the one hand, existing targeted attack
+tasks aim to perturb the input such that the output is another
+sequence in the validation dataset (thus within the training
+distribution), but attacking output size requires the model to
+generate out-of-distribution long sequences. On the other
+hand, since the desired output sequence is only loosely con-
+strained by the length rather than directly provided by the
+user, the attack algorithm is required to explore the output
+size to make the attack possible.
+
+For models that cannot be adversarially perturbed, we
+develop a veriﬁcation approach to show that it isn’t simply
+a lack of power by the adversary but the sign of true ro-
+bustness from the model. Similar approaches have been in-
+vestigated for feedforward networks [3, 7, 32] but our work
+is the ﬁrst to handle variable output length models and the
+corresponding decoding mechanisms.
+
+3. Modulating Output-size
+
+We study neural network models capable of producing
+outputs of variable length. We start with a canonical ab-
+straction of such models, and later specialize to concrete
+models used in machine translation and image captioning.
+We denote by x the input to the network and by X the
+space of all inputs to the network. We consider a set of in-
+puts of interest S, which can denote, for example, the set of
+“small”1 perturbations of a nominal input. We study models
+that produce variable-length outputs sequentially. Let yt 2
+Y denote the t-th output of the model, where Y is the out-
+put vocabulary of the model. At each timestep, the model
+deﬁnes a probability over the next element P (yt+1|x, y0:t).
+There exists a special end-of-sequence element eos 2 Y
+that signals termination of the output sequence.
+
+In practice, different models adopt different decod-
+ing strategies for generating yt+1 from the probability
+P (yt+1|x, y0:t) [13, 19, 22].
+In this paper, we focus on
+the commonly used deterministic greedy decoding strategy
+[13], where at each time step, the generated token is given
+by the argmax over the logits:
+
+y0 = argmax {P (·|x)}
+
+yt+1 = argmax {P (·|x, y0:t)} if yt 6= eos
+
+(1a)
+
+(1b)
+
+greedily decoded sequence as:
+
+` (x) = t s.t
+
+yt = eos
+yi 6= eos 8i < t
+yi+1 = argmax {P (.|x, y0:i)}
+
+(2)
+
+8i < t
+
+Note that there is a unique t that satisﬁes the above condi-
+tions, which is precisely the ﬁrst t at which yt = eos when
+using greedy decoding.
+
+Output length modulation speciﬁcation A network is
+said to satisfy the output length modulation speciﬁcation
+parameterized by S, ˆK, if for all inputs x in S, the model
+terminates within ˆK steps under greedy decoding for all
+x 2 S, formally:
+
+8x 2 S
+
+`(x)  ˆK
+
+(3)
+
+In Section 3.1, we study the problem of ﬁnding adversar-
+ial examples, i.e., searching for inputs that lead the model
+to produce outputs with a larger length and thus show that
+the model violates the speciﬁcation. In Section 4, we use
+formal veriﬁcation method to prove that a model is consis-
+tent with the speciﬁcation for the given range of inputs, if
+such attacks are indeed impossible.
+
+3.1. The Output-Size Modulation Problem
+
+In order to check whether the speciﬁcation, Eq. (3), is
+valid, one can consider a falsiﬁcation approach that tries to
+ﬁnd counterexamples proving that Eq. (3) is false.
+If an
+exhaustive search over S for such counterexamples fails,
+the speciﬁcation is indeed true. However, exhaustive search
+is computationally intractable; hence, in this section we
+develop gradient based algorithms that can efﬁciently ﬁnd
+counterexamples (although they may miss them even if they
+exist). To develop the falsiﬁcation approach, we study the
+solution to the following optimization objective:
+
+max
+x2S
+
+` (x)
+
+(4)
+
+where S is the valid perturbation space. If the optimal solu-
+tion x in the space S has `(x) > ˆK, then (3) is false.
+
+The attack spaces S we consider in this paper include
+both continuous inputs (for image-to-text models) and dis-
+crete inputs (for Seq2Seq models).
+
+Continuous inputs: For continuous inputs, such as image
+captioning tasks, the input is an n ⇥ m image with pixel
+values normalized to be in the range [ 1, 1]. x is an n ⇥ m
+matrix of real numbers and X = [ 1, 1]n⇥m. We deﬁne the
+perturbation space S(x,  ) as follows:
+
+Since greedy decoding is deterministic, for a given sample
+x with a ﬁnite length output, we can deﬁne the length of the
+
+S(x,  ) = {x0 2 X | kx0   xk1   }
+
+1The precise deﬁnition of small is speciﬁc to the application studied.
+
+i.e., the space of   perturbations of the input x in the `1
+ball.
+
+432312262
+
+Discrete inputs: For discrete inputs, e.g., machine trans-
+lation tasks, inputs are discrete tokens in a language vocab-
+ulary. Formally, given the vocabulary V of the input lan-
+guage, the input space X is deﬁned as all sentences com-
+posed of tokens in V , i.e., X = {(x1, . . . , xn) | xi 2
+V, n > 0}. Given an input sequence x = (x1, . . . , xn),
+we deﬁne the  -perturbation space of a sequence as all se-
+quences of length n with at most d  · ne tokens different
+from x (i.e.,   2 [0, 1] denotes the percentage of tokens that
+an attacker is allowed to modify). Formally, the perturba-
+tion space S(x,  ) is deﬁned as follows:
+
+S(x, δ) = {(x0
+
+1, . . . , x0
+
+n) 2 V n |
+
+n
+
+P
+
+i=1
+
+[xi 6= x0
+
+i]  dδ · ne}
+
+3.2. Extending Projected Gradient Descent Attacks
+
+In the projected gradient descent (PGD) attacks [25],2
+given an objective function J(x), the attacker calculates the
+adversarial example by searching for inputs in the attack
+space to maximize J(x). In the basic attack algorithm, we
+perform the following updates at each iteration:
+
+x0 = ΠS(x,δ) (x + ↵rxJ(x))
+
+(5)
+
+where ↵ > 0 is the step size and ΠS(x,δ) denotes the pro-
+jection of the attack to the valid space S(x,  ). Observe that
+the adversarial objective in Eq. (4) cannot be directly used
+as J(x) to update x as the length of the sequence is not
+a differentiable objective function. This hinders the direct
+application of PGD to output-lengthening attacks. Further-
+more, when the input space S is discrete, gradient descent
+cannot be directly be used because it is only applicable to
+continuous input spaces.
+
+In the following, we show our extensions of the PGD
+
+attack algorithm to handle these challenges.
+
+Greedy approach for sequence lengthening We intro-
+duce a differentiable proxy of `(x). Given an input x whose
+decoder output logits are (o1, . . . , ok) (i.e., the decoded se-
+quence is y = (argmax(o1), . . . , argmax(ok))), instead of
+directly maximizing the output sequence length, we use a
+greedy algorithm to ﬁnd an output sequence whose length
+is longer than k by minimizing the probability of the model
+to terminate within k steps. In other words, we minimize
+the log probability of the model to produce eos at any of
+the timesteps between 1 to k. Formally, the proxy objective
+˜J is deﬁned as follows:
+
+˜J(x) =
+
+k
+
+Pt=1
+
+max⇢ot[eos]   max
+
+z6=eos
+
+ot[z],  ✏ 
+
+where ✏ > 0 is a hyperparameter to clip the loss. This
+is piecewise differentiable w.r.t. the inputs x (in the same
+
+2Here the adversarial objective is stated as maximization, so the algo-
+rithm is Projected Gradient Ascent, but we stick with the PGD terminology
+since it is standard in the literature
+
+sense that the ReLU function is differentiable) and can be
+efﬁciently optimized using PGD.
+
+3.3. Continuous relaxation for discrete inputs
+
+While we can apply the PGD attack with the proxy ob-
+jective on the model with continuous inputs by setting the
+projection function ΠS(x,δ) as the Euclidean projection, we
+cannot directly update discrete inputs. To enable a PGD-
+type attack in the discrete input space, we use the Gumbel
+trick [18] to reparameterize the input space to perform con-
+tinuous relaxation of the inputs.
+
+Given an input sequence x = (x1, . . . , xn), for each
+xi, we construct a distribution ⇡i 2 R|V | initialized with
+⇡i[xi] = 1 and ⇡i[z] =  1 for all z 2 V \ {xi}. The soft-
+max function applied to ⇡i is a probability distribution over
+input tokens at position i with a mode at xi. With this repa-
+rameterization, instead of feeding x = (x1, . . . , xn) into
+the model, we feed the Gumbel softmax sampling from the
+distribution (u1, . . . , un). The sample ˜x = (˜x1, . . . , ˜xn) is
+calculated as follows:
+
+ui ⇠ Uniform(0, 1);
+p = softmax(⇡);
+
+gi =   log(  log(ui))
+)
+
+˜xi = softmax( gi+log pi
+
+τ
+
+where ⌧ is the Gumbel-softmax sampling temperature that
+controls the discreteness of ˜x. With this relaxation, we per-
+form PGD attack on the distribution ⇡ at each iteration.
+Since ⇡i is unconstrained, the projection step in (5) is un-
+necessary.
+
+When the ﬁnal ⇡0 = (⇡0
+
+PGD attack, we draw samples x0
+the ﬁnal adversarial example for the attack.
+
+1, . . . , ⇡n) is obtained from the
+i ⇠ Categorical(⇡i) to get
+
+4. Veriﬁed Bound on Output Length
+
+While heuristics approaches can be useful in ﬁnding at-
+tacks, they can fail due to the difﬁculty of optimizing non-
+differentiable nonconvex functions. These challenges show
+up particularly when the perturbation space is small or when
+the target model is trained with strong bias in the training
+data towards short output sequences (e.g., the Show-and-
+Tell model as we will show in Section 6). Thus, we design
+a formal veriﬁcation approach for complete reasoning of the
+output-size modulation problem, i.e., ﬁnding provable guar-
+antees that no input within a certain set of interest can result
+in an output sequence of length above a certain threshold.
+
+Our approach relies on counterexample search using in-
+telligent brute-force search methods, taking advantage of
+powerful modern integer programming solvers [15]. We en-
+code all the constraints that an adversarial example should
+satisfy as linear constraints, possibly introducing additional
+binary variables. Once in the right formalism, these can be
+fed into an off-the-shelf Mixed Integer Programming (MIP)
+solver, which provably solves the problem, albeit with a po-
+tentially large computational cost. The constraints consist
+
+432412263
+
+of four parts: (1) the initial restrictions on the model inputs
+(encoding S(x,  )), (2) the relations between the different
+activations of the network (implementing each layer), (3)
+the decoding strategy (connection between the output logits
+and the inputs at the next step), and (4) the condition for it
+being a counterexample (ie. a sequence of length larger than
+the threshold). In the following, we show how each part of
+the constraints is encoded into MIP formulas.
+
+Our formulation is inspired by pior work on encoding
+feed-forward neural networks as MIPs [3, 7, 32]. The im-
+age captioning model we use consists of an image embed-
+ding model, a feedforward convolutional neural network
+that computes an embedding of the image, followed by a
+recurrent network that generates tokens sequentially start-
+ing with the initial hidden state set to the image embedding.
+The image embedding model is simply a sequence of lin-
+ear or convolutional layers and ReLU activation functions.
+Linear and convolutional layers are trivially encoded as lin-
+ear equality constraints between their inputs and outputs,
+while ReLUs are represented by introducing a binary vari-
+able and employing the big-M method [16]:
+
+xi   0
+xi = max (ˆxi, 0) )  i 2 {0, 1},
+xi  ui ·  i,
+xi   ˆxi
+xi  ˆxi   li · (1    i)
+
+(6a)
+
+(6b)
+
+(6c)
+
+with li and ui being lower and upper bounds of ˆxi which
+can be obtained using interval arithmetic (details in [3]).
+
+Our novel contribution is to introduce a method to extend
+the techniques to handle greedy decoding used in recurrent
+networks. For a model with greedy decoding, the token with
+the most likely prediction is fed back as input to the next
+time step. To implement this mechanism as a mixed integer
+program, we employ a big-M method [36]:
+
+omax = max
+y2Y
+
+(oy)
+
+) omax   oy,
+
+ y 2 {0, 1} 8y 2 Y
+
+omax  oy + (u   ly)(1    y) 8y 2 Y
+
+ y = 1
+
+Xy2Y
+
+(7a)
+
+(7b)
+
+(7c)
+
+with ly, uy being a lower/upper bound on the value of oy
+and u = maxy2Y uy (these can again be computed us-
+ing interval arithmetic).
+Implementing the maximum in
+this way gives us both a variable representing the value of
+the maximum (omax), as well as a one-hot encoding of the
+argmax ( y). If the embedding for each token is given by
+{embi | i 2 Y}, we can simply encode the input to the fol-
+ y · emby, which is a linear
+
+lowing RNN timestep asPy2Y
+
+function of the variables that we previously constructed.
+
+` (x)   ˆK, we unroll the recurrent network for ˆK steps
+and attempt to prove that at each timestep, eos is not the
+maximum logit, as in (2). We setup the problem as:
+
+max min
+
+t=1.. ˆKmax
+
+z6=eos
+
+ot[z]   ot[eos] 
+
+(8)
+
+where o(k) represents the logits in the k-th decoding step.
+We use an encoding similar to the one of Equation (7) to
+represent the objective function as a linear objective with
+added constraints. If the global optimal value of Eq. (8)
+is positive, this is a valid counterexample: at all timesteps
+t 2 [1.. ˆK], there is at least one token greater than the eos
+token, which means that the decoding should continue. On
+the other hand, if the optimal value is negative, that means
+that those conditions cannot be satisﬁed and that it is not
+possible to generate a sequence of length greater than ˆK.
+The eos token would necessarily be predicted before. This
+would imply that our robustness property is True.
+
+5. Target Model Mechanism
+
+We use image captioning and machine translation mod-
+els as speciﬁc target examples to study the output length
+modulation problem. We now introduce their mechanism.
+
+Image captioning models The image captioning model
+we consider is an encoder-decoder model composed of two
+modules: a convolution neural network (CNN) as an en-
+coder for image feature extraction and a recurrent neural
+network (RNN) as a decoder for caption generation [34].
+
+Formally, the input to the model x is an m ⇥ n sized im-
+age from the space X = [ 1, 1]m⇥n, the CNN-RNN model
+computes the output sequence as follows:
+
+h0 = 0
+
+i0 = CNN(x);
+ot, ht+1 = RNNCell(it, ht)
+yt = arg max(ot);
+
+it+1 = emb(yt)
+
+where emb denotes the embedding function.
+
+The captioning model ﬁrst run the input image x through
+a CNN to obtain the image embedding and feed it to the
+RNN as the initial input i0 along with the initial state h0.
+At each decode step, the RNN uses the input it and state ht
+to compute the new state ht+1 as well as the logits ot repre-
+senting the log-probability of the output token distribution
+in the vocabulary. The output yt is the token in the vocabu-
+lary with highest probability based on ot, and it is embedded
+into the continuous space using an embedding matrix Wemb
+as Wemb[yt]. The embedding is fed to the next RNN cell as
+the input for the next decoding step.
+
+With this mechanism to encode the greedy decoding, we
+can now unroll the recurrent model for the desired number
+of timesteps. To search for an input x with output length
+
+Machine translation models The machine translation
+model is an encoder-decoder model [30, 9] with both the
+
+432512264
+
+encoder and the decoder being RNNs. Given the vocab-
+ulary Vin of the input language, the valid input space X
+is deﬁned as all sentences composed of tokens in Vin, i.e.,
+X = {(x1, . . . , xn) | xi 2 V, n > 0}. Given an input
+sequence x = (x1, . . . , xn), the model ﬁrst calculates its
+embedding f (x) RNN as follows (he
+t denote the en-
+coder hidden states and the inputs at the t-th time step, re-
+spectively. embe denotes the embedding function for each
+token in the vocabulary). The model then uses f (x) as the
+initial state h0 for the decoder RNN to generate the output
+sequence, following the same approach as in the image cap-
+tioning model.
+
+t and ie
+
+and all captions in the dataset are within length 20.
+
+NMT. The machine translation model we study is a
+Seq2Seq model [30, 9] with the attention mechanism [2]
+trained on the WMT15 German-English dataset. The model
+uses byte pair segmentation (BPE) subword units [28] as
+vocabulary. The input vocabulary size is 36, 548. The
+model consists of 4-layer LSTMs of 1024 units with a bidi-
+rectional encoder, with the embedding dimension set to
+1024. We use a publicly available checkpoint4 with 27.6
+BLEU score on the WMT15 test datasets in our evaluation.
+At training time, the model restricts the maximum decoding
+length to 50.
+
+he
+0 = 0;
+t = RNNCelle(ie
+he
+
+t = embe(xt)
+ie
+t 1);
+
+t , he
+
+f (x) = he
+n
+
+6.2. Adversarial Attacks
+
+6. Experiments
+
+We consider the following three models, namely, Multi-
+MNIST captioning, Show-and-Tell [34], and Neural Ma-
+chine Translation (NMT) [30, 9, 2] models.
+
+6.1. Details of models and datasets
+
+Multi-MNIST. The ﬁrst model we evaluate is a mini-
+mal image captioning model for Multi-MNIST dataset. The
+Multi-MNIST dataset is composed from the MNIST dataset
+(Figure 1 left). Each image in the dataset is composed
+from 1-3 MNIST images: each MNIST image (28 * 28)
+is placed on the canvas of size (28 * 112) with random bias
+on the x-axis. The composition process guarantees that ev-
+ery MNIST image is fully contained in the canvas without
+overlaps with other images. The label of each image is the
+list of MNIST digits appearing in the canvas, ordered by
+their x-axis values. The dataset contains 50,000 training
+images and 10,000 test images, where the training set is
+constructed from MNIST training set and the test set is con-
+structed from MNIST test set. The images are normalized
+to [ 1, 1] before feeding to the captioning model. For this
+dataset, we train a CNN-RNN model for label prediction.
+The model encoder is a 4-layers CNN (2 convolution layers
+and 2 fully connected layers with ReLU activation functions
+applied in between). The decoder is a RNN with ReLU ac-
+tivation. Both the embedding size and the hidden size are
+set to 32. We train the model for 300 steps with Adam opti-
+mizer based on the cross-entropy loss. The model achieves
+91.2% test accuracy, and all predictions made by the model
+on the training set have lengths no more than 3.
+
+Show-and-Tell. Show and Tell model [34] is an image
+captioning model with CNN-RNN encoder-decoder archi-
+tecture similar to the Multi-MNIST model trained on the
+MSCOCO 2014 dataset [23]. Show-and-Tell model uses
+Inception-v3 as the CNN encoder and an LSTM for cap-
+tion generation. We use a public version of the pretrained
+model3 for evaluation. All images are normalized to [ 1, 1]
+
+Our ﬁrst experiment studies whether adversarial inputs
+exist for the above models and how they affect model de-
+coding. For each model, we randomly select 100 inputs
+from the development dataset as attack targets, and com-
+pare the output length distributions from random perturba-
+tion and PGD attacks.
+
+Multi-MNIST We evaluate the distribution of output
+lengths of images with an `1 perturbation radius of
+  2 {0.001, 0.005, 0.01, 0.05, 0.1, 0.5} using both random
+search and PGD attack.
+In random search, we generate
+10,000 random images within the given perturbation radius
+for each image in the target dataset as new inputs to the
+model. In PGD attack, the adversarial inputs are obtained
+by running 10,000 gradient descent steps with an learning
+rate of 0.0005 using the Adam Optimizer.
+
+Neither of the attack methods can ﬁnd any adversarial
+inputs for   2 {0.001, 0.005, 0.01} perturbation radius (i.e.,
+no perturbation is found for any images in the target dataset
+within the above   to generate an output sequence longer
+than the original one). Figure 2 shows the distribution of the
+output lengths for images with different perturbation radius.
+Results show that the PGD attack is successful at ﬁnding
+attacks that push the distribution of output lengths higher,
+particularly at larger values of  . Examples of adversarial
+inputs found by the model are shown in Figure 1.
+
+Show-and-Tell For the Show-and-Tell model, we gener-
+ate attacks within an `1 perturbation radius of   = 0.5 with
+both random search and PGD attack on 500 images ran-
+domly selected from the development dataset. However, ex-
+cept one adversarial input found by PGD attack that would
+cause the model to produce an output with size 25, no other
+adversarial inputs are found that can cause the model to pro-
+duce outputs longer than 20 words, which is the training
+length cap. Our analysis shows that the difﬁculty of attack-
+ing the model is resulted from its strong bias on the output
+
+3https://github.com/tensorﬂow/models/
+
+4https://github.com/tensorﬂow/nmt
+
+432612265
+
+Figure 1. Multi-MNIST examples (left), adversarial examples found by PGD attack (mid), and their differences. For the ﬁrst group, the
+model correctly predicts label l1 = [6, 1] on the original image but predicts l0
+1 = [6, 1, 1] for its corresponding adversarial input. Predictions
+on the original/adversarial inputs made by model for the second group are l2 = [0, 7, 4], l0
+3 = [3, 3, 5, 3] for
+the third group. The adversarial inputs in the ﬁrst/second/third groups are found within the perturbation radius δ1 = 0.1, δ2 = 0.25, δ3 =
+0.25.
+
+2 = [0, 1, 4, 3], and l3 = [3], l0
+
+Figure 2. The distribution of output length for random search (de-
+noted as Rand) and PGD attack with different perturbation radius
+δ. The x-axis denotes the output length and y-axis denotes the
+number of outputs with the corresponding length. δ = 0 (no per-
+turbation allowed) refers to the original output distribution of the
+target dataset.
+
+sequence distribution and the saturation of sigmoid gates in
+the LSTM decoder. This result is also consistent with the
+result found by [5] that Show-and-Tell model is “only able
+to generate relevant captions learned from the training dis-
+tribution”.
+
+NMT We evaluate the NMT model by comparing the out-
+put length distribution from adversarial examples gener-
+ated from random search and PGD attack algorithms. We
+randomly draw 100 input sentences from the development
+dataset. The maximum input length is 78 and their corre-
+sponding translations made by the model are all within 75
+tokens. We consider the perturbation   2 {0.3, 0.5, 1.0}.
+
+1. Random Search.
+
+In each run of the random attack,
+given an input sequence with length n, we ﬁrst ran-
+domly select d  · ne locations to modify, then ran-
+domly select substitutions of the tokens at these lo-
+cations from the input vocabulary, and ﬁnally run the
+NMT model on the modiﬁed sequence. We run 10,000
+random search steps for the 100 selected inputs, and
+show the distributions of all outputs obtained from the
+translation (in the total 1M output sequences).
+
+2. PGD Attack. In PGD attack, we also start by randomly
+
+selecting d  · ne locations to modify for each input
+sequence with length n. We then run 800 iterations
+of PGD attack with Adam optimizer using an initial
+learning rate of 0.005 to ﬁnd substitutions of the to-
+kens at these selected locations. We plot the output
+length obtained from running these adversarial inputs
+through the translation model.
+
+Figure 3 shows the distribution of output sequence
+lengths obtained from random search methods with dif-
+ferent  . We aggregate all sequences with length longer
+than 100 into the group ‘>100’ in the plot. Results show
+that even random search approach could often craft inputs
+such that the corresponding output lengths are more than
+75 and occasionally generates sentences with output length
+over 100. The random search algorithm ﬁnds 79, 11, 3 for
+  =0.3, 0.5, 1, respectively, among the 1M translations that
+are longer than 100 tokens (at small  , the search space is
+more restricted, and random search has a higher success
+rate of ﬁnding long outputs). Notably, the longest sequence
+found by the random search is a sequence with output length
+312 tokens, where the original sequence is only 6.
+
+Figure 3. The histogram representing the output length distribu-
+tion of the NMT model using random search with different pertur-
+bations (δ 2 {0.3, 0.5, 1}). The x-axis shows the output length.
+y-axis values are divided by 10,000, the number of random pertur-
+bation rounds per image.
+
+Figure 4 shows the result from attacking the NMT model
+with PGD attack. Results show that PGD attack has rel-
+atively low success rate at lower perturbations compared
+
+432712266
+
+Figure 4. The histogram representing the output length distribution
+of the NMT model under PGD attack for different δ. x-axis shows
+the output length and y-axis shows the number of instances with
+the corresponding length.
+
+(I) Die Waffe wird ausgestellt und durch den Zaun ¨ubergeben.
+(O) The weapon is issued and handed over by the fence . eos
+(I 0) Die namen name descri und ames utt origin i.e. meet grammatisch .
+(O0) names name names name names grammatically name names names
+names names names names names names names names names names
+names names names names names names names names names names
+names names names names names names names names names names
+names names names names names names names names names names
+names names names names names names names names names names
+names names names names names names names names names names
+names names names names names names names names names eos
+
+Figure 5. An example of German to English translation where I, O
+refer to an original sequence in the dataset and the corresponding
+translation made by the model. I 0, O0 refer to an adversarial exam-
+ple found by PGD attack and the corresponding model translation.
+
+to larger perturbations. With an unconstrained perturbation
+  = 100%, PGD attack algorithm discovers more adversar-
+ial inputs whose outputs are longer than 100 tokens (10%
+among all attacks), which is 1000⇥ more often than ran-
+dom search. As an extreme case, PGD attack discovered
+an adversarial input with length 3 whose output length is
+575. Examples of adversarial inputs and their correspond-
+ing model outputs are shown in Figure 5 and the Appendix;
+we ﬁnd out that a common feature of the long outputs pro-
+duced by the translation model is that the output sequences
+often end with long repetitions of one (or a few) words.
+
+To analyze the bottleneck of PGD attack on the NMT
+model, we further run a variation of the PGD attack where
+the attack space is the (continuous) word embedding space
+as opposed to the (discrete) token space: we allow the at-
+tacker to directly modify token embeddings at selected at-
+tack locations to any other vector. PGD attack on this vari-
+ation achieves a 100% success rate to ﬁnd adversarial token
+embeddings such that the model outputs are longer than 500
+tokens. This indicates that the discrete space is a bottleneck
+for consistently ﬁnding stronger attacks.
+
+6.3. Veriﬁcation
+
+Our implementation of the veriﬁcation algorithm using
+the mixed integer programming (8) is implemented using
+SCIP [15]. We run our veriﬁcation algorithm on the Multi-
+
+Figure 6. Proportion of samples being provably robust (in blue),
+vulnerable (in red) or of unknown robustness status (in gray) to an
+attack attempting to make the model generate an output sequence
+longer than the ground truth, as a function of the perturbation ra-
+dius allowed to the attacker. For small radiuses, the MIP can prove
+that no attacks can be successful. For large radiuses, we are able
+to ﬁnd successful attacks.
+
+MNIST dataset, attempting to formally prove the robust-
+ness of the model to attacks attempting to generate an out-
+put longer than the ground truth. For each input image, we
+set a timeout of 30 minutes for the solver.
+
+The results in Figure 6 show that our veriﬁcation algo-
+rithm is able to verify formally that no attacks exists for
+small perturbation radiuses. However, as the perturbation
+radius increases, our veriﬁcation algorithm times out and is
+not able to explore the full space of valid perturbations and
+thus cannot decide whether attacks exists in the given space.
+For this reason, the number of robust samples we report is
+only a lower bound on the actual number of robust samples.
+Conversely, the vulnerable samples that we exhibit give us
+an upper bound on the number of those robust samples. As
+shown by the large proportion of samples of unknown sta-
+tus, there is currently still a gap between the capabilities of
+formal veriﬁcation method and attacks.
+
+7. Conclusion
+
+In this paper, we introduce the existence and the con-
+struction of the output-length modulation problem. We pro-
+pose a differentiable proxy that can be used with PGD to
+efﬁciently ﬁnd output-lengthening inputs. We also develop
+a veriﬁcation approach to formally prove certain models
+cannot produce outputs greater than a certain length. We
+show that the proposed algorithm can produce adversarial
+examples that are 50 times longer than the input for ma-
+chine translation models, and the image-captioning model
+can conform the output size is less than certain maximum
+length using the veriﬁcation approach. In future work, we
+plan to study adversarial training of sequential output mod-
+els using the generated attacks, to models that are robust
+against output lengthening attacks, and further, verify this
+formally.
+
+432812267
+
+References
+
+[1] Peter Anderson, Xiaodong He, Chris Buehler, Damien
+Teney, Mark Johnson, Stephen Gould, and Lei Zhang.
+Bottom-up and top-down attention for image captioning and
+visual question answering. In The IEEE Conference on Com-
+puter Vision and Pattern Recognition (CVPR), June 2018.
+
+[2] Dzmitry Bahdanau, Kyunghyun Cho, and Yoshua Bengio.
+Neural machine translation by jointly learning to align and
+translate. arXiv preprint arXiv:1409.0473, 2014.
+
+[3] Rudy Bunel, Ilker Turkaslan, Philip H. S. Torr, Pushmeet
+Kohli, and M. Pawan Kumar. A uniﬁed view of piecewise
+linear neural network veriﬁcation.
+In Advances in Neural
+Information Processing Systems, 2018.
+
+[4] Nicholas Carlini, Chang Liu, Jernej Kos, ´Ulfar Erlingsson,
+and Dawn Song. The secret sharer: Measuring unintended
+neural network memorization & extracting secrets. CoRR,
+abs/1802.08232, 2018.
+
+[5] Hongge Chen, Huan Zhang, Pin-Yu Chen, Jinfeng Yi, and
+Cho-Jui Hsieh. Attacking visual language grounding with
+adversarial examples: A case study on neural image cap-
+tioning. In Proceedings of the 56th Annual Meeting of the
+Association for Computational Linguistics (Volume 1: Long
+Papers), pages 2587–2597, 2018.
+
+[6] Xinlei Chen and C. Lawrence Zitnick. Mind’s eye: A recur-
+rent visual representation for image caption generation. In
+IEEE Conference on Computer Vision and Pattern Recogni-
+tion, CVPR, pages 2422–2431, 2015.
+
+[7] Chih-Hong Cheng, Georg N¨uhrenberg, and Harald Ruess.
+Maximum resilience of artiﬁcial neural networks. In Interna-
+tional Symposium on Automated Technology for Veriﬁcation
+and Analysis, pages 251–268. Springer, 2017.
+
+[8] Minhao Cheng, Jinfeng Yi, Huan Zhang, Pin-Yu Chen,
+and Cho-Jui Hsieh. Seq2sick: Evaluating the robustness
+of sequence-to-sequence models with adversarial examples.
+CoRR, abs/1803.01128, 2018.
+
+[9] Kyunghyun Cho, Bart Van Merri¨enboer, Caglar Gulcehre,
+Dzmitry Bahdanau, Fethi Bougares, Holger Schwenk, and
+Yoshua Bengio. Learning phrase representations using RNN
+encoder-decoder for statistical machine translation. arXiv
+preprint arXiv:1406.1078, 2014.
+
+[10] Sumit Chopra, Michael Auli, and Alexander M Rush. Ab-
+stractive sentence summarization with attentive recurrent
+neural networks. In Proceedings of the 2016 Conference of
+the North American Chapter of the Association for Compu-
+tational Linguistics: Human Language Technologies, pages
+93–98, 2016.
+
+[11] Javid Ebrahimi, Anyi Rao, Daniel Lowd, and Dejing Dou.
+Hotﬂip: White-box adversarial examples for NLP. arXiv
+preprint arXiv:1712.06751, 2017.
+
+[12] Hao Fang, Saurabh Gupta, Forrest N. Iandola, Rupesh Ku-
+mar Srivastava, Li Deng, Piotr Doll´ar, Jianfeng Gao, Xi-
+aodong He, Margaret Mitchell, John C. Platt, C. Lawrence
+Zitnick, and Geoffrey Zweig. From captions to visual con-
+cepts and back. In IEEE Conference on Computer Vision and
+Pattern Recognition, CVPR, pages 1473–1482, 2015.
+
+[13] Ulrich Germann, Michael Jahr, Kevin Knight, Daniel Marcu,
+and Kenji Yamada. Fast decoding and optimal decoding
+for machine translation.
+In Proceedings of the 39th An-
+
+nual Meeting on Association for Computational Linguistics,
+pages 228–235, 2001.
+
+[14] J. Gilmer, R. P. Adams, I. Goodfellow, D. Andersen, and
+G. E. Dahl. Motivating the Rules of the Game for Adversarial
+Example Research. ArXiv e-prints, July 2018.
+
+[15] Ambros Gleixner, Michael Bastubbe, Leon Eiﬂer, Tris-
+tan Gally, Gerald Gamrath, Robert Lion Gottwald, Gre-
+gor Hendel, Christopher Hojny, Thorsten Koch, Marco E.
+L¨ubbecke, Stephen J. Maher, Matthias Miltenberger, Ben-
+jamin M¨uller, Marc E. Pfetsch, Christian Puchert, Daniel Re-
+hfeldt, Franziska Schl¨osser, Christoph Schubert, Felipe Ser-
+rano, Yuji Shinano, Jan Merlin Viernickel, Matthias Walter,
+Fabian Wegscheider, Jonas T. Witt, and Jakob Witzig. The
+SCIP Optimization Suite 6.0. Technical report, Optimization
+Online, 2018.
+
+[16] Ignacio E Grossmann. Review of nonlinear mixed-integer
+and disjunctive programming techniques. Optimization and
+Engineering, 3(3):227–252, 2002.
+
+[17] Sepp Hochreiter and J¨urgen Schmidhuber. Long short-term
+
+memory. Neural Computation, 9(8):1735–1780, 1997.
+
+[18] Eric Jang, Shixiang Gu, and Ben Poole.
+
+reparameterization with Gumbel-softmax.
+arXiv:1611.01144, 2016.
+
+Categorical
+arXiv preprint
+
+[19] Frederick Jelinek. Statistical Methods for Speech Recogni-
+
+tion. MIT press, 1997.
+
+[20] Robin Jia and Percy Liang. Adversarial examples for eval-
+uating reading comprehension systems.
+In Proceedings of
+the 2017 Conference on Empirical Methods in Natural Lan-
+guage Processing, pages 2021–2031, 2017.
+
+[21] Andrej Karpathy and Li Fei-Fei. Deep visual-semantic align-
+ments for generating image descriptions. IEEE Trans. Pat-
+tern Anal. Mach. Intell., 39(4):664–676, 2017.
+
+[22] Philipp Koehn, Franz Josef Och, and Daniel Marcu. Statis-
+In Proceedings of the 2003
+tical phrase-based translation.
+Conference of the North American Chapter of the Associ-
+ation for Computational Linguistics on Human Language
+Technology-Volume 1, pages 48–54, 2003.
+
+[23] Tsung-Yi Lin, Michael Maire, Serge Belongie, James Hays,
+Pietro Perona, Deva Ramanan, Piotr Doll´ar, and C Lawrence
+Zitnick. Microsoft COCO: Common objects in context. In
+European Conference on Computer Vision, pages 740–755,
+2014.
+
+[24] Jiasen Lu, Caiming Xiong, Devi Parikh, and Richard Socher.
+Knowing when to look: Adaptive attention via a visual sen-
+tinel for image captioning. In The IEEE Conference on Com-
+puter Vision and Pattern Recognition (CVPR), 2017.
+
+[25] Aleksander Madry, Aleksandar Makelov, Ludwig Schmidt,
+Dimitris Tsipras, and Adrian Vladu. Towards deep learn-
+ing models resistant to adversarial attacks. arXiv preprint
+arXiv:1706.06083, 2017.
+
+[26] Steven J Rennie, Etienne Marcheret, Youssef Mroueh, Jarret
+Ross, and Vaibhava Goel. Self-critical sequence training for
+image captioning.
+In The IEEE Conference on Computer
+Vision and Pattern Recognition (CVPR), 2017.
+
+[27] Marco Tulio Ribeiro, Sameer Singh, and Carlos Guestrin.
+Semantically equivalent adversarial rules for debugging nlp
+models. In Proceedings of the 56th Annual Meeting of the
+Association for Computational Linguistics (Volume 1: Long
+Papers), volume 1, pages 856–865, 2018.
+
+432912268
+
+[28] Rico Sennrich, Barry Haddow, and Alexandra Birch. Neural
+machine translation of rare words with subword units.
+In
+Proceedings of the 54th Annual Meeting of the Association
+for Computational Linguistics, 2016.
+
+[29] Ravi Shekhar, Sandro Pezzelle, Yauhen Klimovich, Aur´elie
+Herbelot, Moin Nabi, Enver Sangineto, and Raffaella
+Bernardi. FOIL it! ﬁnd one mismatch between image and
+language caption. CoRR, abs/1705.01359, 2017.
+
+[30] Ilya Sutskever, Oriol Vinyals, and Quoc V Le. Sequence
+to sequence learning with neural networks. In Advances in
+Neural Information Processing Systems, pages 3104–3112,
+2014.
+
+[31] Christian Szegedy, Wojciech Zaremba, Ilya Sutskever, Joan
+Bruna, Dumitru Erhan, Ian Goodfellow, and Rob Fergus.
+Intriguing properties of neural networks.
+arXiv preprint
+arXiv:1312.6199, 2013.
+
+[32] Vincent Tjeng and Russ Tedrake. Verifying neural net-
+arXiv preprint
+
+works with mixed integer programming.
+arXiv:1711.07356, 2017.
+
+[33] Subhashini Venugopalan, Marcus Rohrbach, Jeffrey Don-
+ahue, Raymond Mooney, Trevor Darrell, and Kate Saenko.
+Sequence to sequence-video to text. In Proceedings of the
+IEEE international Conference on Computer Vision, pages
+4534–4542, 2015.
+
+[34] Oriol Vinyals, Alexander Toshev, Samy Bengio, and Du-
+mitru Erhan. Show and tell: A neural image caption gen-
+erator. In Proceedings of the IEEE Conference on Computer
+Vision and Pattern Recognition, pages 3156–3164, 2015.
+
+[35] Jingwen Wang, Wenhao Jiang, Lin Ma, Wei Liu, and Yong
+Xu. Bidirectional attentive fusion with context gating for
+dense video captioning. In The IEEE Conference on Com-
+puter Vision and Pattern Recognition (CVPR), June 2018.
+
+[36] Wayne L Winston and Munirpallam Venkataramanan. Intro-
+duction to Mathematical Programming, volume 1. Thomson
+Learning, 2002.
+
+[37] Kelvin Xu, Jimmy Ba, Ryan Kiros, Kyunghyun Cho,
+Aaron C. Courville, Ruslan Salakhutdinov, Richard S.
+Zemel, and Yoshua Bengio. Show, attend and tell: Neu-
+ral image caption generation with visual attention. In Pro-
+ceedings of the 32nd International Conference on Machine
+Learning, ICML, pages 2048–2057, 2015.
+
+[38] Ran Xu, Caiming Xiong, Wei Chen, and Jason J Corso.
+Jointly modeling deep video and compositional text to bridge
+vision and language in a uniﬁed framework. In AAAI, 2015.
+[39] Puyudi Yang, Jianbo Chen, Cho-Jui Hsieh, Jane-Ling Wang,
+and Michael I Jordan. Greedy attack and Gumbel attack:
+Generating adversarial examples for discrete data. arXiv
+preprint arXiv:1805.12316, 2018.
+
+[40] Li Yao, Atousa Torabi, Kyunghyun Cho, Nicolas Ballas,
+Christopher Pal, Hugo Larochelle, and Aaron Courville. De-
+scribing videos by exploiting temporal structure. In Proceed-
+ings of the IEEE international Conference on Computer Vi-
+sion, pages 4507–4515, 2015.
+
+[41] Haonan Yu, Jiang Wang, Zhiheng Huang, Yi Yang, and Wei
+Xu. Video paragraph captioning using hierarchical recurrent
+neural networks.
+In Proceedings of the IEEE Conference
+on Computer Vision and Pattern Recognition, pages 4584–
+4593, 2016.
+
+433012269
+
+

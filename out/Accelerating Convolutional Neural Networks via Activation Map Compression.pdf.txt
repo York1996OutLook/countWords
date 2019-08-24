@@ -1,0 +1,2252 @@
+Accelerating Convolutional Neural Networks via Activation Map Compression
+
+Georgios Georgiadis
+
+Samsung Semiconductor, Inc.
+
+g.geor@samsung.com
+
+Abstract
+
+The deep learning revolution brought us an extensive ar-
+ray of neural network architectures that achieve state-of-
+the-art performance in a wide variety of Computer Vision
+tasks including among others, classiﬁcation, detection and
+segmentation. In parallel, we have also been observing an
+unprecedented demand in computational and memory re-
+quirements, rendering the efﬁcient use of neural networks
+in low-powered devices virtually unattainable. Towards this
+end, we propose a three-stage compression and accelera-
+tion pipeline that sparsiﬁes, quantizes and entropy encodes
+activation maps of Convolutional Neural Networks. Sparsi-
+ﬁcation increases the representational power of activation
+maps leading to both acceleration of inference and higher
+model accuracy.
+Inception-V3 and MobileNet-V1 can be
+accelerated by as much as 1.6× with an increase in accu-
+racy of 0.38% and 0.54% on the ImageNet and CIFAR-10
+datasets respectively. Quantizing and entropy coding the
+sparser activation maps lead to higher compression over
+the baseline, reducing the memory cost of the network ex-
+ecution. Inception-V3 and MobileNet-V1 activation maps,
+quantized to 16 bits, are compressed by as much as 6× with
+an increase in accuracy of 0.36% and 0.55% respectively.
+
+1. Introduction
+
+With the resurgence of Deep Neural Networks occur-
+ring in 2012 [33], efforts from the research community
+have led to a multitude of neural network architectures
+[20, 55, 59, 60] that have repeatedly demonstrated improve-
+ments in model accuracy. The price paid for this improved
+performance comes in terms of an increase in computational
+and memory cost as well as in higher power consumption.
+For example, AlexNet [33] requires 720 million multiply-
+accumulate (MAC) operations and features 60 million pa-
+rameters, while VGG-16 [55] requires a staggering 15 bil-
+lion MAC’s and features 138 million parameters. While the
+size and number of MAC operations of these networks can
+be handled with modern desktop computers (mainly due
+to the advent of Graphical Processing Units (GPU)), low-
+
+18
+
+16
+
+14
+
+12
+
+10
+
+8
+
+6
+
+4
+
+2
+
+0
+
+Baseline
+
+Sparse
+
+Sparse_v2
+
+Figure 1. Percentage of non-zero activations (above) and compres-
+sion gain (below) per layer of ResNet-34. Left to right order cor-
+responds to ﬁrst to last layer in the network. Baseline corresponds
+to the original model, while sparse and sparse_v2 correspond to
+our sparsiﬁed models.
+
+powered devices such as mobile phones and autonomous
+driving vehicles do not have the resources to process in-
+puts at an acceptable rate (especially when the application
+demands real-time processing). Therefore, there is a great
+need to develop systems and algorithms that would allow us
+to run these networks under a limited resource budget.
+
+There has been a plethora of works that attempt to meet
+this need via a variety of different methods. The majority
+of the approaches [18, 26, 29] attempt to approximate the
+weights of a neural network in order to reduce the num-
+ber of parameters (model compression) and/or the number
+of MAC’s (model acceleration). For example, pruning [18]
+compresses and accelerates a neural network by reducing
+
+17085
+
+0%10%20%30%40%50%60%70%80%90%100%BaselineSparseSparse_v2the number of non-zero weights. Sparse tensors can be
+more effectively compressed leading to model compression,
+while multiplication with zero weights can be skipped lead-
+ing to model acceleration.
+
+Accelerating a model can also be achieved not only by
+zero-skipping of weights but also by zero-skipping input
+activation maps, a fact widely used in neural network hard-
+ware accelerators [2, 17, 31, 47]. Most modern Convo-
+lutional Neural Networks (CNN) use the Rectiﬁed Linear
+Unit (ReLU) [11, 16, 42] as an activation function. As a
+result, a large percentage of activations are zero and can be
+safely skipped in multiplications without any loss. How-
+ever, even though the last few activation maps are typically
+very sparse, the ﬁrst few often contain a large percentage
+of non-zero values (see Fig. 1 for an example based on
+the ResNet-34 architecture [20]).
+It also so happens that
+the ﬁrst few layers process the largest sized inputs/outputs.
+Hence, a network would greatly beneﬁt in terms of mem-
+ory usage and model acceleration by effectively sparsifying
+even further these activation maps.
+
+However, unlike weights that are trainable parameters
+and can be easily adapted during training, it is not obvious
+how one can increase the sparsity of the activations. Hence,
+the ﬁrst contribution of this paper is to demonstrate how this
+can be done without any drop in accuracy. In addition, and
+if desired, it is also possible to use our method to trade-off
+accuracy for an increase in sparsity to target a variety of
+different hardware speciﬁcations.
+
+Activation map size also plays an important role in
+power consumption. In low-powered neural network hard-
+ware accelerators (e.g.
+Intel Movidius Neural Compute
+Stick1, DeepPhi DPU2 and a plethora of others) on-chip
+memory is extremely limited. The accelerator is bound
+to access both weights and activations from the off-chip
+DRAM, which requires approximately 100× more power
+than on-chip access [21], unless the input/output activation
+maps and weights of the layer ﬁt in the on-chip memory.
+In such cases, activation map compression is in fact dis-
+proportionately much more important than weight compres-
+sion. Consider the second convolutional layer of Inception-
+V3, which takes as input a 149 × 149 × 32 tensor and re-
+turns one of size 147 × 147 × 32, totalling 1,401,920 val-
+ues. The weight tensor is of size 32 × 32 × 3 × 3 totalling
+just 9,216 values. The total of input/output activations is in
+fact 150× larger in size than the number of weights. Com-
+pressing activations effectively can reduce dramatically the
+amount of data transferred between on-chip and off-chip
+memory, decreasing in turn signiﬁcantly the power con-
+sumed. Thus, our second contribution is to demonstrate
+an effective (lossy) compression pipeline that can lead to
+great reductions in the size of activation maps, while still
+
+1https://ai.intel.com/nervana-nnp/
+2http://www.deephi.com/technology/
+
+maintaining the claim of no drop in accuracy. Following the
+footsteps of weight compression in [18], where the authors
+propose a three-stage pipeline consisting of pruning, quanti-
+zation and Huffman coding, we adapt this pipeline to activa-
+tion compression. Our pipeline also consists of three steps:
+sparsiﬁcation, quantization and entropy coding. Sparsiﬁ-
+cation aims to reduce the number of non-zero activations,
+quantization limits the bitwidth of values and entropy cod-
+ing losslessly compresses the activations.
+
+Finally, it is important to note that in several applications
+including, but not limited to, autonomous driving, medi-
+cal imaging and other high risk operations, compromises
+in terms of model accuracy might not be tolerated. As a re-
+sult, these applications demand networks to be compressed
+losslessly. In addition, lossless compression of activation
+maps can also beneﬁt training since it can allow increasing
+the batch size or the size of the input. Therefore, our ﬁ-
+nal contribution lies in the regime of lossless compression.
+We present a novel entropy coding algorithm, called sparse-
+exponential-Golomb, a variant of exponential-Golomb [61],
+that outperforms all other tested entropy coders in com-
+pressing activation maps. Our algorithm leverages on the
+sparsity and other statistical properties of the maps to effec-
+tively losslessly compress them. This algorithm can stand
+on its own in scenarios where lossy compression is deemed
+unacceptable or it can be used as the last step of our three-
+stage lossy compression pipeline.
+
+2. Related Work
+
+There are few works that deal with activation map com-
+pression. Gudovskiy et al. [13] compress activation maps
+by projecting them down to binary vectors and then apply-
+ing a nonlinear dimensionality reduction (NDR) technique.
+However, the method modiﬁes the network structure (which
+in certain use cases might not be acceptable) and it has only
+been shown to perform slightly better over simply quan-
+tizing activation maps. Dong et al. [10] attempt to predict
+which output activations are zero to avoid computing them,
+which can reduce the number of MAC’s performed. How-
+ever, their method also modiﬁes the network structure and
+in addition, it does not increase the sparsity of the activation
+maps. Alwani et al. [3] reduce the memory requirement of
+the network by recomputing activation maps instead of stor-
+ing them, which obviously comes at a computational cost.
+In [9], the authors perform stochastic activation pruning for
+adversarial defense. However, due to their sampling strat-
+egy, their method achieves best results when ∼100% sam-
+ples are picked, yielding no change in sparsity.
+
+In terms of lossless activation map compression, Rhu
+et al. [52] examine three approaches: run-length encoding
+[53], zero-value compression (ZVC) and zlib compression
+[1]. The ﬁrst two are hardware-friendly, but only achieve
+competitive compression when sparsity is high, while zlib
+
+7086
+
+cannot be used in practice due to its high computational
+complexity. Lossless weight compression has appeared in
+the literature in the form of Huffman coding (HC) [18] and
+arithmetic coding [51].
+
+Recently, many lightweight architectures have appeared
+in the literature that attempt to strike a balance between
+computational complexity and model accuracy [22, 24, 54,
+68]. Typical design choices include the introduction of 1×1
+point-wise convolutions and depthwise-separable convolu-
+tions. These networks are trained from scratch and of-
+fer an alternative to state-of-the-art solutions. When such
+lightweight architectures do not achieve high enough accu-
+racy, it is possible to alternatively compress and accelerate
+state-of-the-art networks. Pruning of weights [14, 18, 19,
+34, 36, 40, 48, 63, 69] and quantization of weights and ac-
+tivations [6, 7, 12, 15, 18, 23, 50, 64, 67] are the standard
+compression techniques that are currently used. Other pop-
+ular approaches include the modiﬁcation of pre-trained net-
+works by replacing the convolutional kernels with low-rank
+factorizations [25, 29, 56] or grouped convolutions [26].
+
+One could falsely consider viewing our algorithm as a
+method to perform activation pruning, an analog to weight
+pruning [18] or structured weight pruning [38, 39, 43, 66].
+The latter prunes weights at a coarser granularity and in do-
+ing so also affects the activation map sparsity. However, our
+method affects sparsity dynamically, and not statically as in
+all other methods, since it does not permanently remove any
+activations. Instead, it encourages a smaller percentage of
+activations to ﬁre for any given input, while still allowing
+the network to fully utilize its capacity, if needed.
+
+Finally, activation map regularization has appeared in
+the literature in various forms such as dropout [57], batch
+normalization [27], layer normalization [4] and L2 regu-
+larization [41]. In addition, increasing the sparsity of acti-
+vations has been explored in sparse autoencoders [44] us-
+ing Kullback-Leibler (KL) divergence and in CNN’s using
+ReLU [11]. In the seminal work of Glorot et al. [11], the
+authors use ReLU as an activation function to induce spar-
+sity on the activation maps and brieﬂy discuss the use of L1
+regularization to enhance it. However, the utility of the reg-
+ularizer is not fully explored. In this work, we expand on
+this idea and apply it on CNN’s for model acceleration and
+activation map compression.
+
+3. Learning Sparser Activation Maps
+
+A typical cost function, E0(w), employed in CNN mod-
+
+els is given by:
+
+E0(w) =
+
+1
+N
+
+N
+
+Xn=1
+
+cn(w) + λwr(w),
+
+(1)
+
+where n denotes the index of the training example, N is
+the mini-batch size, λw ≥ 0, w ∈ Rd denotes the network
+
+Figure 2. Computational graph based on Eq. 3. In red we illustrate
+the two gradient contributions for xl.
+
+weights, cn(w) is the data term (usually the cross-entropy)
+and r(w) is the regularization term (usually the L2 norm).
+Post-activation maps of training example n and layer
+l ∈ {1, . . . , L} are denoted by xl,n ∈ RHl×Wl×Cl , where
+Hl, Wl, Cl denote the number of rows, columns and chan-
+nels of xl,n. When the context allows, we write xl rather
+than xl,n to reduce clutter. x0 corresponds to the input of
+the neural network. Pre-activation maps are denoted by yl,n.
+Note that since ReLU can be computed in-place, in practi-
+cal applications, yl,n is often only an intermediate result.
+Therefore, we target to compress xl rather than yl. See Fig.
+2 for an explanatory illustration of these quantities.
+
+The overwhelming majority of modern CNN architec-
+tures achieve sparsity in activation maps through the usage
+of ReLU as the activation function, which imposes a hard
+constraint on the intrinsic structure of the maps. We propose
+to aid training of neural networks by explicitly encoding
+in the cost function to be minimized, our desire to achieve
+sparser activation maps. We do so by placing a sparsity-
+inducing prior on xl for all layers, by modifying the cost
+function as follows:
+
+E(w) = E0(w) +
+
+1
+N
+
+N
+
+L
+
+Xn=1
+
+Xl=0
+
+αlkxl,nk1
+
+(2)
+
+=
+
+1
+N
+
+N
+
+Xn=1
+
+c′
+n(w) + λwr(w),
+
+where αl ≥ 0 for l = 1, .. . . . , L − 1, α0 = αL = 0 and c′
+n
+is given by:
+
+L
+
+c′
+n(w) = cn(w) +
+
+αlkxl,nk1.
+
+(3)
+
+Xl=0
+
+In Eq. 2 we use the L1 norm to induce sparsity on xl that
+acts as a proxy to the optimal, but difﬁcult to optimize,
+L0 norm via a convex relaxation. The technique has been
+widely used in a variety of different applications including
+among others sparse coding [45] and LASSO [62].
+
+While it is possible to train a neural network from scratch
+using the above cost function, our aim is to sparsify activa-
+tion maps of existing state-of-the-art networks. Therefore,
+we modify the cost function from Eq. 1 to Eq. 2 during
+only the ﬁne-tuning process of pre-trained networks. Dur-
+ing ﬁne-tuning, we backpropagate the gradients by comput-
+ing the following quantities:
+
+7087
+
+(a) Conv2d_1a_3x3
+
+(b) Conv2d_2b_3x3
+
+(c) 6b_branch7x7dbl_2
+
+(d) 7a_branch7x7x3_3
+
+(e) 7b_branch3x3dbl_3a
+
+Figure 3. Inception-V3 histograms of activation maps, before (above) and after (below) sparsiﬁcation,
+in log-space from early
+(Conv2d_1a_3x3, Conv2d_2b_3x3), middle (6b_branch7x7dbl_2) and late (7a_branch7x7x3_3, 7b_branch3x3dbl_3a) layers, extracted
+from 1000 input images from the ImageNet (ILSVRC2012) [8] training set. Activation maps are quantized to 8 bits (256 bins). The his-
+tograms show two important facts that sparse-exponential-Golomb takes advantage of: (1) Sparsity: Zero values are approximately one to
+two orders of magnitude more likely than any other value and (2) Long tail: Large values have a non-trivial probability. Sparsiﬁed activation
+maps not only have a higher percentage of zero values (enabling acceleration), but also have lower entropy (enabling compression).
+
+∂c′
+n
+∂wl
+
+=
+
+∂c′
+n
+∂xl,n
+
+·
+
+∂xl,n
+∂wl
+
+n
+
+=(cid:20) ∂c′
+
+∂xl+1,n
+
+·
+
+∂xl+1,n
+∂xl,n
+
++
+
+∂c′
+n
+
+∂xl,n(cid:21) ·
+
+∂xl,n
+∂wl
+
+corresponds
+
+to the weights of
+
+l,
+where wl
+∂c′
+n/∂xl+1,n is the gradient backpropagated from layer
+l + 1, ∂xl+1,n/∂xl,n is the output gradient of layer l + 1
+with respect to the input and the j-th element of ∂c′
+n/∂xl,n
+is given by:
+
+layer
+
+∂c′
+n
+∂xj
+
+l,n
+
+= αl
+
+∂kxl,nk1
+
+∂xj
+
+l,n
+
++αl,
+−αl,
+0,
+
+if xj
+if xj
+if xj
+
+l,n > 0
+l,n < 0
+l,n = 0
+
+=
+
+
+where xj
+l,n corresponds to the j-th element of (vectorized)
+xl,n. Fig. 2 illustrates the computational graph and the ﬂow
+of gradients for an example layer l. Note that xl can affect
+c′ both through xl+1 and directly, so we need to sum up
+both contributions during backpropagation.
+
+4. A Sparse Coding Interpretation
+
+Recently, connections between CNN’s and Convolu-
+tional Sparse Coding (CSC) have been drawn [46, 58]. In a
+similar manner, it is also possible to interpret our proposed
+solution in Eq. 2 through the lens of sparse coding. Let
+us assume that for any given layer l, there exists an opti-
+mal underlying mapping ˆyl that we attempt to learn. Col-
+lectively {ˆyl}l=1,...,L deﬁne an optimal mapping from the
+input of the network to its output, while the network com-
+putes {yl = fl(xl−1; wl)}l=1,...,L. We can then think of
+
+training a neural network as an attempt to learn the opti-
+mal mappings ˆyl by minimizing the difference of the layer
+outputs:
+
+,
+
+(4)
+
+minimize
+
+wl
+
+1
+N
+
+N
+
+L
+
+Xn=1
+
+Xl=1
+
+kˆyl,n − yl,nk2
+
+2
+
+(6)
+
+subject to r(wl) ≤ C, l = 1, . . . , L.
+
+In Eq. 6 we have also explicitly added the regularization
+term r(wl). C ≥ 0 is a pre-deﬁned constant that controls
+the amount of regularization. In the following, we restrict
+r(wl) to the L2 norm, r(wl) = kwlk2
+2, as it is by far the
+most common regularizer used and add the L1 prior on xl:
+
+,
+
+(5)
+
+minimize
+
+wl
+
+1
+N
+
+N
+
+Xn=1" L
+Xl=1
+
+kˆyl,n − yl,nk2
+
+2 +
+
+αlkxl,nk1#
+
+L
+
+Xl=0
+
+subject to kwlk2
+
+2 ≤ C, l = 1, . . . , L.
+
+(7)
+We can re-arrange the terms in Eq. 7 (and make use of the
+fact that αL = 0) as follows:
+
+minimize
+
+wl
+
+1
+N
+
+N
+
+L
+
+Xn=1
+
+Xl=1
+
+subject to kwlk2
+
+2 ≤ C, l = 1, . . . , L
+
+Pl,n
+
+(8)
+
+where:
+
+Pl,n = kˆyl,n − yl,nk2
+
+2 + αl−1kxl−1,nk1.
+
+(9)
+
+For mappings fl(xl−1; wl) that are linear, such as those
+computed by the convolutional and fully-connected layers,
+fl(xl−1; wl) can also be written as a matrix-vector multipli-
+cation, by some matrix Wl, yl = Wlxl−1. Pl can then be
+re-written as Pl = kˆyl − Wlxl−1k2
+2 + αl−1kxl−1k1, which
+
+7088
+
+can be interpreted as a sparse coding of the optimal map-
+ping ˆy. Therefore, Eq. 8 amounts to computing the sparse
+coding representations of the pre-activation feature maps.
+
+5. Quantization
+
+We quantize ﬂoating point activation maps, xl, to q bits
+
+using linear (uniform) quantization:
+
+xquant
+l
+
+=
+
+xl − xmin
+xmax
+l − xmin
+
+l
+
+l
+
+× (2q − 1),
+
+(10)
+
+l
+
+l = 0 and xmax
+
+where xmin
+corresponds to the maximum
+value of xl in layer l in the training set. Values above xmax
+in the testing set are clipped. While we do not retrain our
+models after quantization, it has been shown by the liter-
+ature to improve model accuracy [5, 37]. We also believe
+that a joint optimization scheme where we simultaneously
+perform quantization and sparsiﬁcation can further improve
+our results and leave it for future work.
+
+l
+
+6. Entropy Coding
+
+A number of different schemes have been devised to
+store sparse matrices effectively. Compressed sparse row
+(CSR) and compressed sparse column (CCS) are two rep-
+resentations that strike a balance between compression and
+efﬁciency of arithmetic operation execution. However, such
+methods assume that the entire matrix is available prior to
+storage, which is not necessarily true in all of our use cases.
+For example, in neural network hardware accelerators data
+are often streamed as they are computed and there is a great
+need to compress in an on-line fashion. Hence, we shift
+our focus to algorithms that can encode one element at a
+time. We present a new entropy coding algorithm, sparse-
+exponential-Golomb (SEG) (Alg. 1) that is based on the
+effective exponential-Golomb (EG) [61, 65]. SEG lever-
+ages on two facts: (1) Most activation maps are sparse and,
+(2) The ﬁrst-order probability distribution of the activation
+maps has a long tail.
+
+Exponential-Golomb is most commonly used in H.264
+[28] and HEVC [30] video compression standards with
+k = 0 as a standard parameter. k = 0 is a particularly ef-
+fective parameter value when data is sparse since it assigns
+a code word of length 1 for the value x = 0. However,
+it also requires that the probability distribution of values
+falls-off rapidly. Activation maps have a non-trivial num-
+ber of large values (especially for q = 8, 12, 16), rendering
+k = 0 ineffective. Fig. 3 demonstrates this fact by showing
+histograms of activation maps for a sample of layers from
+Inception-V3. While this issue could be solved by using
+larger values of k, the consequence is that the value x = 0
+is no longer encoded with a 1 bit code word (see Table 1).
+SEG solves this problem by dedicating the code word ‘1’
+for x = 0 and by pre-appending the code word generated
+
+Algorithm 1 Sparse-exponential-Golomb
+
+Input: Non-negative integer x, Order k
+Output: Bitstream y
+function encode_sparse_exp_Golomb (x, k)
+{
+
+If k == 0:
+
+y = encode_exp_Golomb(x, k)
+
+Else:
+
+If x == 0:
+
+Let y = ‘1’
+
+Else:
+
+Let y = ‘0’ + encode_exp_Golomb(x − 1, k)
+
+Return y
+
+}
+Input: Bitstream x, Order k
+Output: Non-negative integer y
+function decode_sparse_exp_Golomb (x, k)
+{
+
+If k == 0:
+
+y = decode_exp_Golomb(x, k)
+
+Else:
+
+If x[0] == ‘1’:
+Let y = 0
+
+Else:
+
+Let y = 1 + decode_exp_Golomb(x[1 : ], k)
+
+Return y
+
+}
+
+Algorithm k = 0
+
+k = 4
+
+k = 8
+
+k = 12
+
+EG
+
+SEG
+
+1
+
+1
+
+5
+
+1
+
+9
+
+1
+
+13
+
+1
+
+Table 1. Code word length comparison of x = 0 between EG and
+SEG for different values of k.
+
+by EG with a ‘0’ for x > 0. Sparse-exponential golomb
+can be found in Alg. 1 while exponential-Golomb [61] is
+provided in the supplementary material3.
+
+7. Experiments
+
+In the experimental section, we investigate two important
+applications: (1) acceleration of computation and (2) com-
+pression of activation maps. We carry our experiments on
+three different datasets, MNIST [35], CIFAR-10 [32] and
+ImageNet ILSVRC2012 [8] and ﬁve different networks, a
+LeNet-5 [35] variant4, MobileNet-V1 [22], Inception-V3
+[60], ResNet-18 [20] and ResNet-34 [20]. These networks
+cover a wide variety of network sizes, complexity in design
+and efﬁciency in computation. For example, unlike AlexNet
+[33] and VGG-16 [55] that are over-parameterized and easy
+
+3https://georgios0.github.io/cvpr2019/
+4https://github.com/pytorch/examples/
+
+7089
+
+Dataset
+
+Model
+
+Variant
+
+Top-1 Acc.
+
+Top-5 Acc.
+
+Acts. (%)
+
+Speed-up
+
+MNIST
+
+LeNet-5
+
+CIFAR-10 MobileNet-V1
+
+Inception-V3
+
+ImageNet
+
+ResNet-18
+
+ResNet-34
+
+Baseline
+Sparse
+
+Baseline
+Sparse
+
+Baseline
+Sparse
+
+Sparse_v2
+
+Baseline
+Sparse
+
+Sparse_v2
+
+Baseline
+Sparse
+
+Sparse_v2
+
+98.45%
+
+98.48% (+0.03%)
+
+89.17%
+
+89.71% (+0.54%)
+
+-
+-
+
+-
+-
+
+75.76%
+
+92.74%
+
+76.14% (+0.38%)
+68.94% (-6.82%)
+
+92.83% (+0.09%)
+88.52% (-4.22%)
+
+69.64%
+
+88.99%
+
+69.85% (+0.21%)
+68.62% (-1.02%)
+
+89.27% (+0.28%)
+88.41% (-0.58%)
+
+73.26%
+
+91.43%
+
+73.95%(+0.69%)
+67.73% (-5.53%)
+
+91.61% (+0.18%)
+87.93% (-3.50%)
+
+53.73%
+23.16%
+
+47.44%
+29.54%
+
+53.78%
+33.66%
+25.34%
+
+60.64%
+49.51%
+34.29%
+
+57.44%
+46.85%
+29.62%
+
+1.0×
+2.32×
+
+1.0×
+1.61×
+
+1.0×
+1.60×
+2.12×
+
+1.0×
+1.22×
+1.77×
+
+1.0×
+1.23×
+1.94×
+
+Table 2. Accelerating neural networks via sparsiﬁcation. Numbers in brackets indicate change in accuracy. Acts. (%) shows the percentage
+of non-zero activations.
+
+Network
+
+Algorithm
+
+Top-1 Acc. Change Top-5 Acc. Change
+
+Speed-up
+
+ResNet-18
+
+ResNet-34
+
+LeNet-5
+
+Ours (Sparse)
+
+Ours (Sparse_v2)
+
+LCCL [10]
+BWN [50]
+XNOR [50]
+
+Ours (Sparse)
+
+Ours (Sparse_v2)
+
+LCCL [10]
+PFEC [36]
+
+Ours (Sparse)
+[18] (p = 70%)
+[18] (p = 80%)
+
++0.21%
+-1.02%
+-3.65%
+-8.50%
+-18.10%
+
++0.69%
+-5.53%
+-0.43%
+-1.06%
+
++0.03%
+-0.12%
+-0.57%
+
++0.28%
+-0.58%
+-2.30%
+-6.20%
+-16.00%
+
++0.18%
+-3.50%
+-0.17%
+
+-
+
+-
+-
+-
+
+18.4%
+43.5%
+34.6%
+50.0%
+98.3%
+
+18.4%
+48.4%
+24.8%
+24.2%
+
+56.9%
+7.3%
+14.7%
+
+Table 3. Comparison between various state-of-the-art acceleration
+methods on ResNet-18/34 and LeNet-5. For ResNet-18/34, we
+emphasized in bold Sparse_v2 as a good compromise between ac-
+celeration and accuracy. p = 70% indicates that the pruned net-
+work has 30% non-zero weights. Speed-up calculation follows the
+convention from [10], where it is reported as 1 - (non-zero activa-
+tions of sparse model) / (non-zero activations of baseline).
+
+to compress, MobileNet-V1 is an architecture that is already
+designed to reduce computation and memory consumption
+and as a result, it presents a challenge for achieving fur-
+ther savings. Furthermore, compressing and accelerating
+Inception-V3 and the ResNet architectures has tremendous
+usefulness in practical applications since they are among the
+state-of-the-art image classiﬁcation networks.
+
+Acceleration. In Table 2, we summarize our speed-up
+results. Baselines were obtained as follows: LeNet-5 and
+MobileNet-V15 were trained from scratch, while Inception-
+V3 and ResNet-18/34 were obtained from the PyTorch [49]
+repository6. The results reported were computed on the val-
+idation sets of the corresponding datasets. The speed-up
+factor is calculated by dividing the number of non-zero ac-
+tivations of the baseline by the number of non-zero activa-
+
+5https://github.com/kuangliu/pytorch-cifar/
+6https://pytorch.org/docs/stable/torchvision/
+
+(a) MobileNet-V1
+
+(b) Inception-V3
+
+Figure 4. Evolution of Top-1 accuracy and activation map sparsity
+of MobileNet-V1 and Inception-V3 during training on the vali-
+dation sets of CIFAR-10 and ILSVRC2012 respectively. The red
+arrow indicates the checkpoint selected for the sparse model.
+
+tions of the sparse models. For Inception-V3 and ResNet-
+18/34, we present two sparse variants, one targeting mini-
+mum reduction in accuracy (sparse) and the other targeting
+high sparsity (sparse_v2).
+
+Many of our sparse models not only have an increased
+sparsity in their activation maps, but also demonstrate in-
+creased accuracy. This alludes to the well-known fact that
+sparse activation maps have strong representational power
+[11] and the addition of the sparsity-inducing prior does not
+necessarily trade-off accuracy for sparsity. When the regu-
+larization parameter is carefully chosen, the data term and
+the prior can work together to improve both the Top-1 ac-
+curacy and the sparsity of the activation maps. Inception-
+V3 can be accelerated by as much as 1.6× with an in-
+crease in accuracy of 0.38%, while ResNet-18 achieves a
+speed-up of 1.8× with a modest 1% accuracy drop. LeNet-
+5 can be accelerated by 2.3×, MobileNet-V1 by 1.6× and
+ﬁnally ResNet-34 by 1.2×, with all networks exhibiting ac-
+curacy increase. The regularization parameters, αl, can be
+adapted for each layer independently or set to a common
+constant. We experimented with various conﬁgurations and
+
+7090
+
+100%
+
+80%
+
+60%
+
+40%
+
+20%
+
+0%
+
+10
+
+8
+
+6
+
+4
+
+2
+
+0
+
+100%
+
+80%
+
+60%
+
+40%
+
+20%
+
+0%
+
+100%
+
+80%
+
+60%
+
+40%
+
+20%
+
+0%
+
+100%
+
+80%
+
+60%
+
+40%
+
+20%
+
+0%
+
+100%
+
+80%
+
+60%
+
+40%
+
+20%
+
+0%
+
+Baseline
+
+Sparse
+
+Baseline
+
+Sparse
+
+Baseline
+
+Sparse
+
+Sparse_v2
+
+Baseline
+
+Sparse
+
+Sparse_v2
+
+Baseline
+
+Sparse
+
+Sparse_v2
+
+25
+
+20
+
+15
+
+10
+
+5
+
+0
+
+30
+
+20
+
+10
+
+0
+
+15
+
+10
+
+5
+
+0
+
+20
+
+15
+
+10
+
+5
+
+0
+
+Baseline
+
+Sparse
+
+Baseline
+
+Sparse
+
+Baseline
+
+Sparse
+
+Sparse_v2
+
+Baseline
+
+Sparse
+
+Sparse_v2
+
+Baseline
+
+Sparse
+
+Sparse_v2
+
+(a) LeNet-5
+
+(b) MobileNet-V1
+
+(c) Inception-V3
+
+(d) ResNet-18
+
+(e) ResNet-34
+
+Figure 5. Percentage of non-zero activations (above) and compression gain (below) per layer for various network architectures before and
+after sparsiﬁcation.
+
+Dataset
+
+Model
+
+Algorithm t = 1, 000
+
+t = 10, 000
+
+t = 30, 000
+
+t = 60, 000
+
+Model
+
+Variant Measurement
+
+MNIST
+
+LeNet-5
+
+SEG
+
+ZVC[52]
+
+1.700×
+
+1.665×
+
+1.700×
+
+1.666×
+
+1.701×
+
+1.666×
+
+1.701×
+
+1.667×
+
+Dataset
+
+Model
+
+Algorithm
+
+t = 500
+
+t = 1, 000
+
+t = 2, 000
+
+t = 5, 000
+
+ImageNet
+
+Inception-V3
+
+SEG
+
+ZVC[52]
+
+1.763×
+
+1.652×
+
+1.769×
+
+1.655×
+
+1.774×
+
+1.661×
+
+1.779×
+
+1.667×
+
+Table 4. Effect of evaluation set size on compression performance.
+Varying the size yields minor compression gain changes, indicat-
+ing that a smaller dataset can serve as a good benchmark for eval-
+uation purposes.
+
+the selected parameters are shared in the supplementary ma-
+terial. To determine the selected αl, we used grid-based
+hyper-parameter optimization. The number of epochs re-
+quired for ﬁne-tuning varied for each network as Fig. 4
+illustrates. We chose to typically train up to 90-100 epochs
+In Fig. 3,
+and then selected the most appropriate result.
+we show the histograms of a selected number of Inception-
+V3 layers before and after sparsiﬁcation. Histograms of the
+sparse model have a greater proportion of zero-values, lead-
+ing to model acceleration as well as lower entropy, leading
+to higher activation map compression.
+
+In Fig. 4, we show how the accuracy and activation map
+sparsity of MobiletNet-V1 and Inception-V3 changes dur-
+ing training evaluated on the validation sets of CIFAR-10
+and ILSVRC2012 respectively. On the same ﬁgure, we
+show the checkpoint selected to report results in Table 2.
+Selecting a checkpoint trades-off accuracy with sparsity and
+which point is chosen depends on the application at hand.
+In the top row of Fig. 5 we show the percentage of non-zero
+activations per layer for the ﬁve networks. While some lay-
+ers (e.g. last few layers in MobileNet-V1) exhibit tremen-
+dous decrease in non-zero activations, most of the accelera-
+tion comes by effectively sparsifying the ﬁrst few layers of
+a network. Finally, in Table 3 we compare our approach to
+other state-of-the-art methods as well as to a weight prun-
+ing algorithm [18]. In particular, note that [18] is not effec-
+tive in increasing the sparsity of activations. Overall, our
+approach can achieve both high acceleration (with a slight
+accuracy drop) and high accuracy (with lower acceleration).
+
+LeNet-5
+(MNIST)
+
+MobiletNet-V1
+
+(CIFAR-10)
+
+Baseline
+
+Sparse
+
+Baseline
+
+Sparse
+
+Top-1 Acc.
+Compression
+
+Top-1 Acc.
+Compression
+
+Top-1 Acc.
+Compression
+
+Top-1 Acc.
+Compression
+
+ﬂoat32
+
+98.45%
+
+-
+
+uint16
+
+uint12
+
+uint8
+
+98.44% (-0.01%)
+3.40× (1.70×)
+
+98.44% (-0.01%)
+4.40× (1.64×)
+
+98.39% (-0.06%)
+6.32× (1.58×)
+
+98.48% (+0.03%)
+
+98.48% (+0.03%)
+
+98.49% (+0.04%)
+
+6.76× (3.38×)
+
+8.43× (3.16×)
+
+98.46% (+0.01%)
+11.16× (2.79×)
+
+89.18% (+0.01%)
+
+5.52× (2.76×)
+
+89.15% (-0.02%)
+7.09× (2.66×)
+
+89.16% (-0.01%)
+9.76× (2.44×)
+
+89.71% (+0.54%)
+
+89.72% (+0.55%)
+
+-
+
+5.84× (2.92×)
+
+87.72 (+0.55%)
+7.33× (2.79×)
+
+89.62% (+0.45%)
+10.24× (2.56×)
+
+-
+
+89.17%
+
+-
+
+Table 5. Effect of quantization on compression on SEG. LeNet-5
+is compressed by 11× and MobileNet-V1 by 10×. In brackets, we
+report change in accuracy and compression gain over the ﬂoat32
+baseline.
+
+Compression. We carry our compression experiments
+on a subset of each network’s activation maps, since caching
+activation maps of the entire training and testing sets is pro-
+hibitive due to storage constraints. In Table 4 we show the
+effect of testing size on the compression performance of two
+algorithms, SEG and zero-value compression (ZVC) [52]
+on MNIST and ImageNet. Evaluating compression yields
+minor differences as a function of size. Similar observa-
+tions can be made on all investigated networks and datasets.
+In subsequent experiments, we use the entire testing set
+of MNIST to evaluate LeNet-5, the entire testing set of
+CIFAR-10 to evaluate MobileNet-V1 and 5,000 randomly
+selected images from the validation set of ILSVRC2012 to
+evaluate Inception-V3 and ResNet-18/34. The Top-1/Top-5
+accuracy, however, is measured on the entire validation sets.
+In Table 6, we summarize the compression results. Com-
+pression gain is deﬁned as the ratio of activation size be-
+fore and after compression. We evaluate our method (SEG)
+against exponential-Golomb (EG) [61], Huffman Coding
+(HC) used in [18], zero-value compression (ZVC) [52] and
+ZLIB [1]. We report the Top-1/Top-5 accuracy of the quan-
+tized models at 16 bits. Parameter choice for SEG and EG is
+provided in Table 7. SEG outperforms all methods in both
+the baseline and sparse models validating the claim that it is
+a very effective encoder for distributions with high sparsity
+and long tail. SEG achieves almost 7× compression gain on
+LeNet-5, almost 6× on MobileNet-V1 and Inception-V3 and
+more than 4× compression gain in the ResNet architectures
+while also featuring an increase in accuracy.
+
+It is also clear that our sparsiﬁcation step leads to greater
+
+7091
+
+Dataset
+
+Model
+
+Variant
+
+Bits
+
+Top-1 Acc.
+
+Top-5 Acc.
+
+MNIST
+
+LeNet-5
+
+CIFAR-10 MobileNet-V1
+
+Inception-V3
+
+ImageNet
+
+ResNet-18
+
+ResNet-34
+
+Baseline
+Baseline
+Sparse
+
+Baseline
+Baseline
+Sparse
+
+Baseline
+Baseline
+Sparse
+
+Sparse_v2
+
+Baseline
+Baseline
+Sparse
+
+Sparse_v2
+
+Baseline
+Baseline
+Sparse
+
+Sparse_v2
+
+ﬂoat32
+
+uint16
+
+ﬂoat32
+
+uint16
+
+98.45%
+
+98.44% (-0.01%)
+98.48% (+0.03%)
+
+89.17%
+
+89.18% (+0.01%)
+89.72% (+0.55%)
+
+-
+-
+-
+
+-
+-
+-
+
+SEG
+
+-
+
+EG [61]
+
+HC [18]
+
+ZVC [52]
+
+ZLIB [1]
+
+-
+
+-
+
+-
+
+-
+
+3.40× (1.70×)
+6.76× (3.38×)
+
+2.30× (1.15×)
+4.54× (2.27×)
+
+2.10× (1.05×)
+3.76× (1.88×)
+
+3.34× (1.67×)
+6.74× (3.37×)
+
+2.42× (1.21×)
+3.54× (1.77×)
+
+-
+
+-
+
+-
+
+-
+
+-
+
+5.52× (2.76×)
+5.84× (2.92×)
+
+3.70× (1.85×)
+3.90× (1.95×)
+
+2.90× (1.45×)
+3.00× (1.50×)
+
+5.32× (2.66×)
+5.58× (2.79×)
+
+3.76× (1.88×)
+3.90× (1.95×)
+
+ﬂoat32
+
+75.76%
+
+92.74%
+
+-
+
+-
+
+-
+
+-
+
+-
+
+uint16
+
+75.75% (-0.01%)
+76.12% (+0.36%)
+68.96% (-6.80%)
+
+92.74% (+0.00%)
+92.83% (+0.09%)
+88.54% (-4.20%)
+
+3.56× (1.78×)
+5.80× (2.90×)
+6.86× (3.43×)
+
+2.42×(1.21×)
+4.10× (2.05×)
+5.12× (2.56×)
+
+2.66× (1.33×)
+4.22× (2.11×)
+5.12× (2.56×)
+
+3.34× (1.67×)
+5.02× (2.51×)
+6.36× (3.18×)
+
+2.66× (1.33×)
+3.98× (1.99×)
+4.90× (2.45×)
+
+ﬂoat32
+
+69.64%
+
+88.99%
+
+-
+
+-
+
+-
+
+-
+
+-
+
+uint16
+
+69.64% (+0.00%)
+69.85% (+0.21%)
+68.62% (-1.02%)
+
+88.99% (+0.00%)
+89.27% (+0.28%)
+88.41% (-0.58%)
+
+3.22× (1.61×)
+4.00× (2.00×)
+5.54× (2.77×)
+
+2.32× (1.16×)
+2.70× (1.35×)
+3.80× (1.90×)
+
+2.54× (1.27×)
+3.04× (1.52×)
+4.02× (2.01×)
+
+3.00× (1.50×)
+3.60× (1.80×)
+4.94× (2.47×)
+
+2.32× (1.16×)
+2.68× (1.34×)
+3.54× (1.77×)
+
+ﬂoat32
+
+73.26%
+
+91.43%
+
+-
+
+-
+
+-
+
+-
+
+-
+
+uint16
+
+73.27% (+0.01%)
+73.96% (+0.70%)
+67.74% (-5.52%)
+
+91.43% (+0.00%)
+91.61% (+0.18%)
+87.90% (-3.53%)
+
+3.38× (1.69×)
+4.18× (2.09×)
+6.26× (3.13×)
+
+2.38× (1.19×)
+2.84× (1.42×)
+4.38× (2.19×)
+
+2.56× (1.28×)
+3.04× (1.52×)
+4.32× (2.16×)
+
+3.14× (1.57×)
+3.78× (1.89×)
+5.58× (2.79×)
+
+2.46× (1.23×)
+2.84× (1.42×)
+4.02× (2.01×)
+
+Table 6. Compressing activation maps. We report the Top-1/Top-5 accuracy, with the numbers in brackets indicating the change in accuracy.
+The total compression gain is reported for various state-of-the-art algorithms (in brackets we also report the compression gain without
+including gains from quantization). SEG outperforms other state-of-the-art algorithms in all models and datasets.
+
+Dataset
+
+Model
+
+Variant
+
+SEG
+
+EG [61]
+
+MNIST
+
+LeNet-5
+
+CIFAR-10 MobileNet-V1
+
+Inception-V3
+
+ImageNet
+
+ResNet-18
+
+ResNet-34
+
+Baseline
+Sparse
+
+Baseline
+Sparse
+
+Baseline
+Sparse
+
+Sparse_v2
+
+Baseline
+Sparse
+
+Sparse_v2
+
+Baseline
+Sparse
+
+Sparse_v2
+
+k = 12
+k = 14
+
+k = 13
+k = 13
+
+k = 12
+k = 10
+k = 13
+
+k = 12
+k = 12
+k = 11
+
+k = 12
+k = 12
+k = 11
+
+k = 9
+k = 0
+
+k = 0
+k = 0
+
+k = 7
+k = 0
+k = 0
+
+k = 10
+k = 0
+k = 0
+
+k = 9
+k = 0
+k = 0
+
+Table 7. SEG and EG parameter values. Parameters were selected
+on a separate training set composed of 1, 000 randomly selected
+images from each dataset. SEG ﬁts the data distribution better
+by splitting the values into two sets: zero and non-zero. When
+searching for the optimal parameter value, we ﬁt the parameter to
+the non-zero value distribution. EG ﬁts the parameter to both sets
+simultaneously resulting in a sub-optimal solution.
+
+compression gains, as can be seen by comparing the base-
+line and sparse models of each network. When compared
+to the baseline, the sparse models of LeNet-5, MobileNet-
+V1, Inception-V3, ResNet-18 and ResNet-34 can be com-
+pressed by 2.0×, 1.1×, 1.6×, 1.2×, 1.2× respectively more
+than the compressed baseline, while also featuring an in-
+crease in accuracy and an accelerated computation of
+2.3×, 1.6×, 1.6×, 1.2×, 1.2× respectively. Table 6 also
+demonstrates that our pipeline can achieve even greater
+compression gains if slight accuracy drops are acceptable.
+The sparsiﬁcation step induces higher sparsity and lower en-
+tropy in the distribution of values, which both lead to these
+additional gains (Fig. 3). While all compression algorithms
+beneﬁt from the sparsiﬁcation step, SEG is the most effec-
+tive in exploiting the resulting distribution of values.
+
+In the bottom row of Fig. 5 we show the compression
+gain per layer for various networks. Finally, we study the
+effect of quantization on compression for SEG in Table 5.
+We evaluate the baseline and sparse models of LeNet-5 and
+MobileNet-V1 at q = 16, 12, 8 bits and report compres-
+sion gain and accuracy. We report the accuracy change and
+compression gain compared to the ﬂoating-point baseline
+model. LeNet-5 can be compressed by as much as 11× with
+a 0.01% accuracy gain, while MobileNet-V1 can be com-
+pressed by 10× with a 0.45% accuracy gain.
+
+8. Conclusion
+
+We have presented a three-stage compression and accel-
+eration pipeline that sparsiﬁes, quantizes and encodes ac-
+tivation maps of CNN’s. The sparsiﬁcation step increases
+the number of zero values leading to model acceleration
+on specialized hardware, while the quantization and encod-
+ing stages lead to compression by effectively utilizing the
+lower entropy of the sparser activation maps. The pipeline
+demonstrates an effective strategy in reducing the computa-
+tional and memory requirements of modern neural network
+architectures, taking a step closer to realizing the execu-
+tion of state-of-the-art neural networks on low-powered de-
+vices. At the same time, we have demonstrated that adding a
+sparsity-inducing prior on the activation maps does not nec-
+essarily come at odds with the accuracy of the model, allud-
+ing to the well-known fact that sparse activation maps have
+a strong representational power. Furthermore, we motivated
+our proposed solution by drawing connections between our
+approach and sparse coding. Finally, we believe that an op-
+timization scheme in which we jointly sparsify and quantize
+neural networks can lead to further improvements in accel-
+eration, compression and accuracy of the models.
+Acknowledgments. We would like to thank Hui Chen,
+Weiran Deng and Ilia Ovsiannikov for valuable discussions.
+
+7092
+
+References
+
+[1] Zlib compressed data format speciﬁcation version 3.3.
+https://tools.ietf.org/html/rfc1950. Ac-
+cessed: 2018-05-17. 2, 7, 8
+
+[2] J. Albericio, P. Judd, T. Hetherington, T. Aamodt, N. E.
+Jerger, and A. Moshovos. Cnvlutin: Ineffectual-neuron-free
+deep neural network computing. In 2016 ACM/IEEE 43rd
+Annual International Symposium on Computer Architecture,
+2016. 2
+
+[3] M. Alwani, H. Chen, M. Ferdman, and P. Milder. Fused-
+layer cnn accelerators. In IEEE/ACM International Sympo-
+sium on Microarchitecture, 2016. 2
+
+[4] Jimmy Lei Ba, Jamie Ryan Kiros, and Geoffrey E Hin-
+ton. Layer normalization. arXiv preprint arXiv:1607.06450,
+2016. 3
+
+[5] Zhaowei Cai, Xiaodong He, Jian Sun, and Nuno Vasconce-
+los. Deep learning with low precision by half-wave gaussian
+quantization. arXiv preprint arXiv:1702.00953, 2017. 5
+
+[6] Matthieu Courbariaux, Yoshua Bengio, and Jean-Pierre
+David. Training deep neural networks with low precision
+multiplications. arXiv preprint arXiv:1412.7024, 2014. 3
+
+[7] Matthieu Courbariaux, Yoshua Bengio, and Jean-Pierre
+David. Binaryconnect: Training deep neural networks with
+binary weights during propagations. In Advances in Neural
+Information Processing Systems, 2015. 3
+
+[8] Jia Deng, Wei Dong, Richard Socher, Li-Jia Li, Kai Li,
+and Li Fei-Fei. Imagenet: A large-scale hierarchical image
+database. In IEEE Conference on Computer Vision and Pat-
+tern Recognition. IEEE, 2009. 4, 5
+
+[9] Guneet S Dhillon, Kamyar Azizzadenesheli, Zachary C Lip-
+ton, Jeremy Bernstein, Jean Kossaiﬁ, Aran Khanna, and An-
+ima Anandkumar. Stochastic activation pruning for robust
+adversarial defense. arXiv preprint arXiv:1803.01442, 2018.
+2
+
+[10] Xuanyi Dong, Junshi Huang, Yi Yang, and Shuicheng Yan.
+More is less: A more complicated network with less infer-
+ence complexity. In The IEEE International Conference on
+Computer Vision, 2017. 2, 6
+
+[11] Xavier Glorot, Antoine Bordes, and Yoshua Bengio. Deep
+sparse rectiﬁer neural networks. In International Conference
+on Artiﬁcial Intelligence and Statistics, 2011. 2, 3, 6
+
+[12] Yunchao Gong, Liu Liu, Ming Yang, and Lubomir D. Bour-
+dev. Compressing deep convolutional networks using vector
+quantization. arXiv preprint arXiv:1412.6115, 2014. 3
+
+[13] D. A. Gudovskiy, A. Hodgkinson, and L. Rigazio. DNN Fea-
+ture Map Compression using Learned Representation over
+GF(2). arXiv preprint arXiv:1808.05285, 2018. 2
+
+[14] Yiwen Guo, Anbang Yao, and Yurong Chen.
+
+Dy-
+namic network surgery for efﬁcient dnns. arXiv preprint
+arXiv:1608.04493, 2016. 3
+
+[15] Suyog Gupta, Ankur Agrawal, Kailash Gopalakrishnan, and
+Pritish Narayanan. Deep learning with limited numerical
+precision. In International Conference on Machine Learn-
+ing, 2015. 3
+
+tal selection and analogue ampliﬁcation coexist in a cortex-
+inspired silicon circuit. Nature, 2000. 2
+
+[17] Song Han, Xingyu Liu, Huizi Mao, Jing Pu, Ardavan Pe-
+dram, Mark A. Horowitz, and William J. Dally. Eie: Efﬁ-
+cient inference engine on compressed deep neural network.
+SIGARCH Computer Architecture News, 2016. 2
+
+[18] Song Han, Huizi Mao, and William J Dally. Deep com-
+pression: Compressing deep neural networks with pruning,
+trained quantization and huffman coding. arXiv preprint
+arXiv:1510.00149, 2015. 1, 2, 3, 6, 7, 8
+
+[19] Babak Hassibi and David G Stork. Second order derivatives
+for network pruning: Optimal brain surgeo. In Advances in
+Neural Information Processing Systems, 1993. 3
+
+[20] Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun.
+Deep residual learning for image recognition. In Proceed-
+ings of the IEEE Conference on Computer Vision and Pattern
+Recognition, 2016. 1, 2, 5
+
+[21] M. Horowitz. Computing’s energy problem (and what we
+can do about it). In IEEE International Solid-State Circuits
+Conference Digest of Technical Papers, 2014. 2
+
+[22] Andrew G. Howard, Menglong Zhu, Bo Chen, Dmitry
+Kalenichenko, Weijun Wang, Tobias Weyand, Marco An-
+dreetto, and Hartwig Adam. Mobilenets: Efﬁcient convolu-
+tional neural networks for mobile vision applications. arXiv
+preprint arXiv:1704.04861, 2017. 3, 5
+
+[23] Itay Hubara, Matthieu Courbariaux, Daniel Soudry, Ran El-
+Yaniv, and Yoshua Bengio. Quantized neural networks:
+Training neural networks with low precision weights and ac-
+tivations. arXiv preprint arXiv:1609.07061, 2016. 3
+
+[24] Forrest N. Iandola, Matthew W. Moskewicz, Khalid Ashraf,
+Song Han, William J. Dally, and Kurt Keutzer. Squeezenet:
+Alexnet-level accuracy with 50x fewer parameters and <1mb
+model size. arXiv preprint arXiv:1602.07360, 2016. 3
+
+[25] Yani Ioannou, Duncan Robertson, Jamie Shotton, Roberto
+Cipolla, and Antonio Criminisi. Training cnns with low-
+rank ﬁlters for efﬁcient image classiﬁcation. arXiv preprint
+arXiv:1705.08665, 2015. 3
+
+[26] Yani Ioannou, Duncan P. Robertson, Roberto Cipolla, and
+Improving CNN ef-
+arXiv preprint
+
+Antonio Criminisi.
+ﬁciency with hierarchical ﬁlter groups.
+arXiv:1605.06489, 2016. 1, 3
+
+Deep roots:
+
+[27] Sergey Ioffe and Christian Szegedy. Batch normalization:
+Accelerating deep network training by reducing internal co-
+variate shift. arXiv preprint arXiv:1502.03167, 2015. 3
+
+[28] ITU-T. Itu-t recommendation h. 264: Advanced video cod-
+
+ing for generic audiovisual services. 5
+
+[29] Max Jaderberg, Andrea Vedaldi, and Andrew Zisserman.
+Speeding up convolutional neural networks with low rank
+expansions. arXiv preprint arXiv:1405.3866, 2014. 1, 3
+
+[30] JCT-VC. Itu-t recommendation h. 265 and iso. 5
+[31] D. Kim, J. Ahn, and S. Yoo. Zena: Zero-aware neural net-
+
+work accelerator. IEEE Design Test, 2018. 2
+
+[32] Alex Krizhevsky. Learning multiple layers of features from
+tiny images. Technical report, University of Toronto, 2009.
+5
+
+[16] Richard HR Hahnloser, Rahul Sarpeshkar, Misha A Ma-
+howald, Rodney J Douglas, and H Sebastian Seung. Digi-
+
+[33] Alex Krizhevsky, Ilya Sutskever, and Geoffrey E Hinton.
+Imagenet classiﬁcation with deep convolutional neural net-
+
+7093
+
+works. In Advances in Neural Information Processing Sys-
+tems, 2012. 1, 5
+
+[34] Vadim Lebedev and Victor Lempitsky. Fast convnets using
+group-wise brain damage. In Proceedings of the IEEE Con-
+ference on Computer Vision and Pattern Recognition, 2016.
+3
+
+[35] Y. Lecun, L. Bottou, Y. Bengio, and P. Haffner. Gradient-
+based learning applied to document recognition. Proceed-
+ings of the IEEE, 1998. 5
+
+[36] Hao Li, Asim Kadav, Igor Durdanovic, Hanan Samet, and
+Hans Peter Graf. Pruning ﬁlters for efﬁcient convnets. arXiv
+preprint arXiv:1608.08710, 2016. 3, 6
+
+[37] Darryl Lin, Sachin Talathi, and Sreekanth Annapureddy.
+Fixed point quantization of deep convolutional networks. In
+International Conference on Machine Learning, 2016. 5
+
+[38] Christos Louizos, Karen Ullrich,
+
+Bayesian compression for deep learning.
+arXiv:1705.08665, 2017. 3
+
+and Max Welling.
+arXiv preprint
+
+[39] Christos Louizos, Max Welling, and Diederik P. Kingma.
+Learning sparse neural networks through l0 regularization.
+arXiv preprint arXiv:1712.01312, 2017. 3
+
+[40] Jian-Hao Luo, Jianxin Wu, and Weiyao Lin. Thinet: A ﬁlter
+level pruning method for deep neural network compression.
+arXiv preprint arXiv:1707.06342, 2017. 3
+
+[41] Stephen Merity, Bryan McCann, and Richard Socher. Re-
+visiting activation regularization for language rnns. arXiv
+preprint arXiv:1708.01009, 2017. 3
+
+[42] Vinod Nair and Geoffrey E Hinton. Rectiﬁed linear units im-
+prove restricted boltzmann machines. In Proceedings of the
+27th International Conference on Machine Learning, 2010.
+2
+
+[43] Kirill Neklyudov, Dmitry Molchanov, Arsenii Ashukha, and
+Dmitry Vetrov. Structured bayesian pruning via log-normal
+multiplicative noise.
+arXiv preprint arXiv:1705.07283,
+2017. 3
+
+[44] Andrew Ng.
+
+Cs294a lecture notes, 2011.
+//web.stanford.edu/class/cs294a/
+sparseAutoencoder.pdf. 3
+
+https:
+
+[45] Bruno A Olshausen and David J Field. Sparse coding with an
+overcomplete basis set: A strategy employed by v1? Vision
+research, 1997. 3
+
+[46] Vardan Papyan, Yaniv Romano, and Michael Elad. Convo-
+lutional neural networks analyzed via convolutional sparse
+coding.
+The Journal of Machine Learning Research,
+18(1):2887–2938, 2017. 4
+
+[47] A. Parashar, M. Rhu, A. Mukkara, A. Puglielli, R. Venkate-
+san, B. Khailany, J. Emer, S. W. Keckler, and W. J. Dally.
+Scnn: An accelerator for compressed-sparse convolutional
+neural networks. In 2017 ACM/IEEE 44th Annual Interna-
+tional Symposium on Computer Architecture, 2017. 2
+
+[48] Jongsoo Park, Sheng Li, Wei Wen, Ping Tak Peter Tang, Hai
+Li, Yiran Chen, and Pradeep Dubey. Faster cnns with di-
+rect sparse convolutions and guided pruning. arXiv preprint
+arXiv:1608.01409, 2016. 3
+
+[49] Adam Paszke, Sam Gross, Soumith Chintala, Gregory
+Chanan, Edward Yang, Zachary DeVito, Zeming Lin, Al-
+ban Desmaison, Luca Antiga, and Adam Lerer. Automatic
+differentiation in pytorch. 2017. 6
+
+[50] Mohammad Rastegari, Vicente Ordonez, Joseph Redmon,
+and Ali Farhadi. Xnor-net: Imagenet classiﬁcation using bi-
+nary convolutional neural networks. In European Conference
+on Computer Vision, 2016. 3, 6
+
+[51] Brandon Reagen, Udit Gupta, Robert Adolf, Michael M.
+Mitzenmacher, Alexander M. Rush, Gu-Yeon Wei, and
+David Brooks. Weightless: Lossy weight encoding
+for deep neural network compression.
+arXiv preprint
+arXiv:1711.04686. 3
+
+[52] Minsoo Rhu, Mike O’Connor, Niladrish Chatterjee, Jeff
+Pool, and Stephen W. Keckler. Compressing DMA engine:
+Leveraging activation sparsity for training deep neural net-
+works. arXiv preprint arXiv:1705.01626, 2017. 2, 7, 8
+
+[53] AH Robinson and Colin Cherry. Results of a prototype tele-
+vision bandwidth compression scheme. Proceedings of the
+IEEE, 1967. 2
+
+[54] Mark Sandler, Andrew G. Howard, Menglong Zhu, Andrey
+Zhmoginov, and Liang-Chieh Chen. Inverted residuals and
+linear bottlenecks: Mobile networks for classiﬁcation, de-
+tection and segmentation. arXiv preprint arXiv:1801.04381,
+2018. 3
+
+[55] Karen Simonyan and Andrew Zisserman. Very deep convo-
+lutional networks for large-scale image recognition. arXiv
+preprint arXiv:1409.1556, 2014. 1, 5
+
+[56] A. Sironi, B. Tekin, R. Rigamonti, V. Lepetit, and P. Fua.
+IEEE Transactions on Pattern
+
+Learning separable ﬁlters.
+Analysis and Machine Intelligence, 2015. 3
+
+[57] Nitish Srivastava, Geoffrey Hinton, Alex Krizhevsky, Ilya
+Sutskever, and Ruslan Salakhutdinov. Dropout: a simple way
+to prevent neural networks from overﬁtting. The Journal of
+Machine Learning Research, 2014. 3
+
+[58] Jeremias Sulam, Vardan Papyan, Yaniv Romano, and
+Michael Elad. Multi-layer convolutional sparse model-
+ing: Pursuit and dictionary learning.
+arXiv preprint
+arXiv:1708.08705, 2017. 4
+
+[59] Christian Szegedy, Sergey Ioffe, and Vincent Vanhoucke.
+Inception-v4, inception-resnet and the impact of residual
+connections on learning. arXiv preprint arXiv:1602.07261,
+2016. 1
+
+[60] Christian Szegedy, Vincent Vanhoucke, Sergey Ioffe, Jon
+Shlens, and Zbigniew Wojna. Rethinking the inception archi-
+tecture for computer vision. In Proceedings of the IEEE Con-
+ference on Computer Vision and Pattern Recognition, 2016.
+1, 5
+
+[61] Jukka Teuhola. A compression method for clustered bit-
+
+vectors. Information processing letters, 1978. 2, 5, 7, 8
+
+[62] Robert Tibshirani. Regression shrinkage and selection via
+the lasso. Journal of the Royal Statistical Society. Series B
+(Methodological), 1996. 3
+
+[63] Karen Ullrich, Edward Meeds, and Max Welling.
+
+weight-sharing for neural network compression.
+preprint arXiv:1702.04008, 2017. 3
+
+Soft
+arXiv
+
+[64] Vincent Vanhoucke, Andrew Senior, and Mark Z Mao. Im-
+proving the speed of neural networks on cpus.
+In Pro-
+ceedings Deep Learning and Unsupervised Feature Learn-
+ing NIPS Workshop, 2011. 3
+
+7094
+
+[65] Jiangtao Wen and John D Villasenor. Reversible variable
+length codes for efﬁcient and robust image and video coding.
+In Data Compression Conference, 1998. 5
+
+[66] Wei Wen, Chunpeng Wu, Yandan Wang, Yiran Chen, Hai
+Li, Christos Louizos, Max Welling, and Diederik P. Kingma.
+Learning structured sparsity in deep neural networks. arXiv
+preprint arXiv:1608.03665, 2016. 3
+
+[67] Jiaxiang Wu, Cong Leng, Yuhang Wang, Qinghao Hu, and
+Jian Cheng. Quantized convolutional neural networks for
+mobile devices. In Proceedings of the IEEE Conference on
+Computer Vision and Pattern Recognition, 2016. 3
+
+[68] Xiangyu Zhang, Xinyu Zhou, Mengxiao Lin, and Jian Sun.
+Shufﬂenet: An extremely efﬁcient convolutional neural net-
+work for mobile devices. arXiv preprint arXiv:1707.01083,
+2017. 3
+
+[69] Hao Zhou, Jose M Alvarez, and Fatih Porikli. Less is more:
+In European Conference on Com-
+
+Towards compact cnns.
+puter Vision, 2016. 3
+
+7095
+
+

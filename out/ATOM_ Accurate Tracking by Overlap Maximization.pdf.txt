@@ -1,0 +1,1550 @@
+ATOM: Accurate Tracking by Overlap Maximization
+
+Martin Danelljan∗,1,2
+
+Goutam Bhat∗,1,2
+
+Fahad Shahbaz Khan1,3 Michael Felsberg1
+
+1 CVL, Link¨oping University, Sweden
+
+2 CVL, ETH Z¨urich, Switzerland
+
+3 Inception Institute of Artiﬁcial Intelligence, UAE
+
+Abstract
+
+While recent years have witnessed astonishing improve-
+ments in visual tracking robustness, the advancements in
+tracking accuracy have been limited. As the focus has been
+directed towards the development of powerful classiﬁers,
+the problem of accurate target state estimation has been
+largely overlooked. In fact, most trackers resort to a simple
+multi-scale search in order to estimate the target bounding
+box. We argue that this approach is fundamentally limited
+since target estimation is a complex task, requiring high-
+level knowledge about the object.
+
+We address this problem by proposing a novel track-
+ing architecture, consisting of dedicated target estimation
+and classiﬁcation components. High level knowledge is in-
+corporated into the target estimation through extensive of-
+ﬂine learning. Our target estimation component is trained
+to predict the overlap between the target object and an
+estimated bounding box. By carefully integrating target-
+speciﬁc information, our approach achieves previously un-
+seen bounding box accuracy. We further introduce a clas-
+siﬁcation component that is trained online to guarantee
+high discriminative power in the presence of distractors.
+Our ﬁnal tracking framework sets a new state-of-the-art
+on ﬁve challenging benchmarks. On the new large-scale
+TrackingNet dataset, our tracker ATOM achieves a rela-
+tive gain of 15% over the previous best approach, while
+running at over 30 FPS. Code and models are available at
+https://github.com/visionml/pytracking.
+
+1. Introduction
+
+Generic online visual tracking is a hard and ill-posed
+problem. The tracking method must learn an appearance
+model of the target online based on minimal supervision,
+often a single starting frame in the video. The model then
+needs to generalize to unseen aspects of the target appear-
+ance, including different poses, viewpoints, lightning con-
+ditions etc. The tracking problem can be decomposed into
+
+∗Both authors contributed equally.
+
+ATOM
+
+DaSiamRPN
+
+UPDT
+
+Figure 1. A comparison of our approach with state-of-the-art track-
+ers. UPDT [3], based on correlation ﬁlters, lacks an explicit tar-
+get state estimation component, performing a brute-force multi-
+scale search instead. Consequently, it does not handle aspect-ratio
+changes, which can lead to tracking failure (second row). DaSi-
+amRPN [39] employs a bounding box regression strategy to es-
+timate the target state, but still struggles in cases of out-of-plane
+rotation, deformation, etc. Our approach ATOM, employing an
+overlap prediction network, successfully handles these challenges
+and provides accurate bounding box predictions.
+
+a classiﬁcation task and an estimation task. In the former
+case, the aim is to robustly provide a coarse location of the
+target in the image by categorizing image regions into fore-
+ground and background. The second task is then to estimate
+the target state, often represented by a bounding box.
+
+In recent years, the focus of tracking research has been
+on target classiﬁcation. Much attention has been invested
+into constructing robust classiﬁers, based on e.g. correla-
+tion ﬁlters [6, 22, 31], and exploiting powerful deep feature
+representations [3, 34] for this task. On the other hand, tar-
+get estimation has seen below expected progress. This trend
+is clearly observed in the recent VOT2018 challenge [17],
+where older trackers such as KCF [13] and MEEM [37] still
+obtain competitive accuracy while exhibiting vastly inferior
+robustness.
+In fact, most current state-of-the-art trackers
+[3, 4, 31] still rely on the classiﬁcation component for tar-
+get estimation by performing a multi-scale search. How-
+
+4660
+
+ever, this strategy is fundamentally limited since bounding
+box estimation is inherently a challenging task, requiring
+high-level understanding of the object’s pose (see ﬁgure 1).
+In this work, we set out to bridge the performance gap
+between target classiﬁcation and estimation in visual object
+tracking. We introduce a novel tracking architecture con-
+sisting of two components designed exclusively for target
+estimation and classiﬁcation. Inspired by the recently pro-
+posed IoU-Net [15], we train the target estimation compo-
+nent to predict the Intersection over Union (IoU) overlap,
+i.e. the Jaccard Index [14], between the target and an es-
+timated bounding box. Since the original IoU-Net is class-
+speciﬁc, and hence not suitable for generic tracking, we pro-
+pose a novel architecture for integrating target-speciﬁc in-
+formation into the IoU prediction. We achieve this by intro-
+ducing a modulation-based network component that incor-
+porates the target appearance in the reference image to ob-
+tain target-speciﬁc IoU estimates. This further enables our
+target estimation component to be trained ofﬂine on large-
+scale datasets. During tracking, the target bounding box is
+found by simply maximizing the predicted IoU overlap in
+each frame.
+
+To develop a seamless and transparent tracking method,
+we also revisit the problem of target classiﬁcation with the
+aim of avoiding unnecessary complexity. Our target clas-
+siﬁcation component is simple yet powerful, consisting of
+a two-layer fully convolutional network head. Unlike our
+target estimation module, the classiﬁcation component is
+trained online, providing high robustness against distrac-
+tor objects in the scene. To ensure real-time performance,
+we address the problem of efﬁcient online optimization,
+where gradient descent falls short.
+Instead, we employ a
+Conjugate-Gradient-based strategy and demonstrate how it
+can be easily implemented in modern deep learning frame-
+works. Our ﬁnal tracking loop is simple, alternating be-
+tween target classiﬁcation, estimation, and model update.
+
+We perform comprehensive experiments on ﬁve chal-
+lenging benchmarks: NFS [9], UAV123 [24], TrackingNet
+[25], LaSOT [8], and VOT2018 [17]. Our tracking approach
+sets a new state-of-the-art on all ﬁve datasets, achieving an
+absolute gain of 10% on the challenging LaSOT dataset.
+Moreover, we provide an analysis of our tracker, along with
+different network architectures for overlap prediction.
+
+2. Related Work
+
+In the context of visual tracking, it often makes sense to
+distinguish between target classiﬁcation and target estima-
+tion as two separate, but related subtasks. Target classiﬁca-
+tion basically aims at determining the presence of the target
+object at a certain image location. However, only partial
+information about the target state is obtained, e.g. its im-
+age coordinates. Target estimation then aims at ﬁnding the
+full state. In visual tracking, the target state is often rep-
+
+resented by a bounding box, either axis aligned [9, 35] or
+rotated [17]. State estimation is then reduced to ﬁnding the
+image bounding box that best describes the target in the cur-
+rent frame. In the simplest case, the target is rigid and only
+moves parallel to the camera plane. In such a scenario, tar-
+get estimation reduces to ﬁnding the 2D image-location of
+the target, and therefore does not need to be considered sep-
+arately from target classiﬁcation. In general, however, ob-
+jects may undergo radical variations in pose and viewpoint,
+greatly complicating the task of bounding box estimation.
+
+In the last few years, the challenge of target classiﬁcation
+has been successfully addressed by discriminatively train-
+ing powerful classiﬁers online [6, 13, 26].
+In particular,
+the correlation-based trackers [7, 13, 23] have gained wide
+popularity. These methods rely on the diagonalizing trans-
+formation of circular convolutions, given by the Discrete
+Fourier Transform, to perform efﬁcient fully convolutional
+training and inference. Correlation ﬁlter methods often ex-
+cel at target classiﬁcation by computing reliable conﬁdence
+scores in a dense 2D-grid. On the other hand, accurate tar-
+get estimation has long eluded such approaches. Even ﬁnd-
+ing a one-parameter scale factor has turned out a formidable
+challenge [5, 20] and most approaches resort to the brute-
+force multi-scale detection strategy with its obvious compu-
+tational impact. As such, the default method is to apply the
+classiﬁer alone to perform full state estimation. However,
+target classiﬁers are not sensitive to all aspects of the target
+state, e.g. the width and height of the target. In fact, invari-
+ance to some aspects of the target state is often considered
+a valuable property of the discriminative model to improve
+robustness [2, 3, 26]. Instead of relying on the classiﬁer, we
+learn a dedicated target estimation component.
+
+Accurate estimation of an object’s bounding box is a
+complex task, requiring high-level a-priori knowledge. The
+bounding box depends on the pose and viewpoint of the ob-
+ject, which cannot be modeled as a simple image transfor-
+mation (e.g. uniform image scaling). It is therefore highly
+challenging, if not impossible, to learn accurate target es-
+timation online from scratch. Many recent methods in the
+literature have therefore integrated prior knowledge in the
+form of heavy ofﬂine learning [18, 26, 39]. In particular,
+SiamRPN [18] and its extension [39] have been shown ca-
+pable of bounding box regression thanks to extensive of-
+ﬂine training. Yet, these Siamese tracking approaches often
+struggle at the problem of target classiﬁcation. Unlike, for
+instance, correlation-based methods, most Siamese track-
+ers do not explicitly account for distractors, since no online
+learning is performed. While this problem has been partly
+addressed using simple template update techniques [39], it
+has yet to reach the level of strong online-learned models.
+In contrast to Siamese methods, we learn the classiﬁcation
+model online, while also utilizing extensive ofﬂine training
+for the target estimation task.
+
+4661
+
+3. Proposed Method
+
+In this work, we propose a novel tracking approach con-
+sisting of two components: 1) A target estimation module
+that is learned ofﬂine; and 2) A target classiﬁcation module
+that is learned online. That is, following the modern trend
+in object detection [27, 28], we separate the subproblems of
+target classiﬁcation and estimation. Yet, both of these tasks
+are integrated in a uniﬁed multi-task network architecture,
+shown in ﬁgure 2.
+
+We employ the same backbone network for both the tar-
+get classiﬁcation and estimation tasks. For simplicity, we
+use a ResNet-18 model that is trained on ImageNet and re-
+frain from ﬁne-tuning the backbone in this work. Target
+estimation is performed by the IoU-predictor network. This
+network is trained ofﬂine on large-scale video tracking and
+object detection datasets, and its weights are frozen dur-
+ing online tracking. The IoU-predictor takes four inputs:
+i) backbone features from current frame, ii) bounding box
+estimates in the current frame, iii) backbone features from a
+reference frame, iv) the target bounding box in the reference
+frame. It then outputs the predicted Intersection over Union
+(IoU) score for each of the current-frame bounding box esti-
+mates. During tracking, the ﬁnal bounding box is obtained
+by maximizing the IoU score using gradient ascent. The
+target estimation component is detailed in section 3.1.
+
+Target classiﬁcation is performed by another network
+head. Unlike the target estimation component, the clas-
+siﬁcation network is entirely learned during online track-
+ing. It is exclusively trained to discriminate the target from
+other objects in the scene by predicting a target conﬁdence
+score based on backbone features extracted from the cur-
+rent frame. Both training and prediction are performed in
+a fully convolutional manner to ensure efﬁciency and cov-
+erage. However, training such a network online with con-
+ventional approaches, such as stochastic gradient descent,
+is suboptimal for our online purpose. We therefore propose
+to use an optimization strategy, based on Conjugate Gra-
+dient and Gauss-Newton, that enables fast online training.
+Moreover, we demonstrate how this approach can be easily
+implemented in common deep learning frameworks, such as
+PyTorch, by exploiting the back-propagation functionality.
+Our target classiﬁcation approach is described in section 3.2
+and our ﬁnal tracking framework is detailed in section 3.3.
+
+3.1. Target Estimation by Overlap Maximization
+
+In this section, we detail how the target state estimation
+is performed. The aim of our state estimation component is
+to determine the target bounding box given a rough initial
+estimate. We take inspiration from the IoU-Net [15], which
+was recently proposed for object detection as an alterna-
+tive to typical anchor-based bounding box regression tech-
+niques. In contrast to conventional approaches, the IoU-Net
+is trained to predict the IoU between an image object and an
+
+Figure 2. Overview of our network architecture for visual track-
+ing. We augment two modules to the pretrained ResNet-18 back-
+bone network (orange). The target estimation module (blue) is
+trained ofﬂine on large-scale datasets to predict the IoU overlap
+with the target. Using the reference frame and the initial target
+box, modulation vectors carrying target-speciﬁc appearance infor-
+mation are computed. The IoU predictor component then receives
+features and proposal bounding boxes in the test frame, along with
+the aforementioned modulation vectors. It estimates the IoU for
+each input box. The target classiﬁcation module (green) is trained
+online to output target conﬁdences in a fully convolutional manner.
+
+input bounding box candidate. Bounding box estimation is
+then performed by maximizing the IoU prediction.
+
+To describe our target estimation component, we ﬁrst
+brieﬂy revisit the IoU-Net model. Given a deep feature rep-
+
+resentation of an image, x ∈ RW ×H×D, and a bounding
+box estimate B ∈ R4 of an image object, IoU-Net predicts
+the IoU between B and the object. Here B is parametrized
+as B = (cx/w, cy/h, log w, log h), where (cx, cy) are the
+image coordinates of the bounding box center. The network
+uses a Precise ROI Pooling (PrPool) [15] layer to pool the
+region in x given by B, resulting in a feature map xB of a
+pre-determined size. Essentially, PrPool is a continuous
+variant of adaptive average pooling, with the key advantage
+of being differentiable w.r.t. the bounding box coordinates
+B. This allows the bounding box B to be reﬁned by maxi-
+mizing the IoU w.r.t. B through gradient ascent.
+Network Architecture: For the task of object detection,
+independent IoU-Nets are trained in [15] for each object
+class. However, in tracking the target class is generally un-
+known. Further, unlike object detection, the target is not
+required to belong to any set of pre-deﬁned classes or be
+represented in any existing training datasets. Class-speciﬁc
+IoU predictors are thus of little use for generic visual track-
+ing. Instead, target-speciﬁc IoU predictions are required, by
+exploiting the target annotation in the ﬁrst frame. Due to the
+high-level nature of the IoU prediction task, it is not feasi-
+ble to train, or even ﬁne-tune the IoU-Net online on a single
+frame. Thus, we argue that the target estimation network
+needs to be trained ofﬂine to learn a general representation
+for IoU prediction.
+
+In the context of visual tracking, where the target object
+
+4662
+
+ResNet-18Reference ImageTest ImageResNet-18IoU PredictorClassifierIoU ModulationGround Truth BBModulation vectorBB estimatesIoU0.720.770.61Confidence Pre-trained Offline OnlineConv
+
+PrPool
+
+3x3
+
+ FC
+
+Ground Truth BB
+
+ResNet-18 
+Block 1-3
+
+ResNet 
+Block 4
+
+Conv
+
+ FC
+
+ FC
+
+Concatenate
+
+PrPool
+
+1x1
+
+PrPool
+
+5x5
+
+Conv
+
+Conv
+
+ResNet-18 
+Block 1-3
+
+ResNet 
+Block 4
+
+BB Estimate
+
+PrPool
+
+3x3
+
+Conv
+
+Conv
+
+Reference Branch
+
+Modulation 
+
+Vector
+
+Test Branch
+
+ FC
+
+IoU 
+
+Concatenate
+
+Feature Modulation
+
+ FC
+
+ FC
+
+Figure 3. Full architecture of our target estimation network. ResNet-18 Block3 and Block4 features extracted from the test image are
+ﬁrst passed through two Conv layers. Regions deﬁned by the input bounding boxes are then pooled to a ﬁxed size using PrPool layers.
+The pooled features are modulated by channel-wise multiplication with the coefﬁcient vector returned by the reference branch. The features
+are then passed through fully-connected layers to predict the IoU. All Conv and FC layers are followed by BatchNorm and ReLU.
+
+is unknown beforehand, the challenge is thus to construct
+an IoU prediction architecture that makes effective use of
+the reference target appearance given at test-time. Our ini-
+tial experiments showed that naive approaches for fusing
+the reference image features with the current-frame features
+yield poor performance (see section 4.1). We also found
+Siamese architectures to provide suboptimal results. In this
+work, we therefore propose a modulation-based network ar-
+chitecture that predicts the IoU for an arbitrary object given
+only a single reference image. The proposed network is vi-
+sualized in ﬁgure 3. Our network has two branches, both
+of which take backbone features from ResNet-18 Block3
+and Block4 as input. The reference branch inputs fea-
+tures x0 and the target bounding box annotation B0 in the
+reference image. It returns a modulation vector c(x0, B0),
+consisting of positive coefﬁcients of size 1× 1× Dz. As il-
+lustrated in ﬁgure 3, this branch consists of a convolutional
+layer followed by PrPool and a fully connected layer.
+
+The current image, in which we want to estimate the tar-
+get bounding box, is processed through the test branch. It
+ﬁrst extracts a deep representation by feeding the backbone
+features x through two convolutional layers followed by a
+PrPool with the bounding box estimate B. As the test
+branch extracts general features for IoU prediction, which
+constitutes a more complex task, it employs more layers and
+higher pooling resolution compared to the reference branch
+(see ﬁgure 3). The resulting representation z(x, B) is of
+size K × K × Dz, where K is spatial output size of the
+PrPool layer. The computed feature representation of the
+
+test image is then modulated by the coefﬁcient vector c via
+a channel-wise multiplication. This creates a target-speciﬁc
+representation for IoU prediction, effectively incorporating
+the reference appearance information. The modulated rep-
+resentation is ﬁnally fed to the IoU predictor module g, con-
+sisting of three fully connected layers. The predicted IoU of
+the bounding box B is hence given by
+
+IoU(B) = g(cid:0)c(x0, B0) · z(x, B)(cid:1) .
+
+(1)
+
+To train the network, we minimize the prediction error of
+(1), given annotated data. During tracking we maximize (1)
+w.r.t. B to estimate the target state.
+Training: From (1) it is clear that the entire IoU predic-
+tion network can be trained in an end-to-end fashion, using
+bounding-box-annotated image pairs. We use the training
+splits of the recently introduced Large-scale Single Object
+Tracking (LaSOT) dataset [8] and TrackingNet [25]. We
+sample image pairs from the videos with a maximum gap
+of 50 frames. Similar to [39], we augment our training data
+with synthetic image pairs from the COCO dataset [21] to
+have more diverse classes. From the reference image, we
+sample a square patch centered at the target, with an area of
+about 52 times the target area. From the test image, we sam-
+ple a similar patch, with some perturbation in the position
+and scale to simulate the tracking scenario. These cropped
+regions are then resized to a ﬁxed size. For each image pair
+we generate 16 candidate bounding boxes by adding Gaus-
+sian noise to the ground truth coordinates, while ensuring
+a minimum IoU of 0.1. We use image ﬂipping and color
+
+4663
+
+jittering for data augmentation. As in [15], the IoU is nor-
+malized to [−1, 1].
+The weights in our head network are initialized using
+[12]. For the backbone network, we freeze all weights dur-
+ing training. We use the mean-squared error loss function
+and train for 40 epochs with 64 image pairs per batch. The
+ADAM [16] optimizer is employed with initial learning rate
+of 10−3, and using a factor 0.2 decay every 15 epochs.
+
+3.2. Target Classiﬁcation by Fast Online Learning
+
+While the target estimation module provides accurate
+bounding box outputs, it lacks the ability to robustly dis-
+criminate between the target object and background distrac-
+tors. We therefore complement the estimation module with
+a second network head, whose sole purpose is to perform
+this discrimination. Unlike the estimation component, the
+target classiﬁcation module is exclusively trained online, to
+predict a target conﬁdence score. Since the goal of the tar-
+get classiﬁcation module is to provide a rough 2D-location
+of the object, we wish it to be invariant to the size and scale
+of the target.
+Instead, it should emphasize robustness by
+minimizing false detections.
+Model: Our target classiﬁcation module is a 2-layer fully
+convolutional neural network, formally deﬁned as
+
+f (x; w) = φ2(w2 ∗ φ1(w1 ∗ x)) .
+
+(2)
+
+Here, x is the backbone feature map, w = {w1, w2} are the
+parameters of the network, φ1, φ2 are activation functions
+and ∗ denotes standard multi-channel convolution. While
+our framework is general, allowing more complex models
+for this purpose, we found such a simple model sufﬁcient
+and beneﬁcial in terms of computational efﬁciency.
+
+Inspired by the recent success of discriminative correla-
+tion ﬁlter (DCF) approaches, we formulate a similar learn-
+ing objective based on the L2 classiﬁcation error,
+
+L(w) =
+
+m
+
+X
+
+j=1
+
+γjkf (xj; w) − yjk2 + X
+
+k
+
+λkkwkk2 .
+
+(3)
+
+Each training sample feature map xj is annotated by the
+classiﬁcation conﬁdences yj ∈ RW ×H , set to a sampled
+Gaussian function centered at the target location. The im-
+pact of each training sample is controlled by the weight γj ,
+while the amount of regularization on wk is set by λk.
+Online Learning:
+A brute-force approach to mini-
+mize (3) would be to apply standard gradient descent or
+its stochastic twin. These approaches are easily imple-
+mented in modern deep learning libraries, but are not well
+suited for online learning due to their slow convergence
+rates. We therefore develop a more sophisticated optimiza-
+tion strategy that is tailored for such online learning prob-
+lems, yet requiring only little added implementation com-
+plexity. First, we deﬁne the residuals of the problem as
+
+rj(w) = √γj(f (xj; w) − yj) for j ∈ {1, . . . , m} and
+rm+k(w) = √λkwk for k = 1, 2. The loss (3) is then
+equivalently written as the squared L2 norm of the resid-
+ual vector L(w) = kr(w)k2, where r(w) is the concate-
+nation of all residuals rj(w). We utilize the quadratic
+Gauss-Newton approximation ˜Lw(∆w) ≈ L(w +∆w), ob-
+tained from a ﬁrst order Taylor expansion of the residuals
+r(w + ∆w) ≈ rw + Jw∆w at the current estimate w,
+˜Lw(∆w) = ∆wTJ T
+wrw .
+
+wJw∆w + 2∆wTJ T
+
+wrw + rT
+
+(4)
+
+Here, we have deﬁned rw = r(w) and Jw = ∂r
+∂w is the
+Jacobian of r at w. The new variable ∆w represents the
+increment in the parameters w.
+
+The Gauss-Newton subproblem (4) forms a positive def-
+inite quadratic function, allowing the deployment of spe-
+cialized machinery such as the Conjugate Gradient (CG)
+method. While a full description of CG is outside the scope
+of this paper (see [29] for a full treatment), intuitively it
+ﬁnds an optimal search direction p and step length α in each
+iteration. Since the CG algorithm consists of simple vector
+operations, it can be implemented with only a few lines of
+python code. The only challenging aspect of CG is the eval-
+uation of the operation J T
+
+wJwp for a search direction p.
+
+We note that CG has been successfully deployed in some
+DCF tracking approaches [4, 7, 31]. However, these im-
+plementations rely on hand-coding all operations in order
+to implement J T
+wJwp, requiring much tedious work and
+derivations even for a simple model (2). This approach
+also lacks ﬂexibility since any minor modiﬁcation of the
+architecture (2), such as adding a layer or changing a non-
+linearity, may require comprehensive re-derivation and im-
+plementation work. In this paper, we therefore demonstrate
+how to implement CG for (4) by exploiting the backpropa-
+gation functionality of modern deep learning frameworks,
+such as PyTorch. Our implementation only requires the
+user to supply the function r(w) for evaluating the residu-
+als, which is easy to implement. Our algorithm is therefore
+applicable to any shallow learning problem of the form (3).
+wJwp, we ﬁrst con-
+sider a vector u of the same size as the residuals r(w). By
+computing the gradient of their inner product, we obtain
+∂
+∂w (r(w)Tu) = ∂r
+In fact, this is the stan-
+dard operation of the backpropagation procedure, namely
+to apply the transposed Jacobian at each node in the com-
+putational graph, starting at the output. We can thus de-
+ﬁne backpropagation of a scalar function s with respect to a
+variable v as BackProp(s, v) = ∂s
+∂v . Now, as shown above,
+we have BackProp(rTu, w) = J T
+wu. However, this only
+accounts for the second product in J T
+wJwp. We ﬁrst have to
+compute Jwp, which involves the application of the Jaco-
+bian itself (not its transpose). Thankfully, the Jacobian of
+the function u 7→ J T
+w, since the function is
+
+To ﬁnd a strategy for evaluating J T
+
+wu is trivially J T
+
+u = J T
+
+wu.
+
+∂w
+
+T
+
+4664
+
+Algorithm 1 Classiﬁcation component optimization.
+Input: Net weights w, residual function r(w), NGN, NCG
+
+# Treat u as constant
+
+ρ1 ← 1 , ∆w ← 0
+
+β ← ρ1
+
+ρ2
+
+# Treat p as constant
+
+# Treat q1 as constant
+
+1: for i = 1, . . . , NGN do
+u ← r
+2:
+p ← 0 ,
+
+r ← r(w) ,
+h ← BackProp(rTu, w)
+g ← −h ,
+for n = 1, . . . , NCG do
+
+3:
+
+5:
+
+4:
+
+6:
+
+7:
+
+8:
+
+9:
+
+10:
+
+11:
+
+12:
+
+13:
+
+ρ1 ← gTg ,
+ρ2 ← ρ1 ,
+p ← g + βp
+q1 ← BackProp(hTp, u)
+q2 ← BackProp(rTq1, w)
+α ← ρ1
+g ← g − αq2
+∆w ← ∆w + αp
+
+qT
+2p
+
+end for
+w ← w + ∆w
+
+14:
+15: end for
+
+linear. We can therefore transpose it by applying backprop-
+agation. By letting h := J T
+wu = BackProp(rTu, w), we get
+Jwp = ∂
+
+∂u (hTp) = BackProp(hTp, u).
+
+Given the above mentioned result, we outline the en-
+tire optimization procedure in algorithm 1. It applies NGN
+Gauss-Newton iterations, each encompassing NCG Conju-
+gate Gradient iterations for minimizing the resulting sub-
+problem (4). Each CG iteration requires two BackProp
+calls for evaluating q1 = Jwp and q2 = J T
+wq1, respectively.
+There is a need for computing h = J T
+wu once in the outer
+loop. Note that in each call to BackProp in algorithm 1, one
+of the vectors in the inner product is treated as constant, i.e.
+gradients are not propagated through it. This is highlighted
+as comments in algorithm 1 for clarity.
+It is noteworthy
+that the optimization algorithm is virtually parameter free,
+only the number of iterations need to be set. In comparison
+to gradient descent, the CG-based method adaptively com-
+putes the learning rate α and momentum β in each iteration.
+Observe that g is the negative gradient of (4).
+
+3.3. Online Tracking Approach
+
+Our tracker ATOM is implemented in Python, using Py-
+Torch. It runs at over 30 FPS on an Nvidia GT-1080 GPU.
+Feature extraction: We use ResNet-18 pretrained on Im-
+ageNet as our backbone network. For target classiﬁcation,
+we employ block 4 features, while the target estimation
+component uses both block 3 and 4 as input. Features are
+always extracted from patches of size 288×288 from image
+regions corresponding to 5 times the estimated target size.
+Note that ResNet-18 feature extraction is shared and only
+performed on a single image patch every frame.
+Classiﬁcation Model: The ﬁrst layer in our classiﬁcation
+head (2) consists of a 1 × 1 convolutional layer w1, which
+reduces the feature dimensionality to 64. As in [4], the pur-
+
+pose of this layer is to limit memory and computational re-
+quirements. The second layer employs a 4 × 4 kernel w2
+with a single output channel. We set φ1 to identity since
+we did not observe any beneﬁt of using a non-linearity at
+this layer. We use a continuously differentiable paramet-
+ric exponential linear unit (PELU) [33] as output activation:
+φ2(t) = t, t ≥ 0 and φ2(t) = α(e
+α − 1), t ≤ 0. Setting
+α = 0.05 allows us to ignore easy negative examples in the
+loss (3). We found the continuous differentiability of φ2 to
+be advantageous for optimization.
+
+t
+
+In the ﬁrst frame, we perform data augmentation by ap-
+plying varying degrees of translation, rotation, blur, and
+dropout, similar to [3], resulting in 30 initial training sam-
+ples xj . We then apply algorithm 1 with NGN = 6 and
+NCG = 10 to optimize the parameters w. Subsequently,
+we only optimize the ﬁnal layer w2, using NGN = 1 and
+NCG = 5 every 10th frame. In every frame, we add the ex-
+tracted feature map xj as a training sample, annotated by a
+Gaussian yj centered at the estimated target location. The
+weights γj in (3) are updated with a learning rate of 0.01.
+Target Estimation: We ﬁrst extract features at the pre-
+viously estimated target location and scale. We then apply
+the classiﬁcation model (2) and ﬁnd the 2D-position with
+the maximum conﬁdence score. Together with the previ-
+ously estimated target width and height, this generates the
+initial bounding box B. While it is possible to perform state
+estimation using this single proposal, we found that local
+maxima are better avoided using multiple random initializa-
+tions. We therefore generate a set of 10 initial proposals by
+adding uniform random noise to B. The predicted IoU (1)
+of each box is maximized using 5 gradient ascent iterations
+with a step length of 1. The ﬁnal prediction is obtained by
+taking the mean of the 3 bounding boxes with highest IoU.
+No further post-processing or ﬁltering, as in e.g. [18] is per-
+formed. This reﬁned state also annotates the training sam-
+ple (xj, yj), as described earlier. Note that the modulation
+vector c(x0, B0) in (1) is precomputed in the ﬁrst frame.
+Hard Negative Mining: To further robustify our classiﬁ-
+cation component in the presence of distractors, we adopt
+a hard negative mining strategy, common in many visual
+trackers [26, 39]. If a distractor peak is detected in the clas-
+siﬁcation scores, we double the learning rate of this training
+sample and instantly run a round of optimization with stan-
+dard settings (NGN = 1, NCG = 5). We also determine the
+target as lost if the score falls below 0.25. While the hard
+negative strategy is not fundamental to our framework, it
+provides some additional robustness (see section 4.2).
+
+4. Experiments
+
+We evaluate the proposed tracker ATOM on ﬁve bench-
+marks: Need for Speed (NFS) [9], UAV123 [24], Track-
+ingNet [25], LaSOT [8], and VOT2018 [17]. Detailed re-
+sults are provided in the supplementary material.
+
+4665
+
+4.1. IoU Prediction Architecture Analysis
+
+Here, we study the impact of various architectural
+choices for the IoU prediction module, presented in sec-
+tion 3.1. Our analysis is performed on the combined
+UAV123 [24] and NFS (30 FPS version) [9] datasets, sum-
+ming to 223 videos. These datasets contain a high variety
+of videos that are challenging in many aspects, such as de-
+formation, view change, occlusion, fast motion and distrac-
+tors. We evaluate the trackers based on the overlap precision
+metric (OPT ), deﬁned as the percentage of frames having
+bounding box IoU overlap larger than a threshold T with
+the ground truth. We also report the area-under-the-curve
+(AUC) score, deﬁned as AUC = R 1
+0 OPT dT . In all experi-
+ments, we report the average result over 5 runs.
+Reference image: We compare with a baseline approach
+that excludes target speciﬁc information by removing the
+reference branch in our architecture. That is, the baseline
+network only uses the test frame to predict the IoU. The re-
+sults of this investigation are shown in table 1. Excluding
+the reference frame deteriorates the results by over 5.5%
+AUC score. This demonstrates the importance of exploit-
+ing target-speciﬁc appearance information in order to accu-
+rately predict the IoU for an arbitrary object.
+Integration of target appearance: We investigate differ-
+ent network architectures for integrating the reference im-
+age features for IoU prediction. We compare our feature
+modulation based method, presented in section 3.1, with
+two alternative architectures. Concatenation: Activations
+from the reference and test branches are concatenated be-
+fore the ﬁnal IoU prediction layers. Siamese: Using iden-
+tical architecture for both branches and performing ﬁnal
+IoU prediction as a scalar product of their outputs. All the
+networks are trained using the same setup, with ResNet18
+Block3 and Block4 features as input. For a fair compar-
+ison, we ensure that all networks have the same depth and
+similar number of trainable parameters. Results are shown
+in table 1. Naively concatenating the features from the ref-
+erence image and the test image achieves an AUC of 56.3%.
+Our Siamese-based architecture obtains better results, with
+an AUC of 61.7% and OP0.50 of 75.1%. Our modulation-
+based method further improves the results, giving an abso-
+
+Baseline Modulation Concatenation
+(Block 3&4)
+
+(Block 3&4) (Block 3&4)
+
+Siamese Modulation Modulation
+(Block 4)
+
+(Block 3)
+
+(Block 3&4)
+
+OP0.50(%)
+OP0.75(%)
+AUC (%)
+
+68.3
+38.6
+56.7
+
+76.3
+48.4
+62.3
+
+67.5
+37.9
+56.3
+
+75.1
+47.6
+61.7
+
+73.4
+44.5
+60.3
+
+73.6
+38.9
+58.5
+
+Table 1. Analysis of different architectures for IoU prediction on
+the combined NFS and UAV123 datasets. For each method, we
+indicate in parenthesis the backbone feature layers that are used
+as input. The baseline approach, which does not employ a refer-
+ence branch to integrate target speciﬁc information, provides poor
+results. Among the different architectures, the modulation based
+approach, using both block 3 and 4, achieves the best results.
+
+ATOM Multi-Scale No Classif. GD GD++ No HN
+
+OP0.50(%)
+OP0.75(%)
+AUC (%)
+
+76.3
+48.4
+62.3
+
+66.2
+26.0
+53.7
+
+52.3
+35.1
+43.0
+
+74.5
+47.4
+60.9
+
+74.8
+47.3
+61.1
+
+75.9
+48.1
+61.9
+
+Table 2. Impact of each component in the proposed approach on
+the combined NFS and UAV123 datasets. We compare the target
+estimation component with the brute-force multi-scale approach
+and analyze the impact of our classiﬁcation module, online opti-
+mization strategy, and hard-negative mining scheme.
+
+lute gain of 1.2% in OP0.50 and achieves an AUC of 62.3%.
+Backbone feature layers: We evaluate the impact of using
+different feature blocks from the backbone ResNet-18 (table
+1). Using features from only Block3 leads to an AUC of
+60.3%, while only Block4 gives an AUC of 58.5%. Fus-
+ing features from both the blocks leads to a signiﬁcant im-
+provement, giving an AUC score of 62.3%. This indicates
+that Block3 and Block4 features have complementary
+information useful for predicting the IoU.
+
+4.2. Ablation Study
+
+We perform an ablation study to demonstrate the impact
+of each component in the proposed method. We use the
+same dataset and the evaluation criteria as in section 4.1.
+Target Estimation: We compare our target state estima-
+tion component, presented in section 3.1, with a brute-force
+multi-scale search approach employing only the classiﬁca-
+tion model. This approach mimics the common practice
+in correlation ﬁlter based methods, extracting features at 5
+scales with a scale ratio of 1.02. The classiﬁcation compo-
+nent is then evaluated on all scales, selecting the location
+and scale with the highest conﬁdence score as the new tar-
+get state. Results are shown in table 2. Our approach sig-
+niﬁcantly outperforms the multi-scale method by 8.6% in
+AUC. Further, our approach almost doubles the percentage
+of highly accurate bounding box predictions, as measured
+by OP0.75. These results highlight the importance of treat-
+ing target state estimation as a high-level visual task.
+Target Classiﬁcation: We investigate the impact of the
+target classiﬁcation component (section 3.2) by excluding
+it from our tracking framework. No Classif in table 2 only
+employs the target estimation module for tracking, using
+a larger search region. The resulting method achieves an
+AUC of 43.0%, almost 20% less than our approach.
+Online Optimization: We investigate the impact of the
+optimization strategy presented in algorithm 1, by compar-
+ing it with gradient descent. We use carefully tuned learning
+rate and momentum parameters for the gradient descent ap-
+proach. In the version termed GD, we run the same number
+of BackProp operations as in our algorithm, obtaining the
+same speed as of our tracker. We also compare with GD++,
+running 5 times as many iterations as in GD, thus running at
+signiﬁcantly slower frame rates. In both cases, the proposed
+Gauss-Newton approach outperforms gradient descent by
+
+4666
+
+]
+
+%
+
+i
+
+i
+
+[
+ 
+n
+o
+s
+c
+e
+r
+P
+ 
+p
+a
+l
+r
+e
+v
+O
+
+90
+
+80
+
+70
+
+60
+
+50
+
+40
+
+30
+
+20
+
+10
+
+0
+
+0
+
+Success plot
+
+ATOM [59.0]
+UPDT [54.2]
+CCOT [49.2]
+ECO [47.0]
+MDNet [42.5]
+HDT [40.0]
+DaSiamRPN [39.5]
+FCNT [39.3]
+SRDCF [35.3]
+BACF [34.2]
+
+0.2
+
+0.4
+
+0.6
+Overlap threshold
+
+(a) NFS
+
+90
+
+80
+
+70
+
+60
+
+50
+
+40
+
+30
+
+20
+
+10
+
+Success plot
+
+ATOM [65.0]
+DaSiamRPN [58.4]
+SiamRPN [57.1]
+UPDT [55.0]
+ECO [53.7]
+CCOT [51.7]
+SRDCF [47.3]
+Staple [45.3]
+ASLA [41.5]
+SAMF [40.3]
+
+]
+
+%
+
+i
+
+i
+
+[
+ 
+n
+o
+s
+c
+e
+r
+P
+ 
+p
+a
+l
+r
+e
+v
+O
+
+0.8
+
+1
+
+0
+
+0
+
+0.2
+
+0.4
+
+0.6
+Overlap threshold
+
+0.8
+
+1
+
+(b) UAV123
+
+Figure 4. Success plots on NFS (a) and UAV123 (b). In both cases,
+our approach improves the state-of-the-art by a large margin.
+
+Staple SAMF CSRDCF ECO DaSiam- SiamFC CFNet MDNet UPDT ATOM
+
+[1]
+
+47.0
+Precision (%)
+Norm. Prec. (%) 60.3
+Success (%)
+52.8
+
+[20]
+
+47.7
+59.8
+50.4
+
+[22]
+
+48.0
+62.2
+53.4
+
+[4] RPN [39]
+
+[2]
+
+49.2
+61.8
+55.4
+
+41.3
+60.2
+56.8
+
+53.3
+66.6
+57.1
+
+[34]
+
+53.3
+65.4
+57.8
+
+[26]
+
+56.5
+70.5
+60.6
+
+[3]
+
+55.7
+70.2
+61.1
+
+64.8
+77.1
+70.3
+
+Table 3. State-of-the-art comparison on the TrackingNet test set
+in terms of precision, normalized precision, and success. Our ap-
+proach signiﬁcantly outperforms UPDT, achieving a relative gain
+of 15% in terms of success.
+
+more than 1.2% AUC score (Table 2). Note that even a 5-
+fold increase of iterations does not provide any signiﬁcant
+improvement (only 0.2%), indicating slow convergence.
+Hard Negative Mining: We evaluate our method without
+the Hard Negative mining component (section 3.3), result-
+ing in an AUC of 61.9%. This suggests the hard negative
+mining adds some robustness (0.4% AUC) to our tracker.
+
+4.3. State of the art Comparison
+
+We present the comparison of our tracker with state-of-
+
+the-art methods on ﬁve challenging tracking datasets.
+Need For Speed [9]: We evaluate on the 30 FPS version
+of the dataset. Figure 4a shows the success plot over all the
+100 videos, reporting AUC scores in the legend. CCOT [7]
+and UPDT [3], both based on correlation ﬁlters, achieve
+AUC scores of 49.2% and 54.2% respectively. Our tracker
+signiﬁcantly outperforms UPDT with a relative gain of 9%.
+UAV123 [24]:
+Figure 4b displays the success plot over
+all the 123 videos. DaSiamRPN [39] and its predeces-
+sor SiamRPN [18] employ a target estimation component
+based on bounding box regression. Compared to other ap-
+proaches, DaSiamRPN achieves a superior AUC of 58.4%,
+owing to its accuracy. Our tracker, employing an overlap
+maximization strategy for target estimation, signiﬁcantly
+outperforms DaSiamRPN by achieving an AUC of 65.0%.
+TrackingNet [25]:
+This is a recently introduced large-
+scale dataset consisting of real-world videos sampled from
+YouTube. The trackers are evaluated using an online eval-
+uation server on a test set of 511 videos. Table 3 shows
+the results in terms of precision, normalized precision, and
+success.
+In terms of precision and success, MDNet [26]
+achieves scores of 56.5% and 60.6% respectively. Our
+tracker outperforms MDNet with relative gains of 14% and
+
+STRCF SINT ECO DSiam StructSiam SiamFC VITAL MDNet DaSiam- ATOM
+
+[19]
+
+[32]
+
+[4]
+
+[10]
+
+Norm. Prec. (%) 34.0
+Success (%)
+30.8
+
+35.4 33.8
+31.4 32.4
+
+40.5
+33.3
+
+[38]
+
+41.8
+33.5
+
+[2]
+
+42.0
+33.6
+
+[30]
+
+45.3
+39.0
+
+[26] RPN[39]
+
+46.0
+39.7
+
+49.6
+41.5
+
+57.6
+51.5
+
+Table 4. State-of-the-art comparison on the LaSOT dataset in terms
+of normalized precision and success.
+
+DLSTpp SASiamR CPT DeepSTRCF DRT RCO UPDT DaSiam- MFT LADCF ATOM
+
+[17]
+
+[11]
+
+[17]
+
+[19]
+
+[31]
+
+[17]
+
+[3] RPN [39]
+
+[17]
+
+[36]
+
+EAO
+0.325
+Robustness 0.224
+Accuracy
+0.543
+
+0.337
+0.258
+0.566
+
+0.339
+0.239
+0.506
+
+0.345
+0.215
+0.523
+
+0.356 0.376 0.378
+0.201 0.155 0.184
+0.519 0.507 0.536
+
+0.383
+0.276
+0.586
+
+0.385
+0.140
+0.505
+
+0.389
+0.159
+0.503
+
+0.401
+0.204
+0.590
+
+Table 5. State-of-the-art comparison on the public VOT2018
+dataset in terms of expected average overlap (EAO), robustness
+(tracking failure), and accuracy. Our tracker outperforms all the
+previous methods in terms of EAO.
+
+16% in terms of precision and success respectively.
+LaSOT [8]: We evaluate our approach on the test split
+consisting of 280 videos. Table 4 shows the results in terms
+of normalized precision and success. Among previous ap-
+proaches, DaSiamRPN achieves the best success scores.
+Our approach signiﬁcantly outperforms DaSiamRPN with
+an absolute gain of 10.0% in success.
+VOT2018 [17]: This dataset consists of 60 videos and
+the performance is evaluated in terms of robustness (failure
+rate) and accuracy (average overlap in the course of suc-
+cessful tracking). The two measures are merged in a sin-
+gle metric, Expected Average Overlap (EAO), which pro-
+vides the overall performance ranking. Table 5 shows the
+comparison of our approach with the top-10 trackers in the
+VOT2018 competition [17]. Among the top trackers, only
+DaSiamRPN uses an explicit target state estimation compo-
+nent, achieving higher accuracy compared to its DCF-based
+counterparts like LADCF [36] and MFT. Our approach
+ATOM achieves the best accuracy, while having competi-
+tive robustness. Further, our tracker obtains the best EAO
+score of 0.401, with a relative gain of 3% over LADCF.
+
+5. Conclusions
+
+We propose a novel tracking architecture with explicit
+components for target estimation and classiﬁcation. The es-
+timation component is trained ofﬂine on large-scale datasets
+to predict the IoU overlap between the target and a bound-
+ing box estimate. Our architecture integrates target-speciﬁc
+knowledge by performing feature modulation. The clas-
+siﬁcation component consists of a two-layer fully convo-
+lutional network head and is trained online using a dedi-
+cated optimization approach. Comprehensive experiments
+are performed on four tracking benchmarks. Our ap-
+proach provides accurate target estimation while being ro-
+bust against distractor objects in the scene, outperforming
+previous methods on all four datasets.
+Acknowledgments: This work was supported by SSF
+(SymbiCloud), Swedish Research Council (EMC2, grant
+2018-04673), ELLIIT, and WASP.
+
+4667
+
+References
+
+[1] L. Bertinetto, J. Valmadre, S. Golodetz, O. Miksik, and
+P. H. S. Torr. Staple: Complementary learners for real-time
+tracking. In CVPR, 2016. 8
+
+[2] L. Bertinetto, J. Valmadre, J. F. Henriques, A. Vedaldi, and
+P. H. Torr. Fully-convolutional siamese networks for object
+tracking. In ECCV workshop, 2016. 2, 8
+
+[3] G. Bhat, J. Johnander, M. Danelljan, F. S. Khan, and M. Fels-
+berg. Unveiling the power of deep tracking. In ECCV, 2018.
+1, 2, 6, 8
+
+[4] M. Danelljan, G. Bhat, F. Shahbaz Khan, and M. Felsberg.
+ECO: efﬁcient convolution operators for tracking. In CVPR,
+2017. 1, 5, 6, 8
+
+[5] M. Danelljan, G. H¨ager, F. S. Khan, and M. Felsberg. Dis-
+criminative scale space tracking. TPAMI, 39(8):1561–1575,
+2017. 2
+
+[6] M. Danelljan, G. H¨ager, F. Shahbaz Khan, and M. Felsberg.
+Learning spatially regularized correlation ﬁlters for visual
+tracking. In ICCV, 2015. 1, 2
+
+[7] M. Danelljan, A. Robinson, F. Khan, and M. Felsberg. Be-
+yond correlation ﬁlters: Learning continuous convolution
+operators for visual tracking. In ECCV, 2016. 2, 5, 8
+
+[8] H. Fan, L. Lin, F. Yang, P. Chu, G. Deng, S. Yu, H. Bai,
+Y. Xu, C. Liao, and H. Ling. Lasot: A high-quality bench-
+mark for large-scale single object tracking. In CVPR, 2019.
+2, 4, 6, 8
+
+[9] H. K. Galoogahi, A. Fagg, C. Huang, D. Ramanan, and
+S. Lucey. Need for speed: A benchmark for higher frame
+rate object tracking. In ICCV, 2017. 2, 6, 7, 8
+
+[10] Q. Guo, W. Feng, C. Zhou, R. Huang, L. Wan, and S. Wang.
+Learning dynamic siamese network for visual object track-
+ing. In ICCV, 2017. 8
+
+[11] A. He, C. Luo, X. Tian, and W. Zeng. Towards a better match
+In ECCV
+
+in siamese network based visual object tracker.
+workshop, 2018. 8
+
+[12] K. He, X. Zhang, S. Ren, and J. Sun. Delving deep into
+rectiﬁers: Surpassing human-level performance on imagenet
+classiﬁcation. In ICCV, 2015. 5
+
+[13] J. F. Henriques, R. Caseiro, P. Martins, and J. Batista. High-
+speed tracking with kernelized correlation ﬁlters. TPAMI,
+37(3):583–596, 2015. 1, 2
+
+[14] P. Jaccard. The distribution of the ﬂora in the alpine zone.
+
+New Phytologist, 11(2):37–50, 1912. 2
+
+[15] B. Jiang, R. Luo, J. Mao, T. Xiao, and Y. Jiang. Acquisition
+of localization conﬁdence for accurate object detection. In
+ECCV, 2018. 2, 3, 5
+
+[16] D. P. Kingma and J. Ba. Adam: A method for stochastic
+
+optimization. In ICLR, 2014. 5
+[17] M. Kristan, A. Leonardis,
+
+J. Matas, M. Felsberg,
+R. Pfugfelder, L. C. Zajc, T. Vojir, G. Bhat, A. Lukezic,
+A. Eldesokey, G. Fernandez, and et al. The sixth visual ob-
+ject tracking vot2018 challenge results. In ECCV workshop,
+2018. 1, 2, 6, 8
+
+[19] F. Li, C. Tian, W. Zuo, L. Zhang, and M. Yang. Learn-
+ing spatial-temporal regularized correlation ﬁlters for visual
+tracking. In CVPR, 2018. 8
+
+[20] Y. Li and J. Zhu. A scale adaptive kernel correlation ﬁlter
+tracker with feature integration. In ECCV workshop, 2014.
+2, 8
+
+[21] T. Lin, M. Maire, S. J. Belongie, L. D. Bourdev, R. B. Gir-
+shick, J. Hays, P. Perona, D. Ramanan, P. Doll´ar, and C. L.
+Zitnick. Microsoft COCO: common objects in context. In
+ECCV, 2014. 4
+
+[22] A. Lukezic, T. Voj´ır, L. C. Zajc, J. Matas, and M. Kris-
+tan. Discriminative correlation ﬁlter tracker with channel and
+spatial reliability. IJCV, 126(7):671–688, 2018. 1, 8
+
+[23] C. Ma, J.-B. Huang, X. Yang, and M.-H. Yang. Hierarchical
+convolutional features for visual tracking. In ICCV, 2015. 2
+[24] M. Mueller, N. Smith, and B. Ghanem. A benchmark and
+
+simulator for uav tracking. In ECCV, 2016. 2, 6, 7, 8
+
+[25] M. M¨uller, A. Bibi, S. Giancola, S. Al-Subaihi, and
+B. Ghanem. Trackingnet: A large-scale dataset and bench-
+mark for object tracking in the wild. In ECCV, 2018. 2, 4, 6,
+8
+
+[26] H. Nam and B. Han. Learning multi-domain convolutional
+neural networks for visual tracking. In CVPR, 2016. 2, 6, 8
+[27] J. Redmon and A. Farhadi. Yolo9000: Better, faster, stronger.
+
+In CVPR, 2017. 3
+
+[28] S. Ren, K. He, R. B. Girshick, and J. Sun. Faster R-CNN:
+towards real-time object detection with region proposal net-
+works. In NIPS, 2015. 3
+
+[29] J. R. Shewchuk. An introduction to the conjugate gradient
+method without the agonizing pain. Technical report, Pitts-
+burgh, PA, USA, 1994. 5
+
+[30] Y. Song, C. Ma, X. Wu, L. Gong, L. Bao, W. Zuo, C. Shen,
+R. W. H. Lau, and M.-H. Yang. VITAL: Visual tracking via
+adversarial learning. In CVPR, 2018. 8
+
+[31] C. Sun, D. Wang, H. Lu, and M. Yang. Correlation tracking
+In CVPR,
+
+via joint discrimination and reliability learning.
+2018. 1, 5, 8
+
+[32] R. Tao, E. Gavves, and A. W. M. Smeulders. Siamese in-
+
+stance search for tracking. In CVPR, 2016. 8
+
+[33] L. Trottier, P. Gigu`ere, and B. Chaib-draa. Parametric expo-
+nential linear unit for deep convolutional neural networks. In
+ICMLA, 2017. 6
+
+[34] J. Valmadre, L. Bertinetto, J. F. Henriques, A. Vedaldi, and
+P. H. S. Torr. End-to-end representation learning for correla-
+tion ﬁlter based tracking. In CVPR, 2017. 1, 8
+
+[35] Y. Wu, J. Lim, and M.-H. Yang. Object tracking benchmark.
+
+TPAMI, 37(9):1834–1848, 2015. 2
+
+[36] T. Xu, Z. Feng, X. Wu, and J. Kittler. Learning adaptive dis-
+criminative correlation ﬁlters via temporal consistency pre-
+serving spatial feature selection for robust visual tracking.
+CoRR, abs/1807.11348, 2018. 8
+
+[37] J. Zhang, S. Ma, and S. Sclaroff. MEEM: robust tracking
+via multiple experts using entropy minimization. In ECCV,
+2014. 1
+
+[18] B. Li, J. Yan, W. Wu, Z. Zhu, and X. Hu. High performance
+In
+
+visual tracking with siamese region proposal network.
+CVPR, 2018. 2, 6, 8
+
+[38] Y. Zhang, L. Wang, J. Qi, D. K. Wang, M. Feng, and H. Lu.
+Structured siamese network for real-time visual tracking. In
+ECCV, 2018. 8
+
+4668
+
+[39] Z. Zhu, Q. Wang, L. Bo, W. Wu, J. Yan, and W. Hu.
+Distractor-aware siamese networks for visual object track-
+ing. In ECCV, 2018. 1, 2, 4, 6, 8
+
+4669
+
+

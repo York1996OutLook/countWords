@@ -1,0 +1,1441 @@
+Self-critical n-step Training for Image Captioning
+
+Junlong Gao1, Shiqi Wang4, Shanshe Wang∗2,3, Siwei Ma2,3, and Wen Gao2,3
+
+1Peking University Shenzhen Graduate School
+
+2Institute of Digital Media, Peking University
+
+3Peng Cheng Laboratory
+
+4Department of Computer Science, City University of Hong Kong, Hong Kong
+
+Abstract
+
+Existing methods for image captioning are usually
+trained by cross entropy loss, which leads to exposure bias
+and the inconsistency between the optimizing function and
+evaluation metrics. Recently it has been shown that these
+two issues can be addressed by incorporating techniques
+from reinforcement learning, where one of the popular tech-
+niques is the advantage actor-critic algorithm that calcu-
+lates per-token advantage by estimating state value with a
+parametrized estimator at the cost of introducing estima-
+tion bias.
+In this paper, we estimate state value without
+using a parametrized value estimator. With the properties
+of image captioning, namely, the deterministic state transi-
+tion function and the sparse reward, state value is equiva-
+lent to its preceding state-action value, and we reformulate
+advantage function by simply replacing the former with the
+latter. Moreover, the reformulated advantage is extended to
+n-step, which can generally increase the absolute value of
+the mean of reformulated advantage while lowering vari-
+ance. Then two kinds of rollout are adopted to estimate
+state-action value, which we call self-critical n-step train-
+ing. Empirically we ﬁnd that our method can obtain better
+performance compared to the state-of-the-art methods that
+use the sequence level advantage and parametrized estima-
+tor respectively on the widely used MSCOCO benchmark.
+
+1. Introduction
+
+Image captioning aims at generating natural captions au-
+tomatically for images, which is of great signiﬁcance in
+scene understanding. It is a very challenging task, which
+requires to recognize important objects in the image, as
+well as their attributes and relationships between each other,
+such that they can be ﬁnally described properly in natural
+
+∗Corresponding author
+
+language. The ability of the machine to mimic human in
+expressing rich information in natural language with correct
+grammar is important since it can be applied to human-robot
+interaction and blind users guiding.
+
+Inspired by the recently introduced encoder-decoder
+framework for machine translation in [6], most recent works
+in image captioning have adopted this paradigm to gener-
+ate captions for images [24]. In general, an encoder, e.g.
+convolutional neural network (CNN), encode images to vi-
+sual features, while a decoder, e.g. long short term memory
+(LSTM) [10], decodes the visual features to generate cap-
+tions. These methods are trained in an end-to-end manner
+to minimize cross entropy loss, i.e. maximize the likelihood
+of each ground-truth word given the preceding ground-truth
+word, which is also known as “Teacher Forcing” [14].
+
+The ﬁrst problem of cross entropy loss is that it will lead
+to “exposure bias”, since in the training stage, the model is
+only fed with ground-truth word at each time step, while in
+the testing stage, the model is fed with the previously pre-
+dicted word. This discrepancy between training and testing
+easily results in error accumulation during generation, as
+the model is not exposed to its predictions during training
+and difﬁcult to handle the errors which never occur in the
+training stage. In order to handle exposure bias, Bengio et
+al. [4] feed back the model own predictions as input with
+scheduled sampling, while Lamb et al. [14] proposed the “
+Professor Forcing” on top of the “Teacher Forcing”.
+
+The second problem of cross entropy loss is that the gen-
+erated sentences are evaluated in the testing stage by non-
+differentiable metrics, such as BLEU 1-2-3-4 [20], ROUGE
+[15], METEOR [3], CIDEr [23], SPICE [1], while dur-
+ing training the model is trained to minimize cross entropy
+loss, which is the inconsistency between the optimizing
+function and evaluation metrics. The methods proposed
+in [4, 14] cannot address this inconsistency. Recently, it
+has shown that policy gradient algorithm in reinforcement
+learning (RL) can be trained to avoid exposure bias and di-
+rectly optimize such non-differentiable evaluation metrics
+
+6300
+
+[17, 21, 22, 29]. In this way, the model can be exposed to its
+own predictions during training. However, the algorithms
+in [22] use sequence level advantage that implicitly makes
+an invalid assumption that every token makes the same con-
+tribution to the whole sequence. Many works [17, 21, 29]
+have been proposed to model per-token advantage. How-
+ever, they utilize a parametrized value/baseline estimator at
+the cost of introducing estimation bias.
+
+In this paper, we improve the advantage actor-critic algo-
+rithm to estimate per-token advantage without introducing
+the biased parametrized value estimator. With the properties
+of image captioning, namely, the deterministic state transi-
+tion function and the sparse reward, state value is equiv-
+alent to its preceding state-action value, and we reformu-
+late advantage function by simply replacing the former with
+the latter. Since state-action value cannot be precisely esti-
+mated, the model may easily converge to the local maxima
+trained with the reformulated advantage function. There-
+fore, we propose n-step reformulated advantage function,
+which can generally increase the absolute value of the mean
+of reformulated advantage while lowering variance. In or-
+der to estimate state-action value, we use Monte Carlo roll-
+outs inspired by [17, 28] and max-probability rollout in-
+spired by [22], which is termed as self-critical n-step train-
+ing. According to the empirical results, our model improves
+the performance of image captioning compared to the meth-
+ods that use the sequence level advantage and parametrized
+estimator respectively.
+
+Overall, we make the following contributions in this pa-
+per: (1) with the special properties of image captioning, we
+ﬁnd the equivalence between state value and its preceding
+state-action value, and reformulate the original advantage
+function for each action; (2) on top of the reformulated ad-
+vantage function, we extend to n-step reformulated advan-
+tage function to generally increase the the absolute value
+of the mean of reformulated advantage while lowering vari-
+ance; (3) we utilize two kinds of rollout to estimate state-
+action value function to perform self-critical training.
+
+2. Related Work
+
+Many different models have been developed for im-
+age captioning, which can be divided into two categories:
+template-based methods [8, 13] and neural network-based
+methods. Since our method adopts neural network archi-
+tecture, we mainly introduce methods in this vein. Efforts
+of this line have been devoted to two directions: attention
+mechanism and reinforcement learning.
+
+2.1. Attention Mechanism
+
+The encoder-decoder framework of machine translation
+[6] was ﬁrstly introduced by [24], which feeds the last fully
+connected feature of the image into RNN to generate the
+caption. Xu et al. [26] proposed soft and hard attention
+
+mechanisms to model the human’s eye focusing on differ-
+ent regions in the image when generating different words.
+This work is further improved in [2, 5, 18, 22]. In [18], they
+introduced a visual sentinel to allow the attention module
+to selectively attend to visual and language features. An-
+derson et al. [2] adopted a bottom-up module, that uses ob-
+ject detection to detect objects in the image, and a top-down
+module that utilizes soft attention to dynamically attend to
+these object features. Chen et al. [5] proposed a spatial and
+channel-wise attention model to attend to visual features.
+Rennie et al. [22] proposed FC model and Att2in models
+which achieve good performance.
+
+2.2. Reinforcement Learning
+
+Recently a few works use reinforcement learning-based
+methods to address the exposure bias and the mismatch be-
+tween the optimizing function and the non-differentiable
+evaluation metrics [17,21,22,29] in image captioning. Ran-
+zato et al. [21] ﬁrstly introduced REINFORCE algorithm
+[25] to sequence training with RNNs. However, REIN-
+FORCE algorithm often results in large variance in gradi-
+ent estimation. To lower the variance of the policy gradi-
+ent, many works have introduced different kinds of baseline
+into REINFORCE algorithm. For example, the reward of
+the caption generated by the inference algorithm is adopted
+as the baseline in [22], which uses sequence level advan-
+tage while the per-token advantage was not considered. A
+variety of algorithms proposed in [17, 21, 29] aim at mod-
+eling the per-token advantage. Ranzato et al. [21] used a
+baseline reward parametric estimator. In [17], they used FC
+layers to predict the baseline and used Monte Carlo rollouts
+to predict the state-action value function. In [29], they com-
+bined the advantage actor-critic algorithm and temporal dif-
+ference learning, and used another RNN to predict the state
+value function. However, the value/baseline estimator was
+used in [17,21,29], which introduces estimation bias. In this
+paper, we utilize the properties of image captioning to refor-
+mulate the advantage actor-critic method and use different
+kinds of rollout to estimate the state-action value function
+to calculate per-token advantage without introducing bias.
+
+3. Methodology
+
+3.1. Training with cross entropy loss
+
+Given an image I, the goal of image captioning is to gen-
+erate a token sequence A = {a1, a2, ..., aT }, at ∈ A, where
+A is the dictionary. The captioning model predicts a token
+sequence starting with a0 and ending with aT , where a0 is
+a special token BOS indicating the start of the sentence, and
+aT is also a special token EOS indicating the end of the sen-
+tence. In order to simplify the formulas, T is denoted as the
+total length of a generated sequence, ignoring the fact that
+generated token sequences have different lengths. We use
+
+6301
+
+the standard encoder-decoder architecture for image cap-
+tioning, where a CNN as an encoder, encodes an image I
+to an image feature IF , and a RNN can be adopted as a de-
+coder to decode IF to output a token sequence A. In this
+work, we adopt the Att2in model proposed by [22]. Given a
+T }, the model parame-
+ground-truth sequence {a∗
+ters θ are trained to minimize the cross entropy loss (XENT)
+
+2, ..., a∗
+
+1, a∗
+
+L (θ) = −
+
+T
+
+Xt=1
+
+log (πθ (a∗
+
+t |a∗
+
+1:t−1, IF ))
+
+(1)
+
+where πθ (at |a1:t−1, IF ) is a probability distribution
+of the token at given the preceding generated tokens
+{a1, a2, ..., at−1} and the image feature IF .
+
+3.2. Training using policy gradient
+
+Problem formulation. To address both problems of the
+cross entropy loss described above, namely, the exposure
+bias and the inconsistency between the optimizing function
+and evaluation metrics, we incorporate the reinforcement
+learning into image captioning. Formally, we consider cap-
+tioning process as a ﬁnite Markov process (MDP). Our cap-
+tioning model introduced above can be viewed as an agent,
+which interacts with an environment (words and images).
+In the MDP setting {S, A, P, R, γ}, S is a state space, A is
+an action space as well as the dictionary, P (st+1|st, at) is
+state transition probability, R(st, at) is reward function and
+γ ∈ (0, 1] is the discounted factor. The agent selects an
+action, that corresponds to generating a token, from a con-
+ditional probability distribution π (a |s ) called policy.
+In
+policy gradient algorithms, we consider a set of candidate
+policies πθ (a |s ) parametrized by θ. The state st ∈ S is
+considered as a list composing of the image feature IF and
+the tokens/actions {a0, a1, a2, ..., at−1} generated so far:
+
+st = {IF , a0, a1, ..., at−1}
+
+(2)
+
+Here we deﬁne the initial state s0 = {IF }. At each time
+step, the RNN consumes st and uses the hidden state of
+RNN to generate the next token at. With the deﬁnition of
+the state, we have the next state st+1 = {st, at}: we simply
+append the token at to st. According to the process, the
+state transition function P can be called deterministic state
+transition function. Formally, we have:
+
+P (st+1|st, at) ≡ 1
+
+(3)
+
+When the state st is transferred to the next state st+1
+by selecting action at, the agent receives reward rt issued
+from the environment. However, in image captioning, we
+can only obtain a reward r = R(sT , aT ) = R (a1:T ) when
+EOS token is generated and {IF , a0} is not considered in
+reward calculation. The reward r is computed by evaluat-
+ing the generated complete sentences compared with corre-
+sponding ground-truth sentences under an evaluation met-
+
+ric. Therefore, we deﬁne the reward for each action as fol-
+lows:
+
+rt = (cid:26) 0, t < T
+
+r, t = T
+
+(4)
+
+In reinforcement learning, a value function is a predic-
+tion of the expected, accumulative, γ discounted future re-
+ward, measuring how good each state, or state-action pair,
+is. We deﬁne the state-action value function Qπ(st, at) and
+the state value function V π(st) of the policy π as follows:
+
+Qπ(st, at) = Est+1,at+1,...∼π (cid:20) T
+Pl=0
+γlrt+l |St = st(cid:21)
+V π(st) = Eat,st+1,...∼π (cid:20) T
+Pl=0
+
+γlrt+l |St = st, At = at(cid:21)
+
+(5)
+where Qπ(st, at) is the expected γ discounted accumulated
+reward under policy π starting from taking action at at state
+st, and V π(st) is the expected γ discounted accumulated
+reward starting from state st. To simplify the notation, we
+denote Eat,st+1,...∼π [·] and Est+1,at+1,...∼π [·] with Eπ [·]
+in the rest of paper.
+It is obvious that the difference be-
+tween Qπ(st, at) and V π(st) lies in whether taking the
+action at or not at state st when calculating the accumu-
+lated reward.
+In reinforcement learning, the agent aims
+to maximize the circumulative reward L (θ) = V π(s0) =
+Eπ hPT
+t=1 γt−1rti by estimating the gradient ∇θL (θ) and
+updating its parameters, instead of minimizing the cross en-
+tropy loss as Eq. (1).
+
+In policy gradient methods, the gradient ∇θL (θ) can be
+
+written as:
+
+∇θL (θ) = Eπ [(Qπ(st, at) − b(st)) ∇θ log πθ (at|st)]
+
+(6)
+
+where the baseline b(st) can be any arbitrary function, as
+long as it does not depend on action at. This baseline does
+not change the expected gradient, but can decrease the vari-
+ance of the gradient estimate signiﬁcantly. This algorithm
+is known as REINFORCE with a Baseline. Using V π(st)
+as the baseline b(st), the algorithm is changed to advantage
+actor-critic (A2C) algorithm as follows:
+
+∇θL (θ) = Eπ [Aπ(st, at)∇θ log πθ (at|st)]
+
+(7)
+
+In Eq. (7), Aπ (st, at) = Qπ(st, at) − V π(st) is called ad-
+vantage function. This equation intuitively guides the agent
+to an evolution direction that increases the probability of
+better-than-average actions and decrease the probability of
+worse-than-average actions [29].
+1-step reformulated advantage function. Image caption-
+ing is a special case in reinforcement learning, for its state
+transition is deterministic, while other applications can have
+different next states with a certain probability, such as Atari
+Games. Here we use this property to reformulate Eq. (7).
+
+6302
+
+that it helps the agent to increase the probability of the ac-
+tion which has larger expected accumulated rewards com-
+pared to that of preceding action and decrease the proba-
+bility of the action which has smaller expected accumulate
+rewards compared to that of preceding action.
+
+The most straightforward way to simulate the environ-
+ment with the current policy π is to obtain a Monte Carlo
+trajectory {(st, at, rt)}T
+t=1 from the multinomial strategy
+and estimate the gradient ∇θL (θ):
+
+ˆ∇θL (θ) =
+
+1
+T
+
+T
+
+Xt=1
+
+ˆAπ
+
+R(st, at)∇θ log πθ (at|st)
+
+(12)
+
+R (st, at) = ˆQπ(st, at) − ˆQπ(st−1, at−1), and
+
+where ˆAπ
+ˆQπ(st, at) is an empirical estimate of Qπ(st, at).
+n-step reformulated advantage function. According to
+the property of Eq. (11) described above, the model encour-
+ages tokens better than its preceding token in terms of the
+value, and surpress the worse tokens. Though Eq. (11) is
+a greedy algorithm, Eq. (11) can guide the evolution direc-
+tion of the model towards the global maxima only when
+state-action value is estimated precisely. Image captioning
+is considered as a model-free reinforcement learning task,
+which uses rollouts or function approximation to estimate
+state-action value. However, both methods, where the for-
+mer suffers from a large variance and the latter introduces
+estimation bias, cannot predict absolutely precise value that
+may turn out to be wrong to encourage or suppress a to-
+ken in this strict greedy strategy. Therefore, we introduce
+n-step reformulated advantage function. In n-step reformu-
+lated advantage function, we view n steps as a large step to
+perform Eq. (11). Each step within the large step shares the
+n-step reformulated advantage ˆAπ
+
+R(st, at) as follows:
+
+ˆAπ
+
+R (st, at) = ˆQπ(sτ +n, aτ +n) − ˆQπ(sτ , aτ )
+
+(13)
+
+where τ = ⌊t/n⌋ n and ⌊·⌋ is denoted as a round-down func-
+tion, and n ranges from 1 to T which uniﬁes the two ex-
+tremes, namely, 1-step and T -step.
+In the n-step refor-
+mulated advantage, n steps show a much clearer evolution
+trend of the Monte Carlo trajectory from the multinomial
+strategy than 1 step, and the values of neighboring states
+in n-step have a more precise margin than that in 1-step,
+except that state-action value estimation use the same strat-
+egy of Monte Carlo trajectory that samples one sequence
+from multinomial strategy. If they use the same strategy,
+estimated values of each time step are from the same distri-
+bution and thus larger n cannot enlarge the margin of neigh-
+boring state values. Therefore, except for that particular
+case, as n increases, the absolute value of the mean and the
+variance of reformulated advantage will be increased and
+reduced respectively.
+
+However, as n increases, per-token advantage is in-
+evitably gradually lost until a sequence level advantage of
+
+6303
+
+Figure 1. Each state-action value is estimated by the average re-
+wards of K rollouts sequences (K = 1) or a reward of a max-
+probability rollout. The advantage function in our method is esti-
+mated by the current state-action value minus the preceding n-step
+state-action value. The tokens in green and yellow are the special
+tokens BOS and EOS. The tokens in white are the Monte Carlo tra-
+jectory and the tokens in blue are continuation rollout tokens for
+state-action value estimation. The n steps in the ﬁgure means that
+the model performs rollouts every n steps in n-step reformulated
+advantage function.
+
+With the deﬁnition of Qπ(st, at) and V π(st) in Eq. (5),
+
+we have
+
+Qπ (st−1, at−1) = rt−1 + γ Xst ∈S
+
+P (st |st−1, at−1 ) V π(st)
+
+(8)
+Due to the deterministic state transition function described
+above in Eq. (3), Eq. (8) can be rewritten as
+
+Qπ (st−1, at−1) = rt−1 + γV π(st)
+
+(9)
+
+In this paper, we set discounted factor γ = 1. According
+to reward function of Eq. (4), when t ≤ T , we have rt−1 =
+0. Then V π(st) can be written as
+
+V π(st) = Qπ (st−1, at−1)
+
+(10)
+
+Eq. (10) indicates that given the two properties of image
+captioning, namely the deterministic state transition func-
+tion and the reward function, state value is equivalent to its
+preceding state-action value. Then we can rewrite Eq. (7)
+by incorporating Eq. (10) into Eq. (7) as follows:
+
+∇θL (θ) = Eπ [Aπ
+
+R(st, at)∇θ log πθ (at|st)]
+
+(11)
+
+where Aπ
+R (st, at) = Qπ(st, at) − Qπ(st−1, at−1) is the re-
+fomulated advantage function from Aπ (st, at) in Eq. (7).
+Therefore, Qπ(st−1, at−1) is a new baseline of Qπ(st, at)
+instead of V π(st). Each state-action value uses its preced-
+ing state-action value as baseline, such that it is termed as
+1-step reformulated advantage function.
+
+In our approach, the agent aims at maximizing Eq. (11)
+rather than Eq. (7). Eq. (11) has an intuitive interpretation
+
+n = T . Therefore, different methods of estimating state-
+action value have different distributions and have different
+most suitable n that performs best in balancing the approx-
+imation of per-token reformulated advantage and the im-
+provement on the absolute mean of reformulated advantage.
+In general, the performance of small n is better than that of
+n = T .
+Estimating the state-action value function. Accord-
+ing to Eq. (13), we only need to estimate ˆQπ(st, at).
+Here, we propose two methods to estimate non-parametric
+ˆQπ(st, at): use K Monte Carlo rollouts inspired by [17,
+28] and use inference algorithm (max-probability roll-
+out) inspired by [22]. These processes are illustrated as
+Fig. 1. Since Qπ(st, at) is an expected accumulated re-
+ward, K Monte Carlo is more stable and precise than max-
+probability rollout to estimate Qπ(st, at) with additional
+computation cost of K − 1 rollouts. In 1-step reformulated
+advantage function, the model rollouts every steps, while
+in n-step reformulated advantage function, the model roll-
+outs every n steps. Therefore, the model adopts self-critical
+training [22], which uses rollouts to estimate value func-
+tions as a critic.
+
+In K Monte Carlo rollouts, we sample K continuations
+of the sequence {st, at} to obtain {at+1, at+2, ..., aT },
+which means that the subsequent tokens are sampled from
+the multinomial strategy. When γ = 1, according to Eq. (4)
+and Eq. (5), the state-action value function can be computed
+by the average of the K rewards
+
+ˆQπ(st, at) =
+
+1
+K
+
+K
+
+Xk=1
+
+R(cid:16)a1:t; ak
+
+t+1:T(cid:17)
+
+(14)
+
+where R(cid:0)a1:t; ak
+t+1:T(cid:1) is denoted as the reward of the k’th
+continuation sampled after {st, at} from the multinomial
+strategy. In our experiment, we set K = 5. A slight dif-
+ference between our method and [17, 28] is that we need to
+rollout from {s0, a0} to estimate Qπ(s0, a0), and they do
+If K = 1, state-action value estimation and Monte
+not.
+Carlo trajectory both sample a sequence from multinomial
+strategy in each step, and thus larger n cannot enlarge the
+margin of neighboring state values as discussed above. As
+K increases, though K rollouts of estimating state-action
+value are also sampled from multinomial strategy, the mean
+reward of K can estimate more precise state-action value
+than K = 1 (i.e. state-action value estimation and Monte
+Carlo trajectory use different strategies in K > 1) and thus
+larger n will have larger absolute value of the mean of re-
+formulated advantage with lower variance.
+
+In max-probability rollout, we sample only one
+to
+obtain
+the largest
+
+{st, at}
+continuations
+{ˆat+1, ˆat+2, ..., ˆaT }, which are tokens of
+probabilities at every time step. Then we have
+
+sequence
+
+the
+
+of
+
+ˆQπ(st, at) = R (a1:t; ˆat+1:T )
+
+(15)
+
+where R (a1:t; ˆat+1:T ) means the reward of the max-
+probability rollout sequence after {st, at} under the infer-
+ence algorithm. Interestingly, SCST [22] is equivalent to T -
+step reformulated advantage function using max-probability
+rollout, i.e. SCST is a variant of ours. Here, state-action
+value estimation and Monte Carlo trajectory use different
+strategies, where the former are from max-probability strat-
+egy and the latter are from multinomial strategy. Moreover,
+max-probability strategy can always obtain better sequence
+than multinomial strategy. Therefore, though the reward of
+max-probability rollout cannot reﬂect the real state-action
+value, larger n can have larger absolute value of the mean
+of reformulated advantage with lower variance.
+
+It is worth noting that the rollout of preceding step can be
+used both in preceding token and this token with different
+effects. Here, we directly optimize CIDEr metric, i.e. R is
+CIDEr score. Moreover, only when calculating the last re-
+formulated advantage of each sequence that includes token
+EOS, we use CIDEr with EOS as a token. Otherwise, we
+use CIDEr without EOS as a token. It is because EOS is not
+a normal token of a sentence like other words but a special
+token indicating the ending of the sentence, and it is ignored
+in the standard calculation of evaluation metric scores.
+
+4. Experiments
+
+4.1. Dataset
+
+We evaluate our method on the MSCOCO dataset [16].
+For fair comparisons, we use the widely used splits from
+[11]. The training set contains 113, 287 images with 5 cap-
+tions for each image and 5K images for validation and 5K
+images for ofﬂine testing. We follow the standard practice
+to preprocess all captions, including converting all captions
+to lower case, tokenizing on white space, truncating cap-
+tions longer than 16 words, and replacing words that do not
+occur at least 5 times with UNK token resulting in 9487
+words in the dictionary. To evaluate generated caption qual-
+ity, we use the standard metrics, namely BLEU 1-2-3-4,
+ROUGE, METEOR, CIDEr, SPICE. We extract image fea-
+tures using Resnet-101 [9] without ﬁnetune.
+
+4.2. Implementation Details
+
+The embedding dimensions of the LSTM hidden, image,
+word and attention are all ﬁxed to 512 for all the models.
+We pretrain all the models under XENT loss for 30 epochs
+using ADAM [12] optimizer with default settings and ﬁxed
+learning rate 4 × 10−4. During training under XENT loss,
+our batch size is set to 80. We then run RL training with
+a ﬁxed learning rate 5 × 10−5. In RL training, we use the
+models trained under XENT loss as the pretrained model in
+order to reduce the search space, and the batch size is set to
+32. In the whole training process, we use ﬁxed dropout rate
+0.5 to prevent the models from overﬁtting.
+
+6304
+
+4.3. Experiment Conﬁguration
+
+Here are the conﬁgurations of the basic model and sev-
+eral variants of our models. This series of experiments are
+designed to explore the effects of different n-step, different
+combinations of n and K Monte Carlo rollouts versus max-
+probability rollout. Besides, we re-implement two state-of-
+the-art reinforcement learning-based model SCST [22] and
+PG-CIDEr [17], and all the hyperparameters are the same
+as those of our proposed models for fair comparison.
+
+(1) XENT is the basic model trained with cross entropy
+loss, which is then used as the pretrained model of all rein-
+forcement learning-based models.
+
+(2) For max-probabilty rollout, we conduct n-step-
+maxpro (n = 1, 2, 4) that are trained with n-step refor-
+mulated advantage throughout the whole training time. We
+also conduct models trained with different n-step succes-
+sively, e.g. 1-2-4-T -step-maxpro, T -4-2-1-step-maxpro, 1-
+2-2-step-maxpro.
+
+(3) For K Monte Carlo rollouts, we conduct 1-step-
+sample that is trained with 1-step reformulated advantage
+using K Monte Carlo rollout to estimate the state-action
+value function. We also conduct 1-2-2-step-sample.
+
+(4) SCST [22] (i.e. T -step-maxpro) uses sequence level
+advantage for every token in a sampled sequence. Here, we
+compare self-critical per-token advantage with self-critical
+sequence level advantage.
+
+(5) PG-CIDEr [17] uses K Monte Carlo rollouts with a
+parametrized estimator. Here, we compare self-critical per-
+token advantage with parametrized per-token advantage.
+
+4.4. Quantitative Analysis
+
+Performance of the Karpathy test split. In Table 1, we
+report the performance of our models, SCST [22] and PG-
+CIDEr [17] on the Karpathy test split, and all the mod-
+els are single model.
+In general, we can see that our
+models have the best performance on all metrics. Com-
+paring our basic model 1-step-maxpro and 1-step-sample
+with XENT, we obtain a signiﬁcant improvement on CIDEr
+score over XENT at a great margin from 102.1% to 115.1%
+and 115.4% of 1-step-maxpro and 1-step-sample respec-
+tively, since our basic models are reinforcement learning-
+based models and can address the exposure bias and di-
+rectly optimize the evaluation metric. In particular, the 1-
+step-sample outperform 1-step-maxpro in terms of almost
+all metrics, and we can conclude that the average reward of
+K Monte Carlo rollouts can estimate the more precise state-
+action value than max-probability rollout, which leads to
+better performance. However, 1-step-sample need to sam-
+ple K rollouts with a greater computation cost.
+
+Regarding max-probability rollout, we compare different
+n-step-maxpro in Table 1. We can see that intermediate set-
+tings n = 2, 4 attain better overall scores than two extremes
+1 and T (SCST [22]). Better performance of intermediate
+
+settings originates from the fact that they increase the ab-
+solute value of the mean of reformulated advantage while
+lowering variance in most time steps compared to n = 1,
+which are quantitatively shown in Fig. 3(a) & 3(b). Since
+rollout-based methods estimate a rough state-action value,
+when n = 1 reformulated advantage is small with large
+variance and it may turn out to be wrong to encourage or
+suppress a token in this strict greedy strategy. As n in-
+creases, the dilemma will be eased but gradually loses per-
+token advantage until a sequence level advantage of n = T .
+This implies intermediate n which balances the approxima-
+tion of per-token advantage and the improvement of the ab-
+solute value of the mean of reformulated advantage, is al-
+ways better in max-probability rollout. Moreover, differ-
+ent n or combining different n has different effects on bal-
+ancing these two conﬂicts, e.g. the performance of n = 2
+is better than that of n = 4 and close to that of 1-2-2,
+and 1-2-4-T and T -4-2-1 are both inferior to 1-2-2. We
+also show the performance curves of the Karpathy valida-
+tion split during training illustrated in Fig. 2. In Fig. 2(a)
+& 2(b), our models have an overwhelming advantage over
+SCST [22] throughout the whole training process, which
+demonstrates that self-critical per-token advantage is better
+than self-critical sequence level advantage.
+
+Regarding K Monte Carlo rollouts, 1-step-sample and
+1-2-2-step-sample are superior to PG-CIDEr [17], which
+demonstrates that self-critical per-token advantage is bet-
+ter than parametrized per-token advantage in Table 1 and
+Fig. 2(c) & 2(d).
+
+Comparing different effects of n-step towards max-
+probability rollout and K Monte Carlo rollouts, we ﬁnd that
+large n can increase the absolute value of the mean of refor-
+mulated advantage while lowering the variance using these
+two kinds of rollouts in Fig. 3. However, 1-2-2-step-maxpro
+is superior to 1-step-maxpro and 1-2-2-step-sample is close
+to 1-step-sample in Table 1. Therefore, n-step (n = 2) is
+more effective in max-probability rollout than in K Monte
+Carlo rollouts. It is possible because degrees of change in
+the absolute value of the mean and the variance of refor-
+mulated advantage across different n are relatively small in
+K Monte Carlo rollouts and thus possibly cannot offset the
+lose of per-token advantage, while those are relatively large
+in max-probability rollout and large n (e.g. n = 2) can
+balance better these two conﬂicts as illustrated in Fig. 3.
+
+Performance on the ofﬁcial MSCOCO testing server. Ta-
+ble 2 shows the result of our single models and 4 ensembled
+model using beam search with beam size set to 3 on the of-
+ﬁcial MSCOCO evaluation server, and all other results are
+based on single model. Our single models and ensembled
+models outperform all of them in terms of most metrics,
+even the ones which use complex attention mechanisms
+[18, 27], and other reinforcement learning-based models
+which all introduce parameterized estimator [17,21,29] and
+
+6305
+
+XENT
+PG-CIDER [17]
+SCST [22](T -step-maxpro)
+1-step-sample
+1-2-2-step-sample
+1-step-maxpro
+2-step-maxpro
+4-step-maxpro
+1-2-4-T -step-maxpro
+T -4-2-1-step-maxpro
+1-2-2-step-maxpro
+
+BLEU-1 BLEU-2 BLEU-3 BLEU-4 METEOR ROUGE-L CIDEr
+102.1
+113.9
+112.7
+115.4
+114.9
+115.1
+114.6
+114.5
+114.8
+114.0
+115.2
+
+31.7
+34.32
+34.61
+35.08
+34.88
+34.46
+34.80
+34.78
+34.59
+34.48
+34.96
+
+25.8
+26.35
+26.65
+26.88
+26.88
+26.87
+26.95
+26.91
+26.89
+26.74
+26.92
+
+54.1
+55.61
+56.03
+56.11
+56.10
+56.11
+56.29
+56.05
+56.26
+56.02
+56.27
+
+42.8
+45.85
+46.05
+46.64
+46.46
+46.13
+46.45
+46.30
+46.25
+46.07
+46.75
+
+57.4
+60.66
+60.65
+61.19
+61.10
+60.90
+61.30
+61.01
+61.02
+60.77
+61.54
+
+74.1
+77.44
+76.83
+77.49
+77.41
+77.24
+77.82
+77.67
+77.45
+77.30
+77.93
+
+SPICE
+
+19.2
+19.25
+19.99
+20.05
+20.23
+20.26
+20.35
+20.20
+20.38
+20.16
+20.42
+
+Table 1. Performance of our proposed models versus state-of-the-art models on the test portion of the Karpathy splits using greedy search.
+
+Google NIC [24]
+Hard-Attention [26]
+MSRCap [7]
+mRNN [19]
+ATT [27]
+Adaptive [18]
+MIXER [21]
+PG-SPIDEr [17]
+AC [29]
+SCST-Att2in(Ens. 4) [22]
+1-step-maxpro
+1-step-sample
+1-2-2-step-maxpro
+1-2-2-step-maxpro(Ens. 4)
+
+c40
+89.5
+88.1
+90.7
+89.0
+90.0
+92.0
+
+BLEU-1
+c5
+71.3
+70.5
+71.5
+71.6
+73.1
+74.8
+74.7
+75.1
+77.8
+
+91.6
+92.9
+
+-
+
+c40
+80.2
+77.9
+81.9
+79.8
+81.5
+84.5
+
+BLEU-2
+c5
+54.2
+52.8
+54.3
+54.5
+56.5
+58.4
+57.9
+59.1
+61.2
+
+84.2
+85.5
+
+-
+
+c40
+69.4
+65.8
+71.0
+68.7
+70.9
+74.4
+
+BLEU-3
+c5
+40.7
+38.3
+40.7
+40.4
+42.4
+44.4
+43.1
+44.5
+45.9
+
+73.8
+74.5
+
+-
+
+-
+
+77.1
+77.3
+77.4
+77.6
+
+-
+
+92.5
+92.5
+92.9
+93.1
+
+-
+
+60.6
+60.9
+60.9
+61.3
+
+-
+
+85.1
+85.4
+85.6
+86.1
+
+-
+
+45.8
+46.2
+46.0
+46.5
+
+-
+
+74.9
+75.2
+75.2
+76.0
+
+c40
+58.7
+53.7
+60.1
+57.5
+59.9
+63.7
+
+BLEU-4
+c5
+30.9
+27.7
+30.8
+29.9
+31.6
+33.6
+31.7
+33.1
+33.7
+34.4
+34.1
+34.5
+34.3
+34.8
+
+63.5
+64.0
+63.7
+64.6
+
+62.4
+62.5
+
+-
+
+-
+
+METEOR
+c40
+c5
+34.6
+25.4
+24.1
+32.2
+33.9
+24.8
+32.5
+24.2
+33.5
+25.0
+26.4
+35.9
+25.8
+25.5
+26.4
+26.8
+26.6
+26.6
+26.7
+26.9
+
+35.2
+35.2
+35.2
+35.4
+
+33.9
+33.4
+
+-
+
+-
+
+ROUGE-L
+c40
+c5
+68.2
+53.0
+51.6
+65.4
+68.0
+52.6
+66.6
+52.1
+68.2
+53.5
+55.0
+70.5
+54.5
+55.1
+55.4
+55.9
+55.6
+55.6
+55.8
+56.1
+
+70.0
+70.2
+70.0
+70.4
+
+69.4
+69.1
+
+-
+
+-
+
+CIDEr
+
+c5
+94.3
+86.5
+93.1
+91.7
+94.3
+104.2
+99.1
+104.2
+110.2
+112.3
+111.1
+111.6
+111.3
+112.6
+
+c40
+94.6
+86.3
+93.7
+93.5
+95.8
+105.9
+
+-
+
+107.1
+112.1
+
+-
+
+114.0
+114.5
+113.5
+115.3
+
+Table 2. Leaderboard of published image captioning models on the ofﬁcial MSCOCO evaluation server.
+
+sequence level advantage [22].
+
+4.5. Qualitative Analysis
+
+Fig. 4 shows some qualitative results of 1-step-maxpro
+against Ground Truth and the model trained with XENT
+loss. Each image has three captions from these sources
+listed below. In general, the captions predicted by 1-step-
+maxpro are better compared with the model trained with
+XENT loss. In Fig. 4(a), we can see that when the image
+content is common in the dataset and not too complex to
+describe, XENT and 1-step-maxpro can predict correct cap-
+tions. Since the reinforcement learning-based model can
+avoid accumulating errors during generating the caption,
+the captions in Fig. 4(b)-4(e) generated by 1-step-maxpro
+can describe more important objects and capture their re-
+lationships with more distinctive information of the image,
+while those generated by XENT are less descriptive or in-
+correct to some degree. When a variety of human activi-
+ties that appear rarely in the dataset or different activities
+with the same objects that are difﬁcult to distinguish by the
+
+model, the models easily have the incorrect prediction. For
+example, in Fig. 4(f), 1-step-maxpro and XENT both pre-
+dict wrong captions that the player in the base is throwing
+the ball, who in fact is catching the ball with a glove.
+
+5. Conclusion
+
+We reformulate advantage function to estimate per-token
+advantage without using parametrized estimator. More-
+over, n-step reformulated advantage is proposed to increase
+the absolute value of the mean of reformulated advantage
+while lowering variance. Our methods outperform state-of-
+the-art methods that use the sequence level advantage and
+parametrized estimator on MSCOCO benchmark.
+Acknowledgements
+This work was
+
+supported in part by the Na-
+tional Key R&D Program of China (2017YFC0821005),
+National Basic Research Program of China (973 Program,
+2015CB351800), and High-performance Computing Plat-
+form of Peking University, which are gratefully acknowl-
+edged.
+
+6306
+
+(a) CIDEr
+
+(b) METEOR
+
+(c) CIDEr
+
+(d) METEOR
+
+Figure 2. (a)(b): Performance of SCST [22], 1-step-maxpro and 1-2-2-step-maxpro; (c)(d): Performance of PG-CIDEr [17], 1-step-sample
+and 1-2-2-step-sample. The horizotal axes are every 2K training steps and the vertical axes are corresponding metrics on validation set.
+
+(a) max-probability-mean
+
+(b) max-probability-variance
+
+(c) K-Monte-Carlo-mean
+
+(d) K-Monte-Carlo-variance
+
+Figure 3. Mean and variance of those n-step reformulated advantage in max-probability rollout (a)(b) and K Monte Carlo rollouts (c)(d),
+where n = {1, 2, 4, T }. We do rollout 100 times for each state-action pair after pretraining using cross entropy loss, calculate the mean
+and variance of reformulated advantage, and ﬁnally average all absolute value of the mean and variance of all training data in sequence
+time step order, where time step t = {1, 2, ..., 16} (horizotal axis).
+
+a woman and a kid are standing on skis in the snow.
+
+a box of donuts of different colors and varieties.
+
+a wide variety of vases and chandelier in a window display.
+
+a woman and a child on skis in the snow.
+
+a box of donuts and a variety of donuts.
+
+a glass case with many different types of glass.
+
+a woman and a child standing on skis in the snow.
+
+a box of donuts sitting on top of a table.
+
+a display case with a bunch of vases on it.
+
+(a)
+
+(b)
+
+(c)
+
+many cars and motorcycles are parked in a parking lot.
+
+a helicopter is ﬂying upwards in the sky.
+
+a man catching a baseball as another slides into the base
+
+a motorcycle parked in a parking lot next to a parking lot.
+
+a black and white photo of a black and white photo.
+
+a baseball player is throwing a baseball
+
+a motorcycle parked in a parking lot with a group of cars.
+
+a black and white photo of a helicopter ﬂying in the sky.
+
+a baseball player throwing a ball on a ﬁeld
+
+(d)
+
+(e)
+
+(f)
+
+Figure 4. Qualitative results of our model compared with Ground Truth and the model trained under XENT loss. Captions in black (ﬁrst
+line), red(second line) and blue (third line) are ground truth captions, and those predicted by XENT and 1-step-maxpro respectively.
+
+6307
+
+References
+
+[1] P. Anderson, B. Fernando, M. Johnson, and S. Gould. Spice:
+Semantic propositional image caption evaluation.
+In Eu-
+ropean Conference on Computer Vision, pages 382–398.
+Springer, 2016.
+
+[2] P. Anderson, X. He, C. Buehler, D. Teney, M. Johnson,
+S. Gould, and L. Zhang. Bottom-up and top-down at-
+tention for image captioning and vqa.
+arXiv preprint
+arXiv:1707.07998, 2017.
+
+[3] S. Banerjee and A. Lavie. Meteor: An automatic metric for
+mt evaluation with improved correlation with human judg-
+ments. In Proceedings of the acl workshop on intrinsic and
+extrinsic evaluation measures for machine translation and/or
+summarization, pages 65–72, 2005.
+
+[4] S. Bengio, O. Vinyals, N. Jaitly, and N. Shazeer. Scheduled
+sampling for sequence prediction with recurrent neural net-
+works. In Advances in Neural Information Processing Sys-
+tems, pages 1171–1179, 2015.
+
+[5] L. Chen, H. Zhang, J. Xiao, L. Nie, J. Shao, W. Liu, and
+T.-S. Chua. Sca-cnn: Spatial and channel-wise attention
+in convolutional networks for image captioning.
+In 2017
+IEEE Conference on Computer Vision and Pattern Recog-
+nition (CVPR), pages 6298–6306. IEEE, 2017.
+
+[6] K. Cho, B. Van Merrienboer, C. Gulcehre, D. Bahdanau,
+F. Bougares, H. Schwenk, and Y. Bengio. Learning phrase
+representations using rnn encoder-decoder for statistical ma-
+chine translation. Computer Science, 2014.
+
+[7] H. Fang, S. Gupta, F. Iandola, R. K. Srivastava, L. Deng,
+P. Doll´ar, J. Gao, X. He, M. Mitchell, J. C. Platt, et al. From
+captions to visual concepts and back. In Proceedings of the
+IEEE conference on computer vision and pattern recogni-
+tion, pages 1473–1482, 2015.
+
+[8] A. Farhadi, M. Hejrati, M. A. Sadeghi, P. Young,
+C. Rashtchian, J. Hockenmaier, and D. Forsyth. Every
+picture tells a story: Generating sentences from images.
+In European conference on computer vision, pages 15–29.
+Springer, 2010.
+
+[9] K. He, X. Zhang, S. Ren, and J. Sun. Deep residual learn-
+ing for image recognition. In Proceedings of the IEEE con-
+ference on computer vision and pattern recognition, pages
+770–778, 2016.
+
+[10] S. Hochreiter and J. Schmidhuber. Long short-term memory.
+
+Neural Computation, 9(8):1735–1780, 1997.
+
+[11] A. Karpathy and F. F. Li. Deep visual-semantic alignments
+for generating image descriptions. In Computer Vision and
+Pattern Recognition, pages 3128–3137, 2015.
+
+[12] D. P. Kingma and J. Ba. Adam: A method for stochastic
+
+optimization. arXiv preprint arXiv:1412.6980, 2014.
+
+[13] G. Kulkarni, V. Premraj, V. Ordonez, S. Dhar, S. Li, Y. Choi,
+A. C. Berg, and T. L. Berg. Babytalk: Understanding and
+generating simple image descriptions.
+IEEE Transactions
+on Pattern Analysis and Machine Intelligence, 35(12):2891–
+2903, 2013.
+
+[14] A. M. Lamb, A. G. A. P. GOYAL, Y. Zhang, S. Zhang, A. C.
+Courville, and Y. Bengio. Professor forcing: A new algo-
+rithm for training recurrent networks. In Advances In Neural
+Information Processing Systems, pages 4601–4609, 2016.
+
+[15] C.-Y. Lin. Rouge: A package for automatic evaluation of
+
+summaries. Text Summarization Branches Out, 2004.
+
+[16] T.-Y. Lin, M. Maire, S. Belongie, J. Hays, P. Perona, D. Ra-
+manan, P. Doll´ar, and C. L. Zitnick. Microsoft coco: Com-
+mon objects in context. In European conference on computer
+vision, pages 740–755. Springer, 2014.
+
+[17] S. Liu, Z. Zhu, N. Ye, S. Guadarrama, and K. Murphy. Im-
+proved image captioning via policy gradient optimization of
+spider. In Proc. IEEE Int. Conf. Comp. Vis, volume 3, page 3,
+2017.
+
+[18] J. Lu, C. Xiong, D. Parikh, and R. Socher. Knowing when
+to look: Adaptive attention via a visual sentinel for image
+captioning. In Proceedings of the IEEE Conference on Com-
+puter Vision and Pattern Recognition (CVPR), volume 6,
+page 2, 2017.
+
+[19] J. Mao, W. Xu, Y. Yang, J. Wang, Z. Huang, and A. Yuille.
+Deep captioning with multimodal recurrent neural networks
+(m-rnn). arXiv preprint arXiv:1412.6632, 2014.
+
+[20] K. Papineni, S. Roukos, T. Ward, and W.-J. Zhu. Bleu: a
+method for automatic evaluation of machine translation. In
+Proceedings of the 40th annual meeting on association for
+computational linguistics, pages 311–318. Association for
+Computational Linguistics, 2002.
+
+[21] M. Ranzato, S. Chopra, M. Auli, and W. Zaremba. Sequence
+level training with recurrent neural networks. arXiv preprint
+arXiv:1511.06732, 2015.
+
+[22] S. J. Rennie, E. Marcheret, Y. Mroueh, J. Ross, and V. Goel.
+In
+
+Self-critical sequence training for image captioning.
+CVPR, volume 1, page 3, 2017.
+
+[23] R. Vedantam, C. Lawrence Zitnick, and D. Parikh. Cider:
+Consensus-based image description evaluation. In Proceed-
+ings of the IEEE conference on computer vision and pattern
+recognition, pages 4566–4575, 2015.
+
+[24] O. Vinyals, A. Toshev, S. Bengio, and D. Erhan. Show and
+tell: A neural image caption generator. In Computer Vision
+and Pattern Recognition, pages 3156–3164, 2015.
+
+[25] R. J. Williams. Simple statistical gradient-following algo-
+rithms for connectionist reinforcement learning. Machine
+learning, 8(3-4):229–256, 1992.
+
+[26] K. Xu, J. Ba, R. Kiros, K. Cho, A. Courville, R. Salakhudi-
+nov, R. Zemel, and Y. Bengio. Show, attend and tell: Neural
+image caption generation with visual attention. In Interna-
+tional conference on machine learning, pages 2048–2057,
+2015.
+
+[27] Q. You, H. Jin, Z. Wang, C. Fang, and J. Luo. Image caption-
+ing with semantic attention. In Proceedings of the IEEE con-
+ference on computer vision and pattern recognition, pages
+4651–4659, 2016.
+
+[28] L. Yu, W. Zhang, J. Wang, and Y. Yu. Seqgan: Sequence
+In AAAI,
+
+generative adversarial nets with policy gradient.
+pages 2852–2858, 2017.
+
+[29] L. Zhang, F. Sung, F. Liu, T. Xiang, S. Gong, Y. Yang, and
+T. M. Hospedales. Actor-critic sequence training for image
+captioning. arXiv preprint arXiv:1706.09601, 2017.
+
+6308
+
+

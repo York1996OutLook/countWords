@@ -1,0 +1,1008 @@
+FastDraw: Addressing the Long Tail of Lane Detection
+
+by Adapting a Sequential Prediction Network
+
+Jonah Philion
+
+ISEE.AI
+
+jonahphilion@isee.ai
+
+Abstract
+
+The search for predictive models that generalize to the
+long tail of sensor inputs is the central difﬁculty when devel-
+oping data-driven models for autonomous vehicles. In this
+paper, we use lane detection to study modeling and train-
+ing techniques that yield better performance on real world
+test drives. On the modeling side, we introduce a novel fully
+convolutional model of lane detection that learns to decode
+lane structures instead of delegating structure inference to
+post-processing. In contrast to previous works, our convo-
+lutional decoder is able to represent an arbitrary number
+of lanes per image, preserves the polyline representation
+of lanes without reducing lanes to polynomials, and draws
+lanes iteratively without requiring the computational and
+temporal complexity of recurrent neural networks. Because
+our model includes an estimate of the joint distribution of
+neighboring pixels belonging to the same lane, our formu-
+lation includes a natural and computationally cheap deﬁni-
+tion of uncertainty. On the training side, we demonstrate
+a simple yet effective approach to adapt the model to new
+environments using unsupervised style transfer. By train-
+ing FastDraw to make predictions of lane structure that are
+invariant to low-level stylistic differences between images,
+we achieve strong performance at test time in weather and
+lighting conditions that deviate substantially from those of
+the annotated datasets that are publicly available. We quan-
+titatively evaluate our approach on the CVPR 2017 Tusim-
+ple lane marking challenge, difﬁcult CULane datasets [29],
+and a small labeled dataset of our own and achieve com-
+petitive accuracy while running at 90 FPS.
+
+1. Introduction
+
+Previous models of lane detection generally follow the
+following three-step template. First, the likelihood that each
+pixel is part of a lane is estimated. Second, pixels that clear
+a certain threshold probability pmin of being part of a lane
+are collected. Lastly, these pixels are clustered, for instance
+
+Figure 1. Best viewed in color. We train a novel convolutional lane
+detection network on a public dataset of labeled sunny California
+highways. Deploying the model in conditions far from the training
+set distribution (left) leads to poor performance (middle). Leverag-
+ing unsupervised style transfer to train FastDraw to be invariant to
+low-level texture differences leads to robust lane detection (right).
+
+with RANSAC, into individual lanes.
+
+Because the second and third steps in which road struc-
+ture is inferred from a point cloud of candidate pixels are
+in general not differentiable, the performance of models of
+lane detection that follow this template is limited by the per-
+formance of the initial segmentation. We propose a new
+approach to lane detection in which the network performs
+the bulk of the decoding, thereby eliminating the need for
+hyper-parameters in post-processing. Our model “draws”
+lanes in the sense that the network is trained to predict the
+local lane shape at each pixel. At test time, we decode the
+global lane by following the local contours as predicted by
+the CNN.
+
+A variety of applications beneﬁt from robust lane detec-
+tion algorithms that can perform in the wild.
+If the de-
+tector is iterative, the detector can be used as an interac-
+tive annotation tool which can be used to decrease the cost
+of building high deﬁnition maps [16, 1]. For level 5 sys-
+tems that depend on high deﬁnition maps, online lane de-
+
+11582
+
+Figure 2. We use a CNN to extract a semantic representation of the input image. This representation is decoded by three separate shallow
+convolutional heads: a binary segmentation of pixels that belong to a lane (ph,w,0), and a categorical distribution over the pixels within a
+taxicab distance L of the current pixel in the rows above and below (ph,w,1 and ph,w,−1 respectively). Because we include an end token in
+the categorical distribution to train to the network to predict endpoints, the categorical distributions are 2L + 1 + 1 = 2L + 2 dimensional.
+
+tection is a useful localization signal. Level 2 systems that
+are not equipped to handle the computational load required
+of high deﬁnition maps depend on models of lane detec-
+tion equipped with principled methods of determining when
+to notify the driver that the lane detection is uncertain. In
+pursuit of solutions for these applications, we identify three
+characteristics that a lane detection module should possess.
+First, the lane detection algorithm must be able to rep-
+resent any number of lanes of any length. Whereas vari-
+ability in the number of instances of an object in an image
+is an aspect of any kind detection problem, variability in
+the dimensionality of a single instance is a more unique to
+the lane detection problem; unlike bounding boxes which
+have a precise encoding of ﬁxed dimensionality, lane seg-
+ments can be arbitrary length. Solutions that reduce lanes
+to a constant dimensionality - such as by ﬁtting them with
+polynomials - lose accuracy on tight curves where accurate
+lane detection or localization is important for safe driving.
+Second, the detection algorithm must run in real-time.
+Therefore, although there is variability in the number and
+size of lanes in an image, whatever recursion used to iden-
+tify and draw these lanes must be fast. Solutions to the
+variable dimensionality problem that involve recurrent cells
+[15] or attention [35] are therefore a last resort.
+
+Finally, the detection algorithm must be able to adapt
+quickly to new scenes. Sensors such as cameras and lidar
+that are used in self-driving carry with them a long tail in
+the distribution of their outputs. A lane detection algorithm
+should be able to adapt to new domains in a scalable way.
+
+We present an approach which addresses these problems
+and is competitive with other contemporary lane detection
+algorithms. Our contributions are
+
+• A lane detection model that integrates the decoding
+step directly into the network. Our network is autore-
+
+gressive and therefore comes equipped with a natural
+deﬁnition of uncertainty. Because decoding is largely
+carried out by the convolutional backbone, we are able
+to optimize the network to run at 90 frames per second
+on a GTX 1080. The convolutional nature of FastDraw
+makes it ideal for multi-task learning [20] or as an aux-
+iliary loss [6].
+
+• A simple but effective approach to adapt our model to
+handle images that are far from the distribution of im-
+ages for which we have public annotations. Qualitita-
+tive results are shown in Figure 1 and Figure 6. While
+style transfer has been used extensively to adapt the
+output distribution of simulators to better match real-
+ity [10], we use style transfer to adapt the distribution
+of images from publicly available annotated datasets
+to better match corner case weather and environmental
+conditions.
+
+2. Related Work
+
+Lane Detection Models of lane detection generally in-
+volve extracting lane marking features from input
+im-
+ages followed by clustering for post-processing. On well-
+maintained roads, algorithms using hand-crafted features
+work well [2, 19]. Recent approaches such as those that
+achieve top scores on the 2017 Tusimple Lane Detection
+Challenge seek to learn these hand-crafted features in a
+more end-to-end manner using convolutional neural net-
+works. To avoid clustering, treating left-left lane, left lane,
+right lane, and right-right lane as channels of the segmenta-
+tion has been explored [29]. Projecting pixels onto a ground
+plane via a learned homography is a strong approach for
+regularizing the curve ﬁtting of individual lanes [28]. Re-
+search into improving the initial segmentation has been suc-
+
+11583
+
+cessful although results are sensitive to the heuristics used
+during post-processing [12]. Recent work has improved
+segmentation by incorporating a history of images instead
+of exclusively conditioning on the current frame [39].
+
+Lane detection is not isolated to dashcam imagery. Mod-
+els that detect lanes in dashcams can in general be adapted
+to detect lanes in lidar point-clouds, open street maps,
+and satellite imagery [16, 23, 4]. The success of seman-
+tic segmentation based approaches to lane detection has
+beneﬁted tremendously from rapid growth in architectures
+that empirically perform well on dense segmentation tasks
+[5, 26, 25].
+Implicitly, some end-to-end driving systems
+have been shown to develop a representation of lanes with-
+out the need for annotated data [21, 7].
+
+Style Transfer Adversarial loss has enabled rapid im-
+provements in a wide range of supervised and unsupervised
+tasks. Pix2Pix [18] was the ﬁrst to demonstrate success in
+style translation tasks on images. Unsupervised style trans-
+fer for images [27, 38] and unsupervised machine trans-
+lation [24, 3] use back-translation as a proxy for super-
+vision. While models of image-to-image translation have
+largely been deterministic [27, 38], MUNIT [17] extends
+these models to generate a distribution of possible image
+translations. In this work, we incorporate images generated
+by MUNIT translated from a public dataset to match the
+style of our own cameras. We choose MUNIT for this pur-
+pose because it is unsupervised and generative. Previous
+work has used data from GTA-V to train object detectors
+that operate on lidar point clouds [37]. Parallel work has
+shown that synthetic images stylized by MUNIT can im-
+prove object detection and semantic segmentation [10]. We
+seek to leverage human annotated datasets instead of simu-
+lators as seeds for generating pseudo training examples of
+difﬁcult environmental conditions.
+
+Drawing We take inspiration from work in other do-
+mains where targets are less structured than bounding boxes
+such as human pose estimation [8] and automated object an-
+notation [1]. In human pose estimation, the problem of clus-
+tering joints into human poses has been solved by inferring
+slope ﬁelds between body parts that belong to the same hu-
+man [8]. Similarly, we construct a decoder which predicts
+which pixels are part of the same lane in addition to a seg-
+mentation of lanes. In Polygon-RNN [9] and Sketch-RNN
+[13], outlines of objects are inferred by iteratively drawing
+bounding polygons. We follow a similar model of learned
+decoding while simplifying the recurrence due to the rela-
+tive simplicity of the lane detection task and need for real-
+time performance.
+
+3. Model
+
+Our model maximizes the likelihood of polylines in-
+stead of purely predicting per-pixel likelihoods. In doing
+so, we avoid the need for heuristic-based clustering post-
+
+processing steps [2]. In this section, we describe how we
+derive our loss, how we decode lanes from the model, and
+how we train the network to be robust to its own errors when
+conditioning on its own predictions at test time.
+
+3.1. Lane Representation
+
+In the most general case, lane annotations are curves
+[0, 1] → R2. In order to control the orientation of the lanes,
+we assume that lane annotations can be written as a function
+of the vertical axis of the image. A lane annotation y there-
+fore is represented by a sequence of {height, width} pixel
+coordinates y = {y1, ..., yn} = {{h1, w1}, ..., {hn, wn}}
+where hi+1 − hi = 1.
+
+Given an image x ∈ R3×H×W , the joint probability
+
+p(y|x) can be factored
+
+p(y|x) = p(y1|x)
+
+n−1
+Y
+
+i=1
+
+p(yi+1|y1, ..., yi, x).
+
+(1)
+
+One choice to predict p(yi+1|y1, ..., yi, x) would be to use
+a recurrent neural network [16, 36]. Do decode quickly, we
+assume most of the dependency can be captured by condi-
+tioning only on the previous decoded coordinate
+
+p(y|x) ≈ p(y1|x)
+
+n−1
+Y
+
+i=1
+
+p(yi+1|yi, x).
+
+(2)
+
+Because we assume hi+1 − hi = 1, we can simplify
+
+p(yi+1|yi, x) = p(∆wi|yi, x)
+
+∆wi = wi+1 − wi.
+
+(3)
+
+(4)
+
+Lane detection is then reduced to predicting a distribution
+over dw/dh at every pixel in addition to the standard per-
+pixel likelihood. Decoding proceeds by choosing an initial
+pixel coordinate and integrating.
+
+To represent the distribution p(∆wi|yi, x), we could use
+a normal distribution and perform regression. However,
+in cases where the true distribution is multi-modal such as
+when lanes split, a regression output would cause the net-
+work to take the mean of the two paths instead of capturing
+the multimodality. Inspired by WaveNet [34], we choose to
+make no assumptions about the shape of p(∆wi|yi, x) and
+represent the pairwise distributions using categorical distri-
+butions with support ∆w ∈ {i ∈ Z| − L ≤ i ≤ L} ∪ {end}
+where L is chosen large enough to be able to cover nearly
+horizontal lanes and end is a stop token signaling the end
+of the lane. At each pixel {h, w}, our network predicts
+
+• ph,w,0 := p(h, w|x) - the probability that pixel {h, w}
+
+is part of a lane.
+
+• ph,w,1 := p({h + 1, ∆w} ∪ end|h, w, x) - the categor-
+ical distribution over pixels in the row above pixel i, j
+
+11584
+
+within a distance L that pixel i + 1, j + l is part of the
+same lane as pixel i, j, or that pixel i, j is the top pixel
+in the lane it is a part of.
+
+• ph,w,−1 := p({h−1, ∆w}∪end|h, w, x) - the categor-
+ical distribution over pixels in the row below pixel i, j
+within a distance L that pixel i + 1, j + l is part of the
+same lane as pixel i, j, or that pixel i, j is the bottom
+pixel in the lane it is a part of.
+
+Given these probabilities, we can quickly decode a full lane
+segment given any initial point on the lane. Given some
+initial position h0, w0 on lane y, we follow the greedy re-
+cursion
+
+y(h0) = w0
+
+y(x + sign) = y(x) + ∆w
+
+∆x = −L + argmaxpx,y(x),sign
+
+(5)
+
+(6)
+
+(7)
+
+where sign ∈ {−1, 1} depending on if we draw the lane up-
+wards or downwards from x0, y0. Note that we can choose
+any yi ∈ y as h0, w0 as long as we concatenate the results
+from the upwards and downwards trajectories. We stop de-
+coding when argmax returns the end token.
+
+3.2. Architecture
+
+To extract a semantic representation of the input image,
+we repurpose Resnet50/18 [14] for semantic segmentation.
+The architecture is shown in Figure 2. We use two skip
+connections to upscale and concatenate features at a variety
+of scales. All three network heads are parameterized by
+two layer CNNs with kernel size 3. In all experiments, we
+initialize with Resnets pretrained on Imagenet [30].
+
+3.3. Loss
+
+We minimize the negative log likelihood given by (2).
+Let θ represent the weights of our network, x ∈ R3,H,W an
+input image, y = {{h1, w1}, ..., {hn, wn}} a ground truth
+lane annotation such that hi − hi−1 = 1 and ym ∈ R1,H,W
+a ground truth segmentation mask of the lane. The loss L(θ)
+is deﬁned by
+
+Lmask(θ) = − log(p(ym|fθ(x)))
+
+Lsequence(θ) =
+n
+
+− X
+
+X
+
+s∈{−1,1}
+
+i=1
+
+log(p(wi+s − wi|{hi, wi}, fθ(x))
+
+(8)
+
+(9)
+
+L(θ) = Lmask(θ) + Lsequence(θ)
+
+(10)
+
+Because the the task of binary segmentation and pairwise
+prediction have different uncertainties and scales, we dy-
+namically weight these two objectives [20]. We incorporate
+
+Figure 3. In addition to predicting per-pixel likelihoods, we train
+our network to output the pixels in the row above (blue) and be-
+low (purple) that are in the same lane as the current pixel. We
+also train pixels that are offset from annotated lanes to point back
+to the annotated lane (b). We include the end token in the cate-
+gorical distribution to signal the termination of a lane (c). Given
+these predictions, we draw lanes by sampling an initial point then
+greedily following arrows up and down until we reach end in ei-
+ther direction and concatenating the two results.
+
+a learned temperature σ which is task speciﬁc to weigh our
+loss:
+
+L(θ) =
+
+Lmask(θ) +
+
+1
+
+σ2
+mask
++ log σ2
+
+maskσ2
+
+sequence.
+
+1
+
+σ2
+
+sequence
+
+Lsequence
+
+(11)
+
+During training, we substitute W = log σ2 into (11) for
+numerical stability. Experiments in which we ﬁxed W re-
+sulted in similar performance to allowing W to be learnable.
+However, we maintain the dynamically weighed loss for all
+results reported below to avoid tuning hyperparameters.
+
+3.4. Exposure Bias
+
+Because our model is autoregressive, training ph,w,±1 by
+conditioning exclusively on ground truth annotations leads
+to drifting at test time [32]. One way to combat this issue
+is to allow the network to act on its own proposed decoding
+and use reinforcement learning to train. The authors of [1]
+take this approach using self-critical sequence training [33]
+and achieve good results.
+
+Although we experiment with reinforcement learning,
+we ﬁnd that training the network to denoise lane annota-
+tions — also known as augmenting datasets with “synthe-
+sized perturbations” [6] — is signiﬁcantly more sample ef-
+ﬁcient. This technique is visualized in Figure 3. To each
+ground truth annotation y we add gaussian noise and train
+the network to predict the same target as the pixels in y. We
+
+11585
+
+distributions that can be sampled from instead of determin-
+istic predictions.
+
+As shown in Figure 4, we use MUNIT to augment our
+labeled training set with difﬁcult training examples. Let
+D = {xi, yi} be a dataset of images xi and lane annota-
+tions yi and D′ = {xi} a corpus of images without labels.
+Empirically, we ﬁnd that style transfer preserves the geo-
+metric content of input images. We can therefore generate
+new training examples {x′, y′} by sampling from the dis-
+tribution D′ ∼ {x′, y′} deﬁned by
+
+x, y ∼ D
+
+x′ ∼ G′(E(x, s))s∼N (0,I)
+y′ = y
+
+(14)
+
+(15)
+
+(16)
+
+Although representation of lanes around the world are lo-
+cation dependent, we theorize that the distribution of lane
+geometries is constant. Unsupervised style transfer allows
+us to adjust to different styles and weather conditions with-
+out the need for additional human annotation.
+
+4. Experiments
+
+We evaluate our lane detection model on the Tusimple
+Lane Marking Challenge and the CULane datasets [29].
+The Tusimple dataset consists of 3626 annotated 1280x720
+images taken from a dash camera as a car drives on Cal-
+ifornia highways. The weather is exclusively overcast or
+sunny. We use the same training and validation split as EL-
+GAN [12]. In the absence of a working public leaderboard,
+we report results exclusively on the validation set. We use
+the publicly available evaluation script to compute accuracy,
+false positive rate, and true positive rate.
+
+Second, we adopt the same hyperparameters determined
+while training on Tusimple and train our network on the
+challenging CULane dataset. CULane consists of 88880
+training images, 9675 validation images, and 34680 test im-
+ages in a diversity of weather conditions scenes. The test set
+includes environmental metadata about images such as if
+the image is crowded, does not have lane lines, or is tightly
+curved. We report evaluation metrics on each of these cases
+as is done by CULane [29].
+
+Finally, to evaluate the effectiveness of our model to
+adapt to new scenes, we drive in Massachusetts in a di-
+versity of weather conditions and record 10000 images of
+dash cam data. Using publicly available source code, we
+train MUNIT to translate between footage from the Tusim-
+ple training set and our own imagery, then sample 10000
+images from the generator. We note that upon evaluating
+qualitatively the extent to which the original annotations
+match the generated images, the frame of the camera is
+transformed. We therefore scale and bias the height coor-
+dinates of the original annotations with a single scale and
+
+11586
+
+Figure 4. The top row shows three images xi from the Tusimple
+dataset and their annotations. The bottom four rows display sam-
+ples from G(xi) with the adjusted Tusimple annotations overlaid.
+We use these additional training samples to bias the network to-
+wards shape instead of texture [11].
+
+therefore generate training examples
+
+s ∼ ⌊N (0.5, σI)⌋
+
+p(h, w + s, sign) = y(i + sign) − w − s + L
+
+(12)
+
+(13)
+
+where sign ∈ {−1, 1}. We tune σ as a hyperparameter
+which is dependent on dataset and image size. We clamp
+the ground truth difference y(i+sign)−w −s+L between
+0 and 2L + 1 and clamp w + s between 0 and the width of
+the image.
+
+3.5. Adaptation
+
+The downside of data-driven approaches is that we have
+weak guarantees on performance once we evaluate the
+model on images far from the distribution of images that
+it trained on. For this purpose, we leverage the MUNIT
+framework [17] to translate images from public datasets
+with ground truth annotations into a distribution of images
+we acquire by driving through Massachusetts in a variety of
+weather and lighting conditions.
+
+To perform style transfer on the images in unordered
+datasets D and D′, the CycleGAN framework [38] trains
+an encoder-generator pair E, G for each dataset D and D′
+such that G(E(x)) ≈ x for x ∼ D and difference between
+the distributions y ∼ G′(E(x)) and y ∼ D′ is minimized,
+with analogous statements for D′. The MUNIT framework
+generalizes this model to include a style vector s ∼ N (0, I)
+as input to the encoder E. Style translations are therefore
+
+Figure 5. The standard deviation of the distribution predicted by
+FastDraw is plotted as error bars on a variety of images from
+Tusimple test set. Our color map is thresholded at a standard de-
+viation of 0 and 9 pixels. We ﬁnd that the network is accurately
+growing more uncertain in regions where the exact location of a
+lane is not well deﬁned, for instance when the lane marking is
+wide, there are shadows, the lane is possibly a false positive, or
+the lane is occluded by other vehicles.
+
+bias across all images to develop D′.
+
+w′
+
+i = mwi + b
+
+(17)
+
+Samples from the pseudo training example generator are
+shown in Figure 4. A speed comparison of FastDraw to
+other published models is shown in Table 2. For models
+trained on images of size 128 × 256 we use L = 6 pixels
+and σ = 2 pixels. For models trained on images of size
+352 × 640 we use L = 16 pixels and σ = 5 pixels.
+
+5. Results
+
+5.1. Tusimple
+
+We train FastDraw on the Tusimple dataset. We train
+for 7 epochs in all experiments with batch size 4 using the
+Adam optimizer [22]. We initialize learning rate to 1.0e-4
+and halve the learning rate every other epoch. To generate
+the candidates for initial points of lanes, we mask the center
+of the image and use DBSCAN from scikit-learn [31]
+with ǫ = 5 pixels to cluster. Given these initial positions,
+we follow the predictions of FastDraw to draw the lane
+upwards and downwards.
+
+We compare our algorithm quantitatively against
+EL-GAN [12]. EL-GAN improves lane detection over
+traditional binary segmentation by adding an additional
+adversarial loss to the output segmentation. The segmen-
+tations therefore approximate the distribution of possible
+labels. However, this approach still requires a heuristic
+decoder to convert the segmentation into structured lane
+objects. FastDraw is competitive with EL-GAN by all
+Tusimple metrics as shown in Table 1.
+
+Method
+
+Acc (%)
+
+FP
+
+FN
+
+EL-GAN (basic)
+EL-GAN (basic++)
+FastDraw Resnet18
+FastDraw Resnet50
+FastDraw Resnet50 (adapted)
+
+93.3
+94.9
+94.9
+94.9
+95.2
+
+0.061
+0.059
+0.061
+0.059
+0.076
+
+0.104
+0.067
+0.047
+0.052
+0.045
+
+Table 1. We use Tusimple evaluation metrics to compare quanti-
+tatively with EL-GAN [12]. FastDraw achieves comparable per-
+formance to EL-GAN with fewer layers. We note that while the
+accuracy of adapted FastDraw achieves high accuracy, it also has
+the highest false positive rate. We reason that the network learns a
+stronger prior over lane shape from D′, but the style segmentation
+does not always preserve the full number of lanes which results in
+the side of the road being falsely labeled a lane in the D′ dataset.
+
+5.2. Uncertainty
+
+Because our network predicts a categorical distribution
+at each pixel with domain −L <= l <= L, we can quickly
+compute the standard deviation of this distribution and in-
+terpret the result as errorbars in the width dimension. We
+ﬁnd that the uncertainty in the network increases in oc-
+cluded and shadowy conditions. Example images are shown
+in Figure 5. These estimates can be propagated through
+the self-driving stack to prevent reckless driving in high-
+uncertainty situations.
+
+5.3. Is the learned decoder different from a simple
+
+heuristic decoder?
+
+A simple way to decode binary lane segmentations is to
+start at an initial pixel, then choose the pixel in the row
+above the initial pixel with the highest probability of be-
+longing to a lane. To show that our network is not following
+this simple decoding process, we calculate the frequency at
+which the network chooses pixels that agree with this sim-
+ple heuristic based approach. The results are shown in Table
+3. We ﬁnd that although the output of the two decoders are
+correlated, the learned decoder is in general distinct from
+the heuristic decoder.
+
+Model
+
+Frames-Per-Second
+
+Ours
+H-Net [20]
+CULane [21]
+PolyLine-RNN [9]
+EL-GAN [7]
+
+90.31
+52.6
+17.5
+5.7
+<10
+
+Table 2. Because FastDraw requires little to no post-processing,
+the runtime is dominated by the forward pass of the CNN back-
+bone which can be heavily optimized.
+
+11587
+
+Figure 6. We demonstrate that our network can perform with high accuracy on the publicly annotated dataset we train on as well as images
+collected from a diversity of weather conditions and scenes in Massachusetts. Column 1 shows the “lookup” head argmaxph,w,1, column
+2 shows the “lookdown” head argmaxph,w,−1, column 3 shows the per-pixel likelihood ph,w,0, and column 4 shows the decoded lanes on
+top of the original image. Columns 4-8 show the analogous visual for adapted FastDraw. Images in the top 4 rows come from the Tusimple
+test set. The rest come from our own driving data collected in the wild on Massachusetts highways. We ﬁnd that the data augmentation
+trains the network to draw smoother curves, recognize the ends of lanes better, and ﬁnd all lanes in the image. Even on Tusimple images,
+the annotation improves the per-pixel likelihood prediction. At splits, the network chooses chooses a mode of the distribution instead of
+taking the mean.
+
+11588
+
+|ph,w,1 − argmaxph+1,w+∆w,0| %
+< 1
+< 3
+< 5
+
+12.6
+58.2
+87.1
+
+Table 3. For a series of decoded polylines, we calculate the dis-
+tance between the pixel with maximum likelihood ph±1,w,0 in the
+row above {h, w} with the chosen argmaxph,w,±1. We report the
+percent of the time that the distance is less than one, three, and
+ﬁve pixels. We ﬁnd that the network is in general predicting val-
+ues which agree with the ph,w,0 predictions. Deviation from the
+naive decoder explains why the network still performs is able to
+perform well when the segmentation mask is noisy.
+
+ResNet-50 [29]
+
+FastDraw Resnet50
+
+Normal
+Crowded
+Night
+No line
+Shadow
+Arrow
+Dazzle
+Curve
+Crossroad
+
+87.4
+64.1
+60.6
+38.1
+60.7
+79.0
+54.1
+59.8
+2505
+
+85.9
+63.6
+57.8
+40.6
+59.9
+79.4
+57.0
+65.2
+7013
+
+Table 4. We compare FastDraw trained on CULane dataset to
+Resnet-50 on the CULane test set. We do not ﬁlter the lane pre-
+dictions from FastDraw and achieve competitive results. While
+these scores are lower than those of SCNN [29], we emphasize
+that architectural improvements such as those introduced in [29]
+are complementary to the performance of the FastDraw decoder.
+
+5.4. CULane
+
+We train FastDraw on the full CULane training dataset
+[29]. We use identical hyperparameters to those determined
+on Tusimple with an exponential learning rate schedule with
+period 1000 gradient steps and multiplier 0.95. FastDraw
+ﬁnd the model achieves competitive performance with the
+CULane Resnet-50 baseline.
+IoU at an overlap of 0.5 as
+calculated by the open source evaluation provided by [29]
+is shown in Table 4. Of note is that FastDraw outperforms
+the baseline on curves by a wide margin as expected given
+that CULane assumes lanes will be well represented by cu-
+bic polynomials while FastDraw preserves the polyline rep-
+resentation of lanes.
+
+5.5. Massachusetts
+
+We evaluate the ability of FastDraw to generalize to new
+scenes. In Figure 6 we demonstrate qualitatively that the
+network trained on style transferred training examples in
+addition to the Tusimple training examples can generalize
+well to night scenes, evening scenes, and rainy scenes.
+We emphasize that no additional human annotation was
+
+Figure 7. We label lane boundaries in a 300 image dataset of “long
+tail” images to quantitatively evaluate the effect of the data aug-
+mentation. The precision/recall tradeoff for models trained on
+the augmented dataset is much better than the tradeoff of mod-
+els trained without. The effect of the adaptation is demonstrated
+qualitatively in Figure 6.
+
+required to train FastDraw to be robust to these difﬁcult
+environments.
+
+Additionally, we plot the precision/recall trade-off of
+FastDraw models trained with and without adaptation in
+Figure 7. We use the same deﬁnition of false positive and
+false negative as used in the Tusimple evaluation. The
+augmentation compiles models that are markedly more
+robust to scene changes. We believe that these results echo
+recent ﬁndings that networks trained to do simple tasks
+on simple datasets learn low-level discriminative features
+that do not generalize [11]. Unsupervised style transfer
+for data augmentation is offered as a naive but effective
+regularization of this phenomenon.
+
+6. Conclusion
+
+We demonstrate that it is possible to build an accurate
+model of lane detection that can adapt to difﬁcult environ-
+ments without requiring additional human annotation. The
+primary assumptions of our model is that lanes are curve
+segments that are functions of the height axis of an image
+and that a lane can be drawn iteratively by conditioning ex-
+clusively on the previous pixel that was determined to be
+part of the lane. With these assumptions, we achieve high
+accuracies on the lane detection task in standard and difﬁ-
+cult environmental conditions.
+
+References
+
+[1] D. Acuna, H. Ling, A. Kar, and S. Fidler. Efﬁcient in-
+teractive annotation of segmentation datasets with polygon-
+rnn++. CoRR, abs/1803.09693, 2018. 1, 3, 4
+
+[2] M. Aly. Real time detection of lane markers in urban streets.
+
+CoRR, abs/1411.7113, 2014. 2, 3
+
+[3] M. Artetxe, G. Labaka, E. Agirre, and K. Cho. Unsupervised
+neural machine translation. CoRR, abs/1710.11041, 2017. 3
+
+11589
+
+[4] S. M. Azimi, P. Fischer, M. K¨orner, and P. Reinartz. Aerial
+lanenet: Lane marking semantic segmentation in aerial im-
+agery using wavelet-enhanced cost-sensitive symmetric fully
+convolutional neural networks.
+CoRR, abs/1803.06904,
+2018. 3
+
+[5] V. Badrinarayanan, A. Kendall, and R. Cipolla. Segnet: A
+deep convolutional encoder-decoder architecture for image
+segmentation. CoRR, abs/1511.00561, 2015. 3
+
+[6] M. Bansal, A. Krizhevsky, and A. S. Ogale. Chauffeurnet:
+Learning to drive by imitating the best and synthesizing the
+worst. CoRR, abs/1812.03079, 2018. 2, 4
+
+[7] M. Bojarski, D. D. Testa, D. Dworakowski, B. Firner,
+B. Flepp, P. Goyal, L. D. Jackel, M. Monfort, U. Muller,
+J. Zhang, X. Zhang, J. Zhao, and K. Zieba. End to end learn-
+ing for self-driving cars. CoRR, abs/1604.07316, 2016. 3
+
+[8] Z. Cao, T. Simon, S.-E. Wei, and Y. Sheikh. Realtime multi-
+person 2d pose estimation using part afﬁnity ﬁelds. 2017
+IEEE Conference on Computer Vision and Pattern Recogni-
+tion (CVPR), Jul 2017. 3
+
+[9] L. Castrej´on, K. Kundu, R. Urtasun, and S. Fidler. An-
+CoRR,
+
+instances with a polygon-rnn.
+
+notating object
+abs/1704.05548, 2017. 3
+
+[10] A. Dundar, M. Liu, T. Wang, J. Zedlewski, and J. Kautz.
+Domain stylization: A strong, simple baseline for synthetic
+to real image domain adaptation. CoRR, abs/1807.09384,
+2018. 2, 3
+
+[11] R. Geirhos, P. Rubisch, C. Michaelis, M. Bethge, F. A. Wich-
+mann, and W. Brendel. Imagenet-trained cnns are biased to-
+wards texture; increasing shape bias improves accuracy and
+robustness. CoRR, abs/1811.12231, 2018. 5, 8
+
+[12] M. Ghafoorian, C. Nugteren, N. Baka, O. Booij, and M. Hof-
+mann. El-gan: Embedding loss driven generative adversarial
+networks for lane detection, 2018. 3, 5, 6
+
+[13] D. Ha and D. Eck. A neural representation of sketch draw-
+
+ings. CoRR, abs/1704.03477, 2017. 3
+
+[14] K. He, X. Zhang, S. Ren, and J. Sun. Deep residual learning
+
+for image recognition. CoRR, abs/1512.03385, 2015. 4
+
+[15] S. Hochreiter and J. Schmidhuber. Long short-term memory.
+
+Neural Comput., 9(8):1735–1780, Nov. 1997. 2
+
+[16] N. Homayounfar, W.-C. Ma, S. Kowshika Lakshmikanth,
+and R. Urtasun. Hierarchical recurrent attention networks
+for structured online maps. In The IEEE Conference on Com-
+puter Vision and Pattern Recognition (CVPR), June 2018. 1,
+3
+
+[17] X. Huang, M. Liu, S. J. Belongie, and J. Kautz. Mul-
+timodal unsupervised image-to-image translation. CoRR,
+abs/1804.04732, 2018. 3, 5
+
+[21] A. Kendall, J. Hawke, D. Janz, P. Mazur, D. Reda, J. Allen,
+V. Lam, A. Bewley, and A. Shah. Learning to drive in a day.
+CoRR, abs/1807.00412, 2018. 3
+
+[22] D. P. Kingma and J. Ba. Adam: A method for stochastic
+
+optimization. CoRR, abs/1412.6980, 2014. 6
+
+[23] A. Laddha, M. K. Kocamaz, L. E. Navarro-Serment, and
+M. Hebert. Map-supervised road detection. In 2016 IEEE
+Intelligent Vehicles Symposium (IV), pages 118–123, June
+2016. 3
+
+[24] G. Lample, L. Denoyer, and M. Ranzato. Unsupervised ma-
+chine translation using monolingual corpora only. CoRR,
+abs/1711.00043, 2017. 3
+
+[25] T. Lin, P. Doll´ar, R. B. Girshick, K. He, B. Hariharan, and
+S. J. Belongie. Feature pyramid networks for object detec-
+tion. CoRR, abs/1612.03144, 2016. 3
+
+[26] T. Lin, P. Goyal, R. B. Girshick, K. He, and P. Doll´ar. Fo-
+cal loss for dense object detection. CoRR, abs/1708.02002,
+2017. 3
+
+[27] M. Liu, T. Breuel, and J. Kautz. Unsupervised image-to-
+image translation networks. CoRR, abs/1703.00848, 2017.
+3
+
+[28] D. Neven, B. D. Brabandere, S. Georgoulis, M. Proesmans,
+and L. V. Gool. Towards end-to-end lane detection: an
+instance segmentation approach. CoRR, abs/1802.05591,
+2018. 2
+
+[29] X. Pan, J. Shi, P. Luo, X. Wang, and X. Tang. Spatial as
+deep: Spatial CNN for trafﬁc scene understanding. CoRR,
+abs/1712.06080, 2017. 1, 2, 5, 8
+
+[30] A. Paszke, S. Gross, S. Chintala, G. Chanan, E. Yang, Z. De-
+Vito, Z. Lin, A. Desmaison, L. Antiga, and A. Lerer. Auto-
+matic differentiation in pytorch. In NIPS-W, 2017. 4
+
+[31] F. Pedregosa, G. Varoquaux, A. Gramfort, V. Michel,
+B. Thirion, O. Grisel, M. Blondel, P. Prettenhofer, R. Weiss,
+V. Dubourg, J. Vanderplas, A. Passos, D. Cournapeau,
+M. Brucher, M. Perrot, and E. Duchesnay. Scikit-learn: Ma-
+chine learning in Python. Journal of Machine Learning Re-
+search, 12:2825–2830, 2011. 6
+
+[32] M. Ranzato, S. Chopra, M. Auli, and W. Zaremba. Se-
+quence level training with recurrent neural networks. CoRR,
+abs/1511.06732, 2016. 4
+
+[33] S. J. Rennie, E. Marcheret, Y. Mroueh, J. Ross, and V. Goel.
+Self-critical sequence training for image captioning. CoRR,
+abs/1612.00563, 2016. 4
+
+[34] A. van den Oord, S. Dieleman, H. Zen, K. Simonyan,
+O. Vinyals, A. Graves, N. Kalchbrenner, A. W. Senior, and
+K. Kavukcuoglu. Wavenet: A generative model for raw au-
+dio. CoRR, abs/1609.03499, 2016. 3
+
+[18] P. Isola, J. Zhu, T. Zhou, and A. A. Efros. Image-to-image
+translation with conditional adversarial networks. CoRR,
+abs/1611.07004, 2016. 3
+
+[35] A. Vaswani, N. Shazeer, N. Parmar, J. Uszkoreit, L. Jones,
+A. N. Gomez, L. Kaiser, and I. Polosukhin. Attention is all
+you need. CoRR, abs/1706.03762, 2017. 2
+
+[19] S. Jung, J. Youn, and S. Sull. Efﬁcient lane detection based
+on spatiotemporal images. IEEE Transactions on Intelligent
+Transportation Systems, 17(1):289–295, Jan 2016. 2
+
+[20] A. Kendall, Y. Gal, and R. Cipolla. Multi-task learning using
+uncertainty to weigh losses for scene geometry and seman-
+tics. CoRR, abs/1705.07115, 2017. 2, 4
+
+[36] Z. Wang, W. Ren, and Q. Qiu. Lanenet: Real-time lane de-
+
+tection networks for autonomous driving, 2018. 3
+
+[37] B. Wu, X. Zhou, S. Zhao, X. Yue, and K. Keutzer. Squeeze-
+segv2: Improved model structure and unsupervised domain
+adaptation for road-object segmentation from a lidar point
+cloud, 2018. 3
+
+11590
+
+[38] J. Zhu, T. Park, P. Isola, and A. A. Efros. Unpaired image-
+to-image translation using cycle-consistent adversarial net-
+works. CoRR, abs/1703.10593, 2017. 3, 5
+
+[39] Q. Zou, H. Jiang, Q. Dai, Y. Yue, L. Chen, and Q. Wang.
+Robust lane detection from continuous driving scenes using
+deep neural networks. CoRR, abs/1903.02193, 2019. 3
+
+11591
+
+

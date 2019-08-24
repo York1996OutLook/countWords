@@ -1,0 +1,1490 @@
+Fully Quantized Network for Object Detection
+
+Rundong Li ∗ †‡ Yan Wang ∗ ‡
+
+Feng Liang ‡ Hongwei Qin ‡
+
+Junjie Yan ‡ Rui Fan †
+
+† ShanghaiTech University
+
+‡ SenseTime Research
+
+{lird, fanrui}@shanghaitech.edu.cn
+
+{wangyan1, liangfeng, qinhongwei, yanjunjie}@sensetime.com
+
+Abstract
+
+Efﬁcient neural network inference is important in a num-
+ber of practical domains, such as deployment in mobile
+settings. An effective method for increasing inference ef-
+ﬁciency is to use low bitwidth arithmetic, which can sub-
+sequently be accelerated using dedicated hardware. How-
+ever, designing effective quantization schemes while main-
+taining network accuracy is challenging. In particular, cur-
+rent techniques face difﬁculty in performing fully end-to-
+end quantization, making use of aggressively low bitwidth
+regimes such as 4-bit, and applying quantized networks to
+complex tasks such as object detection. In this paper, we
+demonstrate that many of these difﬁculties arise because of
+instability during the ﬁne-tuning stage of the quantization
+process, and propose several novel techniques to overcome
+these instabilities. We apply our techniques to produce fully
+quantized 4-bit detectors based on RetinaNet and Faster R-
+CNN, and show that these achieve state-of-the-art perfor-
+mance for quantized detectors. The mAP loss due to quan-
+tization using our methods is more than 3.8× less than the
+loss from existing methods.
+
+1. Introduction
+
+State-of-the-art object detectors are based on powerful
+convolution neural network (CNN) architectures [26, 21,
+23, 25]. While CNNs achieve remarkable accuracy, their
+high computational cost during inference restricts their us-
+age on resource-limited devices such as mobile phones,
+smart cameras and drones.
+
+To perform efﬁcient inference on complex networks,
+several techniques have been proposed. These include im-
+proved network designs [12, 15, 32] and network search
+[36], network pruning [9, 8] and network quantization. Cur-
+rent research areas in network quantization include reducing
+the bitwidth of network parameters to decrease model mem-
+
+∗Equal contributions. This work was done when Rundong, Yan and
+
+Feng were interns at SenseTime Research.
+
+ory usage [33, 11, 30], quantizing both network parameters
+and activations to accelerate speciﬁc types of layers in the
+network using bitwise operations [35, 31, 14, 4], and quan-
+tizing network gradients to speed up distributed training [2].
+
+Although promising results on tasks such as image clas-
+siﬁcation have been reported [31, 4, 35, 33, 24] using the
+aforementioned quantization techniques, using quantized
+networks for more complex tasks such as object detection
+remains a challenge. Issues faced by current methods in-
+clude:
+
+Hardware-friendly end-to-end quantization Many
+current quantization techniques [14, 35] focus on speciﬁc
+types of operations such as convolutions or matrix multipli-
+cation, while leaving other operations and network layers in
+full precision. This introduces two problems. The ﬁrst is
+that critical operations such as batch normalization are ei-
+ther not handled [35] or ablated [29] during training, lead-
+ing to a mismatch between training and evaluation behav-
+iors, or causing training convergence difﬁculties. Another
+problem is that when deployed on real hardware, both in-
+teger and ﬂoating point arithmetic units are needed for per-
+forming network inference. This causes data exchange be-
+tween different arithmetic units that may sometimes negate
+the speedups achieved by quantization.
+
+Low bitwidth quantization on complex tasks Current
+quantization research mostly falls into two categories. The
+ﬁrst focuses on performing aggressive bit-width compres-
+sion, e.g. using ternary [19, 1] or even binary [13, 24] val-
+ues, and applies this to relatively simple tasks such as classi-
+ﬁcation, where high accuracy is not required. Another type
+of research uses relatively conservative quantization, e.g. 8
+bits, but can be applied to a broader range of more complex
+tasks such as neural language processing [11], face attribute
+extraction [17] and object detection [18]. Detection is com-
+plex because given a candidate region, the detector needs to
+not only classify whether this region contains a target object
+class, but also accurately regress a bounding box if an object
+is convincingly detected. There have been several works on
+quantizing detectors to use 8 bits [17, 28]. However, as the
+computational complexity of multiplication grows superlin-
+
+2810
+
+early in the bitwidth of the operands, 8 bit arithmetic is often
+still too expensive for devices with very limited resources.
+A natural question thus arises whether even stronger quan-
+tization such as 4-bit can be applied to accelerate detection
+and other complex tasks. To answer this question, we exam-
+ined a carefully designed fully end-to-end quantized detec-
+tor proposed in [17]. When quantizing this detector to lower
+than 8 bits, we discovered that the quantization-aware ﬁne
+tuning process was unstable and had difﬁcult converging.
+Several best practices for 8-bit ﬁne tuning led to very poor
+ﬁnal accuracy in the 4-bit setting. By monitoring the evolu-
+tion of the model’s weights and gradients during ﬁne tuning,
+we found that the poor accuracy and convergence comes
+from instability in several sensitive operations of the quan-
+tized model. In particular, we observed that in batch nor-
+malization layers, where batch statistics are computed us-
+ing aggressively quantized activations, the very small batch
+sizes used in detector ﬁne tuning led to highly degraded es-
+timates of statistical quantities. We also found that activa-
+tions after batch normalization often contain outliers that
+decrease quantization accuracy. Finally, we found that dif-
+ferent channels of the model weights have large differences
+in magnitude, so that performing layer-wise normalization
+introduces large inaccuracies in certain channels.
+
+To address these problems, we propose three effec-
+tive improvements to current quantization-aware ﬁne tuning
+schemes:
+
+1. Freeze batch norm statistics during quantization-aware
+ﬁne tuning, and always normalize activations by the
+means and variances obtained after the training stage.
+
+2. Use a small subset of the training set to calibrate ac-
+tivation magnitudes. Discard outlier activation values
+based on percentiles and clamp quantized activations
+and gradients.
+
+3. Use channel-wise quantization for all parameters to re-
+duce quantization error, at the expense of a negligible
+amount of additional computation.
+
+We apply our techniques to build 4-bit versions of the
+one-stage RetinaNet detector and two-stage Faster R-CNN
+detector, using a variety of networks including ResNet-18,
+ResNet-50 and MobileNetV2 as backbones. We performed
+extensive experiments using the COCO benchmark, and de-
+tailed ablation studies to identify the effectiveness of our
+proposed improvements. Contributions of this work in-
+clude:
+
+1. We propose a hardware-friendly quantization scheme
+which does not use any ﬂoating point arithmetic oper-
+ations during inference.
+
+2. We identify several difﬁculties faced by current low-
+bitwidth detectors during ﬁne tuning, and propose
+
+techniques to stabilize fully quantized detector ﬁne
+tuning.
+
+3. We construct and report on the performance of state-
+of-the-art detectors quantized to 4 bits. To our knowl-
+edge, these are the ﬁrst fully quantized 4-bit object de-
+tection models that achieve acceptable accuracy loss
+and requires no special hardware design, and thus may
+be used as a baseline for future end-to-end low-bit
+quantization schemes on complex tasks.
+
+2. Related works
+
+2.1. Modern Detectors
+
+In recent years, the dominant method for object detec-
+tion has been anchor-based detection networks, including
+single stage detectors such as SSD [23], YOLO [25] and
+RetinaNet [21], and the two stage R-CNN series of detec-
+tors [7, 6, 26, 20]. In the one stage method, the features of a
+convolutional backbone network are fed to subnetworks for
+object classiﬁcation and bounding box regression. In two
+stage methods, the ﬁrst stage generates a set of object can-
+didates with rough locations, then in the second stage these
+candidates are classiﬁed according to target labels and their
+bounding box locations are reﬁned.
+
+2.2. Network Quantization
+
+Network quantization is an effective method for speed-
+ing up neural networks. Most network quantization research
+has focused on object classiﬁcation, including BNN [13],
+QNN [14], XNOR-Net [24], DoReFa-Net [35], INQ [33],
+ELQ [34], LQ-Nets [31] etc.
+
+In terms of quantization of object detector networks,
+Google proposed an 8-bit quantization method [17], which
+led to signiﬁcant improvements in the latency-accuracy
+tradeoff for MobileNets [12] on both ImageNet classiﬁca-
+tion [5] and COCO object detection [22]. Wei et al [28]
+quantized activations in object detection models for the pur-
+pose of knowledge transfer from large to small models.
+
+3. Techniques for Fully Quantized Network
+
+In this section, we introduce a set of quantization
+schemes, ﬁne tuning protocols and several speciﬁc enhance-
+ments, which we together call Fully Quantized Network
+(FQN), allowing quantization of an object detection net-
+work which uses full precision arithmetic to one using 4-
+bit arithmetic, while largely retaining the accuracy of the
+original network. Network quantization typically consists
+of three stages, full precision training, quantization and ﬁne
+tuning, and ﬁnally deployment of the quantized model. We
+empirically observe that most quantization problems arise
+during the ﬁne tuning stage, and FQN focuses on this stage.
+
+2811
+
+Figure 1: Histograms of afﬁne parameter β (left), batch average µb (middle) and variance σb (right) at the batch norm layer
+“layer2.0.bn1” of a ResNet-18 RetinaNet detector during 4-bit ﬁne tuning. Batch statistics become unstable due to small
+batch size and aggressively quantized activations, and thus are not used in this work.
+
+FQN uses asymmetric uniform quantization, making it eas-
+ily deployable on real world devices.
+
+3.1. Network Quantization Process
+
+We ﬁrst review the three main steps for network quanti-
+
+zation.
+
+Full-precision training is performed if no trained detec-
+tor is provided. During training, weights, activations and
+gradients are all processed in full-precision. In each batch
+normalization layer, an average µb and variance σb is com-
+puted for each feature channel, and then used to normal-
+ize each feature within the current minibatch. In addition,
+each batch normalization layer keeps track of exponential
+moving average (EMA) statistics µEM A and σEM A, and
+updates them at each forward step by µb and σb.
+
+Quantization-aware ﬁne tuning is performed once full-
+precision training is done, or if a well trained detector is
+initially provided. This stage consists of additional training
+steps, but in which forward passes operate on weights and
+activations that have been quantized to the same bitwidth as
+that to be eventually used during inference. Note that full
+precision copies of the weights are still maintained, and are
+updated by full precision gradients throughout ﬁne tuning.
+In [17], batch normalization layers normalize input fea-
+tures and update µEM A, σEM A with batch statistics µb and
+σb during ﬁne tuning. We empirically ﬁnd this harms ﬁ-
+nal accuracy, and instead we propose to prevent these val-
+ues from being updated during ﬁne tuning, as discussed in
+§3.5.1.
+
+Fully-quantized inference can be performed on hardware
+with integer arithmetic units, or simulated on GPUs using
+ﬂoating point operations. Given a ﬁne tuned detector from
+the previous phase, batch normalization values µEM A and
+σEM A and afﬁne parameters are folded into each corre-
+
+sponding layer’s weights, to eliminate explicit normaliza-
+tion and scaling during inference. Activations from normal-
+ized inputs to output predictions and all weights are quan-
+tized to the target bitwidth, and no ﬂoating point operations
+are performed.
+
+3.2. Uniform Quantization
+
+Modern neural networks store weights, activations and
+gradients as tensors of ﬂoating point values. Quantization
+rounds these to a smaller set of values to reduce the number
+of bits used in their representation. Given a full precision
+tensor XR = [xR
+0,...n−1] and target bitwidth k, the quanti-
+zation function Qk(·) maps xR
+to the nearest quantization
+i
+point qj :
+
+XQ = Qk(XR) ∈ {q0, q1, . . . q2k−1}
+
+(1)
+
+We adopt a uniform quantization scheme in this work,
+where distances between adjacent quantized points are
+equal, so that XQ can be represented as
+
+XQ = ∆(XI − z)
+
+(2)
+
+where ∆ is distance between adjacent quantized points, XI
+is a set of integer indices and z is the index for the bias. A
+quantization range [lb, ub], for lb, rb ∈ R is used to deter-
+mine qj and ∆:
+
+lb = q0, ub = q2k−1
+ub − lb
+2k − 1
+
+∆ =
+
+(3)
+
+(4)
+
+Once ∆ computed, the indices tensor XI can be computed
+
+2812
+
+have shape cout × cin. For both types of weight tensors
+W ∈ Rcout
+×∗ in FQN, quantization boundaries are com-
+puted along each of the cout output channels:
+
+lb =
+
+ub =
+
+min
+
+axis=1:W.dim
+
+max
+
+axis=1:W.dim
+
+(W)
+
+(W)
+
+(9)
+
+(10)
+
+Each output channel can have a different quantization
+boundary. By quantizing each channel independently we
+ensure channels with small weight ranges use ﬁner quan-
+tization and smaller ∆ values than channels with larger
+weight ranges. We found empirically that different channels
+can differ drastically in their weight ranges; for example, in
+ResNet-50’s layer2.0.conv1 layer weight ranges var-
+ied from 3.745 × 10−8 to 0.727. As shown in Figure 2, a
+considerable number of weight channels in ResNet-50 have
+signiﬁcant magnitude variations. Using layer-wise quanti-
+zation in this case would have introduced severe distortion
+in some of the quantized values.
+
+3.4. Activation Quantization
+
+Unlike most of works, we quantize all activations in FQN
+from the normalized input, to the ﬁnal predictions feed-
+ing into anchor regression and non-maximum suppression
+(NMS). Activations are quantized in a layer-wise manner.
+
+To determine quantization ranges lb and ub for activa-
+tion xl on layer l, [17] used exponential moving averages
+(EMA) with momentum M to record a smoothed minimum
+EM A for xl. During fully quan-
+lbl
+tized ﬁne tuning, each activation’s lb and ub values are as-
+signed with these EMA statistics.
+
+EM A and maximum ubl
+
+We encountered several problems when ﬁne tuning a 4-
+
+bit detector using this method:
+
+1. Hyperparameters such as EMA momentum M are dif-
+EM A and
+
+ﬁcult to set properly, and the ﬁnal statistics lbl
+ubl
+
+EM A are very sensitive to these hyperparameters.
+
+2. Normalized activations are more likely to contain out-
+lier values.
+If hyperparameters are not properly set,
+the outliers will expand the quantization range, de-
+crease quantization resolution and introduce quanti-
+zation noise, especially on activation channels with
+smaller magnitudes.
+
+3.4.1 Reducing Activation Instability
+
+To control this instability, we develop a simple yet effec-
+tive method. We randomly sample ncal batches of training
+data to build a small calibration set, then evaluate a trained
+detector on the calibration set and record each layers acti-
+vation values, between the γ’th and 1 − γ’th percentiles, for
+some 0 < γ < 1.
+
+2813
+
+Figure 2: Histogram of channel-wise magnitude variations
+in weights of a ResNet-50 RetinaNet detector. The x-axis is
+the ratio of maximum to minimum magnitudes in different
+weight channels, given in units of dB. The y-axis shows the
+frequency of such log ratios. Note the bars on the right,
+indicating channels with large weight variations.
+
+by:
+
+XR = clamp(XR, lb, ub)
+
+XI = ⌊
+
+XR − lb
+
+∆
+
+⌉
+
+(5)
+
+(6)
+
+where clamp(x, lb, ub) = max(min(x, ub), lb) restricts the
+ﬁrst argument to the interval spanned by the second and
+third arguments, and where ⌊·⌉ is the round operator.
+
+When both weights and activations are quantized during
+inference, expensive ﬂoating point tensor arithmetic can be
+replaced by efﬁcient integer arithmetic 1:
+
+y = Qk(W)Qk(x) = ∆W∆x(WI xI )
+
+(7)
+
+Since the mapping operation Qk(·) is not differentiable,
+the straight though estimator (STE) [3] is used during net-
+work training. Note that entries outside the quantization
+boundaries receive no gradient:
+
+∂y
+∂xR
+i
+
+∂y
+∂xQ
+i
+0
+
+= 
+
+
+if lb ≤ xR
+
+i ≤ ub
+
+otherwise
+
+(8)
+
+Unless noted, the following discussions are based on uni-
+
+form quantization with bitwidth k = 4.
+
+3.3. Weight Quantization
+
+CNN based detectors are usually formed by combin-
+ing convolutional and fully connected layers. Convolu-
+tional layer weights are represented by a tensor with shape
+cout × cin × hk × wk, and fully connected layer weights
+
+1We omit the bias term z for clarity.
+
+02040608002468practice, this is one of the main obstacles to ﬁne tuning sta-
+bility.
+
+We propose a simple solution to address this problem.
+Since the EMA statistics of µ and σ from a well trained
+model should match that of the input data, during ﬁne tun-
+ing we replace the unstable σb, µb in (11) and (12) by the
+EMA statistics σEM A and µEM A, obtained during the full-
+precision training stage. Furthermore, we do not update the
+σEM A, µEM A values during ﬁne tuning; we call this freez-
+ing the batch normalization values. This procedure is illus-
+trated in Figure 3.
+
+Wf old =
+
+bf old =
+
+α
+
+α
+
+pσ2
+pσ2
+
+EM A + ǫ
+
+EM A + ǫ
+
+W
+
+(13)
+
+(b − µEM A) + β
+
+(14)
+
+We show in experiments that freezing batch normalization
+values improves ﬁne tuning stability and yields improved
+accuracy. Another beneﬁt is that no additional computations
+are needed during ﬁne tuning to calculate σb and µb. A
+similar technique is also used in [18], but they only freeze
+the batch normalization values during the last few thousand
+steps of training.
+
+Figure 3: Stabilized batch norm folding: BN statistics µ, σ
+and afﬁne parameters α, β are folded into parameters W
+and b of the preceding Conv or FC layers. Note that statis-
+tics µEMA and σEMA from trained full-precision BN layers
+are used instead of per-bath statistics from quantized acti-
+vations, to address the instability during quantization-aware
+ﬁne-tuning.
+
+We empirically ﬁnd using ncal = 20 and γ = 0.999
+yield good performance on all our evaluated settings.
+In
+addition, as shown in §4.2, quantization ﬁne tuning results
+are largely insensitive to γ selection.
+
+3.5. Batch Normalization Folding
+
+3.6. Implementation Details
+
+During training, the batch normalization [16] layers nor-
+malize input xl in batch b using minibatch statistics µb and
+σb to eliminate covariance shifting. µb and σb are also used
+to update EMA statistics µEM A and σEM A, smoothed by a
+momentum. During inference, EMA statistics and the batch
+normalization afﬁne parameters α and β are folded into the
+previous layer’s weights and biases. Folded weights are
+then quantized in the same way as normal weights and used
+in subsequent computations.
+
+In [17],
+
+the training computation graph is modiﬁed
+to simulate noise introduced from the quantized folded
+weights:
+
+Wf old =
+
+bf old =
+
+α
+pσ2
+b + ǫ
+α
+pσ2
+b + ǫ
+
+W
+
+(b − µb) + β
+
+(11)
+
+(12)
+
+where σb and µb are full precision values.
+
+3.5.1 Reducing Batch Normalization Instability
+
+As shown in Figure 1, the batch normalization parameters
+and batch statistics are both unstable during ﬁne tuning.
+This introduces signiﬁcant quantization noise when the pa-
+rameters are folded into the previous layer, and this effect
+is magniﬁed when using aggressive 4 bit quantization. In
+
+Zero-point alignment As a standard practice when de-
+ploying quantized networks to hardware, the zero point in
+XR should be accurately mapped to XQ. This alignment
+is critical to maintaining the quantized network’s accuracy,
+because misalignment of the zero-point will introduce sig-
+niﬁcant errors in operations such as zero-padding. We do
+this alignment by nudging quantization boundaries with re-
+spect to quantization resolution.
+
+Upsampling and element-wise operations Feature pyra-
+mid networks (FPN) [20] are commonly used in modern
+detectors. To eliminate ﬂoat point operations in evaluating
+FPN, we adopt two modiﬁcations: 1. All upsamplings are
+performed by nearest interpolation. 2. Element-wise addi-
+tion is performed using the same scheme as [17] to elimi-
+nate ﬂoating point rescaling, i.e. rescaling of operands ∆ is
+performed by higher precision ﬁx-point multiplication fol-
+lowed by bit-shifting. Qk(·) is added to addition inputs and
+outputs to model this behavior during ﬁne tuning.
+
+4. Experiments
+
+To evaluate the proposed FQN detectors, we perform
+a series of experiments on the COCO detection bench-
+mark [22]. COCO is one of the most popular object detec-
+tion dataset. It is widely used to benchmark state-of-the-art
+
+2814
+
+bW𝛽𝛼𝜇𝐸𝑀𝐴𝜎𝐸𝑀𝐴×÷−+𝑄𝑘𝑄𝑘𝑥⊗+𝑄𝑘×Model
+
+Input
+
+R50-FP32
+R50-INT4
+R34-FP32
+R34-INT4
+R18-FP32
+R18-INT4
+MN2-FP32
+MN2-INT4
+
+800
+800
+800
+800
+800
+800
+600
+600
+
+Model
+
+Input
+
+R50-FP32
+R50-INT4
+R34-FP32
+R34-INT4
+R18-FP32
+R18-INT4
+MN2-FP32
+MN2-INT4
+
+800
+800
+800
+800
+800
+800
+600
+600
+
+AP
+0.356
+0.325
+0.348
+0.313
+0.317
+0.286
+0.275
+0.255
+
+AP
+0.377
+0.331
+0.358
+0.318
+0.322
+0.281
+0.290
+0.255
+
+mAP
+
+mAR
+
+AP0.5 AP0.75 APS APM APL
+0.465
+0.551
+0.426
+0.515
+0.460
+0.538
+0.504
+0.416
+0.424
+0.503
+0.387
+0.469
+0.365
+0.448
+0.425
+0.345
+
+0.382
+0.347
+0.371
+0.333
+0.337
+0.299
+0.290
+0.269
+
+0.203
+0.173
+0.192
+0.161
+0.164
+0.149
+0.154
+0.134
+
+0.393
+0.356
+0.381
+0.344
+0.346
+0.312
+0.289
+0.271
+
+AR1 AR10 AR100 ARS ARM ARL
+0.680
+0.308
+0.643
+0.286
+0.686
+0.306
+0.284
+0.647
+0.652
+0.288
+0.621
+0.268
+0.615
+0.267
+0.253
+0.596
+
+0.498
+0.463
+0.493
+0.457
+0.464
+0.433
+0.441
+0.417
+
+0.529
+0.493
+0.523
+0.487
+0.495
+0.461
+0.470
+0.445
+
+0.335
+0.298
+0.319
+0.284
+0.297
+0.269
+0.283
+0.256
+
+0.569
+0.530
+0.564
+0.524
+0.529
+0.491
+0.492
+0.468
+
+(a) RetinaNet results on COCO
+
+mAP
+
+mAR
+
+AP0.5 AP0.75 APS APM APL
+0.489
+0.593
+0.436
+0.540
+0.576
+0.461
+0.422
+0.529
+0.419
+0.538
+0.381
+0.484
+0.390
+0.497
+0.453
+0.352
+
+0.409
+0.355
+0.384
+0.339
+0.340
+0.293
+0.295
+0.257
+
+0.220
+0.182
+0.211
+0.176
+0.180
+0.145
+0.160
+0.127
+
+0.415
+0.362
+0.390
+0.344
+0.347
+0.304
+0.307
+0.275
+
+AR1 AR10 AR100 ARS ARM ARL
+0.678
+0.316
+0.629
+0.291
+0.307
+0.611
+0.634
+0.284
+0.630
+0.286
+0.594
+0.263
+0.610
+0.272
+0.250
+0.573
+
+0.513
+0.468
+0.496
+0.460
+0.466
+0.429
+0.439
+0.402
+
+0.541
+0.494
+0.526
+0.486
+0.494
+0.454
+0.465
+0.426
+
+0.364
+0.320
+0.348
+0.306
+0.326
+0.281
+0.280
+0.236
+
+0.580
+0.529
+0.564
+0.520
+0.524
+0.480
+0.502
+0.465
+
+(b) Faster R-CNN results on COCO
+
+Table 1: Performance of FQN detectors on the COCO benchmark. Standard metrics including mean average precision
+(mAP) and mean average recall (mAR) on coco-2017-val are reported. Models with “-INT4” sufﬁx are ﬁne-tuned and
+evaluated in 4-bits precision. Note that models with MobileNetV2 backbone use an input size of 600 pixels due to GPU
+memory limitation.
+
+object detectors because of its rich annotations and chal-
+lenging scenarios. In all our experiments, results are evalu-
+ated by standard COCO metrics including average precision
+and average recall on the bounding box detection task. To
+analyze the sources of the improvements produced by our
+approach, we also conduct a series of ablation studies on
+detection tasks using as backbones ResNet [10] and Mo-
+bileNets [27] in 4-bit and 8-bit settings.
+
+Training protocol Detectors are trained on COCO
+the data-set coco-2017-train partition using full-
+precision before quantization. Backbones are initialized
+with classiﬁcation models pre-trained on the ImageNet
+dataset. Training is performed with synchronized SGD
+across 16 workers. The batch size on each worker is 2. The
+learning rate is warmed up to 0.04, then scaled by a factor
+of 0.1 at 30K and 80K steps.
+
+Quantization-aware ﬁne-tuning is performed on the same
+dataset, with detector weights and activations quantized
+to 4-bits. This procedure uses identical settings as full-
+precision training, except that the learning rate is ﬁxed to
+0.004. Activation ranges are measured at the 99.9% and
+
+0.1% percentiles on 20 randomly sampled data batches
+from the training set. Finetuning stops after 40K steps, and
+results on checkpoints with the highest mAP0.5:0.95 on the
+coco-2017-val partition are reported.
+
+All training and evaluation images are resized so that
+their shorter edges are 800 pixels. Images are augmented
+by random horizontal ﬂipping during training, and no eval-
+uation augmentations are performed. Note that FQN with
+MobileNetV2 backbone uses an input size of 600 pixels due
+to GPU memory limitations.
+
+4.1. Main Results on COCO
+
+We apply our proposed ﬁnetuning scheme to both one
+stage RetinaNet detectors and two stage Faster R-CNN
+detectors. ResNet-18, ResNet-32, ResNet-50, and the
+compact MobileNetV2 are used as backbones. Results
+of both full-precision baselines and 4-bit FQN on the
+coco-2017-val partition are listed in Table 1.
+
+As shown, FQN can achieve acceptable accuracy loss on
+different detection frameworks and backbones. The 4-bit
+RetinaNet detector with MobileNetV2 backbone only suf-
+fers a 2.0% mAP loss compared to its full-precision base-
+
+2815
+
+F
+
+P
+
+C
+
+AP
+#
+0.317
+0
+0.197
+1
+2 X
+0.235
+0.222
+3
+X 0.250
+4
+5 X X
+0.254
+X 0.268
+6 X
+X X 0.273
+7
+8 X X X 0.286
+
+X
+
+AP0.5 AP0.75
+0.337
+0.503
+0.198
+0.348
+0.245
+0.402
+0.228
+0.381
+0.419
+0.260
+0.265
+0.426
+0.280
+0.442
+0.288
+0.449
+0.469
+0.299
+
+P
+
+F
+
+C
+
+AP
+#
+0.317
+0
+0.296
+1
+2 X
+0.299
+0.313
+3
+X 0.293
+4
+5 X X
+0.312
+X 0.302
+6 X
+X X 0.312
+7
+8 X X X 0.314
+
+X
+
+AP0.5 AP0.75
+0.337
+0.503
+0.312
+0.475
+0.314
+0.481
+0.344
+0.499
+0.473
+0.308
+0.311
+0.495
+0.319
+0.482
+0.311
+0.497
+0.498
+0.332
+
+(a) Ablations on 4-bits ResNet-18 RetinaNet
+
+(b) Ablations on 8-bits ResNet-18 RetinaNet
+
+Table 2: Ablation studies on the COCO benchmark. In all subtables, row 0 is the FP32 baseline, row 1 is ﬁnetuned by
+methods in [17], and row 8 is our proposed FQN. F indicates batch norm freezing, P indicates using percentiles for activation
+statistics, and C indicates using channel-wise quantization.
+
+F
+
+AP
+Precision
+4 bits
+0.226
+4 bits X 0.236
+8 bits
+0.299
+8 bits X 0.300
+
+AP0.5 AP0.75
+0.235
+0.384
+0.245
+0.400
+0.316
+0.479
+0.480
+0.318
+
+γ
+
+0.9990
+0.9973
+0.9545
+
+AP
+0.286
+0.289
+0.275
+
+AP0.5 AP0.75
+0.299
+0.469
+0.308
+0.469
+0.449
+0.287
+
+Table 3: Comparisons on FreezeBN strategy on different
+bit-width. Checking F means freezing BN in the entire ﬁne-
+tuning process, otherwise only freezing BN in the ﬁnal 10k
+steps as in [18].
+
+line. 4-bit ResNet-50 incurs 3.1% mAP loss when used in
+the RetinaNet detector, and 4.6% mAP loss when used in
+the Faster R-CNN detector. Considering ResNet and Mo-
+bileNets are compact and widely used, these experiments
+indicates the robustness and generality of FQN.
+
+Note that for all backbones, two stage Faster R-CNN de-
+tectors always incur higher mAP loss than one stage Reti-
+naNet detectors. One possible reason is that the number
+of parameters in the region proposal network (RPN) and
+ﬁnal prediction sub-nets of Faster R-CNN is smaller than
+the number of parameters in the classiﬁcation and bounding
+box regression sub-nets of RetinaNet. Another possibility
+is the fully connected layers in Faster R-CNN detectors are
+more sensitive to quantization.
+
+4.2. Ablation Studies
+
+We also analyzed FQN by performing a number of abla-
+tion studies using ResNet-18 with a RetinaNet detector on
+COCO’s coco-2017-val partition. We choose ResNet-
+18 as the backbone because it is a relatively small net-
+works, and hence more sensitive to quantization, and be-
+cause ResNet-18 has received great interest from the net-
+work compression community.
+
+FQN shares many features with [17], which is designed
+for 8-bit networks. We therefore also report our reproduced
+
+Table 4: Comparison of varying percentile γ durning cali-
+brating activation ranges.
+
+4 and 8-bit results based on [17]’s method.
+
+Results are listed in Table 2. In both subtables in Table
+2, row 0 is the FP32 full precision baseline, row 1 is our re-
+produced results for [17]. A check in the F column indicates
+batch normalization statistics were frozen during the entire
+ﬁne tuning process, as described in §3.5.1. A check in the P
+column indicates activation ranges used percentiles instead
+of EMA statistics, as described in §3.4.1. Finally, a check
+in the C column indicates network weights were quantized
+on a per channel basis, as described in §3.3.
+
+Freezing BarchNorm statistics As shown in rows 1 and
+2 in Table 2a and Table 2b, freezing batch normalization
+statistics leads to a signiﬁcant increase of 3.8% on 4-bit
+mAP, and a small improvement of 0.3% in 8-bit. This indi-
+cates that batch normalization in low bitwidth detectors are
+more likely to suffer instability from low quality activation
+statistics.
+
+Recent work in [18] also indicated freezing batch nor-
+malization statistics helps quantized ﬁne tuning. However,
+[18] suggested freezing statistics only in the last few thou-
+sand steps of training. We compared our method with theirs
+on both 4 and 8-bit settings. As shown in Table 3, freez-
+ing statistics during the entire ﬁne tuning process leads to
+better performance, at least in detection tasks. One possi-
+ble reason for this is that detectors are ﬁne tuned in smaller
+mini-batches, so quantization noise introduced in detection
+models batch statistics are relatively strong.
+
+2816
+
+–
+
+Method
+
+FP32 baseline
+
+Act. calibration
+
+Integer-only [17]
+
+Quant whitepaper [18]
+
+#
+0
+1
+2
+3 DoReFa-Net [35] foldBN Clip to [{−1, 0}, +1]
+4
+5
+6
+
+Moving average
+Moving average
+
+XNOR-Net [24] foldBN
+
+Percentile
+Percentile
+
+Moving average
+
+Ours
+
+mAP
+0.317
+0.197
+0.226
+0.039
+0.244
+0.267
+0.286
+
+0.3
+
+0.2
+
+0.1
+
+0.0
+
+P
+A
+m
+
+integer_only
+whitepaper
+xnor_ema
+xnor_percentile
+ours
+
+0
+
+5000 10000 15000 20000 25000 30000 35000 40000
+
+iteration
+
+Table 5: Baseline comparisons on 4-bit ResNet-18 Reti-
+naNet.
+
+Percentile based activation clamping Comparing rows 1
+with 3 in Table 2a and Table 2b, we ﬁnd that using percentile
+statistics to clamp activation values improves performance
+in both the 4 and 8-bit settings. The mAP gains are 2.5%
+and 1.7%, respectively.
+
+To analyze the efﬁciency and robustness of percentile
+based statistics, we evaluate our model (shown in row #8 in
+Table 2a) by varying γ. We compared the default γ = 0.999
+with γ = 0.9973 and γ = 0.9545. The latter two γ val-
+ues represent clamping activation values within a range of
+±2σ and ±3σ, respectively. They lie around the mean
+activation value, assuming activation values are stochastic
+and follow a Gaussian distribution. As shown in Table 4,
+γ = 0.9973 yields slightly better performance, though the
+effect is small.
+
+Channel-wise quantization scheme Comparing rows 1
+with 4 in Table 2a and Table 2b, we see that using channel-
+wise quantization produces a 5.3% mAP gain in 4-bit set-
+tings. This signiﬁcant improvement indicates the magnitude
+the variation between weights is an important factor for ac-
+curacy loss in low bitwidth scenarios.
+
+4.3. Comparison with Previous Methods
+
+We now compare our proposed FQN method with sev-
+eral existing methods, including integer-only detection [17],
+the quantization whitepaper [18], XNOR-Net [24] and
+DoReFa-Net [35], applied to ResNet-18 RetinaNet in 4-bit
+precision. We note that XNOR-Net and DoReFa-Net per-
+form certain operations in ﬂoating point (e.g. batch normal-
+ization), while all operations in FQN are quantized. Thus,
+for a proper comparison we quantized all operations in
+XNOR-Net and DoReFa-Net. We also note that [24] only
+speciﬁed a calibration method for 1-bit activations. In our
+results we report on two 4-bit calibration methods using
+a moving average and our proposed percentile method, as
+shown in rows 4 and 5 of Table 5, respectively. As can be
+seen, the detection accuracy (mAP) of FQN is signiﬁcantly
+better than all the baselines.
+
+Figure 4: Fine-tuning curve for 4-bit ResNet-18 RetinaNet.
+The x-axis is the number of ﬁne-tuning iterations. Note that
+methods which calibrate activation ranges using moving av-
+erage delay activation quantization for 10K iterations, caus-
+ing a trough. Also, methods using channel-wise quantiza-
+tion have higher starting accuracy.
+
+FQN also improves the convergence speed compared
+to previous methods during quantization-aware ﬁne-tuning.
+As shown in Figure 4, FQN converges much faster, the mAP
+of FQN nearly recovers to 0.27 after only 1K steps of ﬁne-
+tuning, and is stable during the entire ﬁne-tuning process.
+
+5. Conclusion
+
+In this paper, we propose FQN, a general quantization
+approach for low-precision, integer-only arithmetic infer-
+ence. FQN supports end-to-end fully quantized training
+of complex object detection tasks. Compared to previous
+quantization methods, our approach produces a 4-bit model
+with performance very close to the 32-bit ﬂoating-point ver-
+sion, even on mobile friendly networks. We hope this ap-
+proach and the observations in our experimental analysis
+can facilitate future quantization research and industrial vi-
+sion applications on resource constrained devices.
+
+References
+
+[1] Hande Alemdar, Vincent Leroy, Adrien Prost-Boucle, and
+Ternary neural networks for resource-
+Frederic Petrot.
+efﬁcient ai applications. 2017 International Joint Conference
+on Neural Networks (IJCNN), May 2017.
+
+[2] Dan Alistarh, Demjan Grubic, Jerry Li, Ryota Tomioka, and
+Milan Vojnovic. Qsgd: Communication-efﬁcient sgd via gra-
+dient quantization and encoding, 2016.
+
+[3] Yoshua Bengio, Nicholas L´eonard, and Aaron Courville. Es-
+timating or propagating gradients through stochastic neurons
+for conditional computation, 2013.
+
+[4] Zhaowei Cai, Xiaodong He, Jian Sun, and Nuno Vasconce-
+los. Deep learning with low precision by half-wave gaussian
+quantization. arXiv preprint arXiv:1702.00953, 2017.
+
+[5] Jia Deng, Wei Dong, Richard Socher, Li-Jia Li, Kai Li,
+and Li Fei-Fei.
+Imagenet: A large-scale hierarchical im-
+age database. In Computer Vision and Pattern Recognition,
+2009. CVPR 2009. IEEE Conference on, pages 248–255.
+IEEE, 2009.
+
+2817
+
+[6] Ross Girshick. Fast r-cnn. In Proceedings of the IEEE inter-
+national conference on computer vision, pages 1440–1448,
+2015.
+
+[7] Ross Girshick, Jeff Donahue, Trevor Darrell, and Jitendra
+Malik. Rich feature hierarchies for accurate object detection
+and semantic segmentation. In Proceedings of the IEEE con-
+ference on computer vision and pattern recognition, pages
+580–587, 2014.
+
+[8] Yiwen Guo, Anbang Yao, and Yurong Chen. Dynamic net-
+
+work surgery for efﬁcient dnns, 2016.
+
+[9] Song Han, Huizi Mao, and William J Dally. Deep com-
+pression: Compressing deep neural networks with pruning,
+trained quantization and huffman coding. arXiv preprint
+arXiv:1510.00149, 2015.
+
+[10] Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun.
+Deep residual learning for image recognition. In Proceed-
+ings of the IEEE conference on computer vision and pattern
+recognition, pages 770–778, 2016.
+
+[11] Lu Hou and James T. Kwok. Loss-aware weight quantization
+
+of deep networks, 2018.
+
+[12] Andrew G Howard, Menglong Zhu, Bo Chen, Dmitry
+Kalenichenko, Weijun Wang, Tobias Weyand, Marco An-
+dreetto, and Hartwig Adam. Mobilenets: Efﬁcient convolu-
+tional neural networks for mobile vision applications. arXiv
+preprint arXiv:1704.04861, 2017.
+
+[13] Itay Hubara, Matthieu Courbariaux, Daniel Soudry, Ran El-
+Yaniv, and Yoshua Bengio. Binarized neural networks. In
+Advances in neural information processing systems, pages
+4107–4115, 2016.
+
+[14] Itay Hubara, Matthieu Courbariaux, Daniel Soudry, Ran El-
+Yaniv, and Yoshua Bengio. Quantized neural networks:
+Training neural networks with low precision weights and
+activations. The Journal of Machine Learning Research,
+18(1):6869–6898, 2017.
+
+[15] Forrest N Iandola, Song Han, Matthew W Moskewicz,
+Khalid Ashraf, William J Dally,
+and Kurt Keutzer.
+Squeezenet: Alexnet-level accuracy with 50x fewer pa-
+rameters and¡ 0.5 mb model size.
+arXiv preprint
+arXiv:1602.07360, 2016.
+
+[16] Sergey Ioffe and Christian Szegedy. Batch normalization:
+Accelerating deep network training by reducing internal co-
+variate shift. arXiv preprint arXiv:1502.03167, 2015.
+
+[17] Benoit Jacob, Skirmantas Kligys, Bo Chen, Menglong Zhu,
+Matthew Tang, Andrew Howard, Hartwig Adam, and Dmitry
+Kalenichenko. Quantization and training of neural networks
+for efﬁcient integer-arithmetic-only inference. In The IEEE
+Conference on Computer Vision and Pattern Recognition
+(CVPR), June 2018.
+
+[18] Raghuraman Krishnamoorthi. Quantizing deep convolu-
+tional networks for efﬁcient inference: A whitepaper. arXiv
+preprint arXiv:1806.08342, 2018.
+
+[19] Fengfu Li, Bo Zhang, and Bin Liu. Ternary weight networks,
+
+2016.
+
+[20] Tsung-Yi Lin, Piotr Doll´ar, Ross B Girshick, Kaiming He,
+Bharath Hariharan, and Serge J Belongie. Feature pyramid
+networks for object detection. In CVPR, volume 1, page 4,
+2017.
+
+[21] Tsung-Yi Lin, Priyal Goyal, Ross Girshick, Kaiming He, and
+Piotr Doll´ar. Focal loss for dense object detection.
+IEEE
+transactions on pattern analysis and machine intelligence,
+2018.
+
+[22] Tsung-Yi Lin, Michael Maire, Serge Belongie, James Hays,
+Pietro Perona, Deva Ramanan, Piotr Doll´ar, and C Lawrence
+Zitnick. Microsoft coco: Common objects in context.
+In
+European conference on computer vision, pages 740–755.
+Springer, 2014.
+
+[23] Wei Liu, Dragomir Anguelov, Dumitru Erhan, Christian
+Szegedy, Scott Reed, Cheng-Yang Fu, and Alexander C
+Berg. Ssd: Single shot multibox detector. In European con-
+ference on computer vision, pages 21–37. Springer, 2016.
+
+[24] Mohammad Rastegari, Vicente Ordonez, Joseph Redmon,
+and Ali Farhadi. Xnor-net: Imagenet classiﬁcation using bi-
+nary convolutional neural networks. In European Conference
+on Computer Vision, pages 525–542. Springer, 2016.
+
+[25] Joseph Redmon, Santosh Divvala, Ross Girshick, and Ali
+Farhadi. You only look once: Uniﬁed, real-time object de-
+tection. In Proceedings of the IEEE Conference on Computer
+Vision and Pattern Recognition, pages 779–788, 2016.
+
+[26] Shaoqing Ren, Kaiming He, Ross Girshick, and Jian Sun.
+Faster r-cnn: Towards real-time object detection with region
+proposal networks. In Advances in neural information pro-
+cessing systems, pages 91–99, 2015.
+
+[27] Mark Sandler, Andrew Howard, Menglong Zhu, Andrey Zh-
+moginov, and Liang-Chieh Chen. Mobilenetv2: Inverted
+residuals and linear bottlenecks. In Proceedings of the IEEE
+Conference on Computer Vision and Pattern Recognition,
+pages 4510–4520, 2018.
+
+[28] Yi Wei, Xinyu Pan, Hongwei Qin, Wanli Ouyang, and Jun-
+jie Yan. Quantization mimic: Towards very tiny cnn for
+object detection. Lecture Notes in Computer Science, page
+274–290, 2018.
+
+[29] Shuang Wu, Guoqi Li, Feng Chen, and Luping Shi. Training
+and inference with integers in deep neural networks. arXiv
+preprint arXiv:1802.04680, 2018.
+
+[30] Penghang Yin, Shuai Zhang, Jiancheng Lyu, Stanley Os-
+her, Yingyong Qi, and Jack Xin. Binaryrelax: A relaxation
+approach for training deep neural networks with quantized
+weights, 2018.
+
+[31] Dongqing Zhang, Jiaolong Yang, Dongqiangzi Ye, and Gang
+Hua. Lq-nets: Learned quantization for highly accurate and
+compact deep neural networks. In Proceedings of the Euro-
+pean Conference on Computer Vision (ECCV), pages 365–
+382, 2018.
+
+[32] Xiangyu Zhang, Xinyu Zhou, Mengxiao Lin, and Jian Sun.
+Shufﬂenet: An extremely efﬁcient convolutional neural net-
+work for mobile devices. In The IEEE Conference on Com-
+puter Vision and Pattern Recognition (CVPR), June 2018.
+
+[33] Aojun Zhou, Anbang Yao, Yiwen Guo, Lin Xu, and
+Yurong Chen. Incremental network quantization: Towards
+lossless cnns with low-precision weights. arXiv preprint
+arXiv:1702.03044, 2017.
+
+[34] Aojun Zhou, Anbang Yao, Kuan Wang, and Yurong Chen.
+Explicit loss-error-aware quantization for low-bit deep neu-
+ral networks.
+In Proceedings of the IEEE Conference on
+
+2818
+
+Computer Vision and Pattern Recognition, pages 9426–
+9435, 2018.
+
+[35] Shuchang Zhou, Yuxin Wu, Zekun Ni, Xinyu Zhou, He Wen,
+and Yuheng Zou. Dorefa-net: Training low bitwidth convo-
+lutional neural networks with low bitwidth gradients. arXiv
+preprint arXiv:1606.06160, 2016.
+
+[36] Barret Zoph, Vijay Vasudevan, Jonathon Shlens, and Quoc V
+Le. Learning transferable architectures for scalable image
+recognition. arXiv preprint arXiv:1707.07012, 2(6), 2017.
+
+2819
+
+

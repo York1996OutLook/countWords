@@ -1,0 +1,1267 @@
+Instance Segmentation by Jointly Optimizing Spatial Embeddings and
+
+Clustering Bandwidth
+
+Davy Neven Bert De Brabandere Marc Proesmans
+
+Luc Van Gool
+
+Dept. ESAT, Center for Processing Speech and Images
+
+KU Leuven, Belgium
+
+{firstname.lastname}@esat.kuleuven.be
+
+Abstract
+
+Current state-of-the-art instance segmentation methods
+are not suited for real-time applications like autonomous
+driving, which require fast execution times at high ac-
+curacy. Although the currently dominant proposal-based
+methods have high accuracy, they are slow and generate
+masks at a ﬁxed and low resolution. Proposal-free meth-
+ods, by contrast, can generate masks at high resolution and
+are often faster, but fail to reach the same accuracy as the
+proposal-based methods.
+In this work we propose a new
+clustering loss function for proposal-free instance segmen-
+tation. The loss function pulls the spatial embeddings of
+pixels belonging to the same instance together and jointly
+learns an instance-speciﬁc clustering bandwidth, maximiz-
+ing the intersection-over-union of the resulting instance
+mask. When combined with a fast architecture, the network
+can perform instance segmentation in real-time while main-
+taining a high accuracy. We evaluate our method on the
+challenging Cityscapes benchmark and achieve top results
+(5% improvement over Mask R-CNN) at more than 10 fps
+on 2MP images.1
+
+1. Introduction
+
+Semantic instance segmentation is the task of locating
+all objects in an image, assigning each object to a spe-
+ciﬁc class and generating a pixel-perfect mask for each one,
+perfectly delineating their shape. This contrasts with the
+standard bounding-box detection methods, where each ob-
+ject is represented by a crude rectangular box. Since hav-
+ing a binary mask for each object is desired (and neces-
+sary) in many applications, ranging from autonomous driv-
+ing and robotics applications to photo-editing/analyzing ap-
+plications, instance segmentation remains an important re-
+search topic.
+
+1For experiments on additional datasets we refer to the arXiv version
+
+of this paper.
+
+Figure 1. Our loss function encourages pixels to point into an opti-
+mal, object-speciﬁc region around the object’s center, maximizing
+the intersection-over-union of each object’s mask. For big objects,
+this region will be bigger, relaxing the loss for edge-pixels, which
+are further away from the center. Bottom left displays the learned
+offset vectors, encoded in color. Bottom right displays the dis-
+placed pixels, displaced with the learned offset vectors. Instances
+are recovered by clustering around each center with the learned,
+optimal clustering region.
+
+Currently, the dominant method for instance segmenta-
+tion is based on a detect-and-segment approach, where ob-
+jects are detected using a bounding-box detection method
+and then a binary mask is generated for each one. Despite
+many attempts in the past, the Mask R-CNN framework was
+the ﬁrst one to achieve outstanding results on many bench-
+marks, and is still the most used method for instance seg-
+mentation to date. While this method provides good re-
+sults in terms of accuracy, it generates low resolution masks
+which are not always desirable (e.g. for photo-editing appli-
+cations) and operates at a low frame rate, making it imprac-
+tical for real-time applications such as autonomous driving.
+
+Another popular branch of instance segmentation meth-
+ods are proposal-free methods, which are mostly based on
+
+18837
+
+embedding loss functions or pixel afﬁnity learning. Since
+these methods typically rely on dense-prediction networks,
+their generated instance masks can have a high resolution.
+Additionally, proposal-free methods often report faster run-
+times than proposal-based ones. Although these methods
+are promising, they fail to perform as well as the above men-
+tioned detect-and-segment approaches like Mask R-CNN.
+
+In this paper, we formulate a new loss function for
+proposal-free instance segmentation, combining the bene-
+ﬁts of both worlds: accurate, high resolution masks com-
+bined with real-time performance. Our method is based on
+the principle that pixels can be associated with an object by
+pointing to that object’s center. Unlike previous works that
+apply a standard regression loss on all pixels, forcing them
+to point directly at the object’s center, we introduce a new
+loss function which optimizes the intersection-over-union
+of each object’s mask. Our loss function will therefore in-
+directly force object pixels to point into an optimal region
+around the object’s center. For big objects, the network will
+learn to make this region bigger, relaxing the loss on pix-
+els which are further away from the object’s center. At in-
+ference time, instances are recovered by clustering around
+each object’s center with the learned, object-speciﬁc region.
+See ﬁgure 1.
+
+We test our method on the challenging Cityscapes
+dataset and show that we achieve top results, surpassing
+Mask R-CNN with an Average Precision score of 27.6 ver-
+sus 26.2, at a frame rate of more than 10 fps. We also ob-
+serve that our method does very well on cars and pedes-
+trians, reaching similar accuracy scores as a Mask R-CNN
+model which was trained on a combination of Cityscapes
+and COCO. On the Cityscapes dataset, our method is the
+ﬁrst one which runs in real time while maintaining a high
+accuracy.
+
+In summary, we (1) propose a new loss function which
+directly optimizes the intersection-over-union of each in-
+stance by pulling pixels into an optimal, object-speciﬁc
+clustering region and (2) achieve top results in real-time on
+the Cityscapes dataset.
+
+2. Related Work
+
+The current best performing instance segmentation
+methods are proposal-based, and rely on the Faster R-
+CNN [23] object detection framework, which is the cur-
+rent leader in most object detection benchmarks. Previ-
+ous instance segmentation approaches relied on their detec-
+tion output to get object proposals, which they then reﬁne
+into instance masks [4, 12, 21, 22]. Mask R-CNN [8] and
+its derivative PANet [16] reﬁne and simplify this pipeline
+by augmenting the Faster R-CNN network with a branch
+for predicting an object mask. Although they are the best-
+scoring methods on popular benchmarks, such as COCO,
+their instance masks are generated at a low resolution
+
+(32x32 pixels) and in practice are not often used in real-
+time applications.
+
+Another branch of instance segmentation methods rely
+on dense-prediction, segmentation networks to generate in-
+stance masks at input resolution. Most of these meth-
+ods [6, 18, 11, 5, 19] are based on an embedding loss func-
+tion, which forces the feature vectors of pixels belonging
+to the same object to be similar to each other and suf-
+ﬁciently dissimilar from feature vectors of pixels belong-
+ing to other objects. Recently, works [19, 14] have shown
+that the spatial-invariant nature of Fully Convolutional Net-
+works is not ideal for embedding methods and propose to ei-
+ther incorporate coordinate maps [14] or use so-called semi-
+convolutions [19] to alleviate this problem. Nevertheless, at
+the current time these methods still fail to achieve the same
+performance as the proposal-based ones.
+
+In light of this, a more promising and simple method is
+proposed by Kendall et al. [10], inspired by [13], in which
+they propose to assign pixels to objects by pointing to its ob-
+ject’s center. This way, they avoid the aforementioned prob-
+lem of spatial-invariance by learning position-relative offset
+vectors. Our method is based on the same concept, but in-
+tegrates the post-processing clustering step directly into the
+loss function and optimizes the intersection-over-union of
+each object’s mask directly. Related to our method is the
+very recent work of Novotny et al. [19]. Although similar
+in concepts, they use a different loss function and still apply
+a detection-ﬁrst principle.
+
+Also inspired by [10] is Box2Pix, a work proposed by
+Uhrig et al. [25], where they ﬁrst predict bounding boxes
+based on a single-shot detection method, and then asso-
+ciate pixels by pointing to object centers, which can after-
+wards be efﬁciently clustered. Its focus lays on real-time
+instance segmentation and shows promising results on the
+Cityscapes dataset. Our method also shows real-time per-
+formance on the Cityscapes dataset, but at a much higher
+accuracy.
+
+Our loss relaxation by learning an optimal clustering
+margin shows some similarites with [20, 9], where they in-
+tegrate the aleatoric uncertainty into the loss function. In
+contrast to these works, we directly use the learned margin
+at test time.
+
+3. Method
+
+We treat instance segmentation as a pixel assignment
+problem, where we want to associate pixels with the cor-
+rect objects. To this end we learn an offset vector for each
+pixel, pointing to its object’s center. Unlike the standard re-
+gression approach, which we explain further in 3.1, we also
+learn an optimal clustering region for each object and by
+doing so we relax the loss for pixels far away from the cen-
+ter. This is explained in 3.2. To locate the object’s centers,
+we learn a seed map for each semantic class, as described
+
+8838
+
+in 3.5. The pipeline is graphically depicted in ﬁgure 2.
+
+3.1. Regression to the instance centroid
+
+The goal of instance segmentation is to cluster a
+set of pixels X = {x0, x1, x2, ..., xN }, with x a 2-
+dimensional coordinate vector, into a set of instances S =
+{S0, S1, ..., SK}.
+
+An often used method is to assign pixels to their cor-
+responding instance centroid Ck = 1
+x . This is
+achieved by learning an offset vector oi for each pixel xi,
+so that the resulting (spatial) embedding ei = xi + oi points
+to its corresponding instance centroid. Typically, the off-
+set vectors are learned using a regression loss function with
+direct supervision:
+
+N Px∈Sk
+
+n
+
+Lregr =
+
+koi − ˆoik
+
+(1)
+
+Xi=1
+
+where ˆoi = Ck − xi for xi ∈ Sk. However, the above
+method poses two issues at inference time. First, the loca-
+tions of the instance centroids have to be determined and
+second, the pixels have to be assigned to a speciﬁc instance
+centroid. To solve these problems, previous methods rely
+on density-based clustering algorithms to ﬁrst locate a set of
+centroids C = {C0, C1, ..., CK} and next assign pixels to a
+speciﬁc instance based on a minimum distance-to-centroid
+metric :
+
+ei ∈ Sk : k = arg min
+
+C
+
+kei − Ck
+
+(2)
+
+Since this post-processing step (center localization and
+clustering) is not integrated within the loss function, the
+network cannot be optimized end-to-end for instance seg-
+mentation, leading to inferior results.
+
+3.2. Learnable margin
+
+The assignment of pixels to instance centroids can be
+incorporated into the loss function by replacing the standard
+regression loss with a hinge loss variant, forcing pixels to
+lay within a speciﬁed margin δ (the hinge margin) around
+the instance centroid:
+
+Lhinge =
+
+K
+
+Xk=1 Xei∈Sk
+
+max(kei − Ckk − δ, 0)
+
+(3)
+
+This way, at test time, pixels are assigned to a centroid
+
+by clustering around the centroid with this ﬁxed margin:
+
+ei ∈ Sk ⇐⇒ kei − Ckk < δ
+
+(4)
+
+However, a downside to this method is that the margin
+δ has to be selected based on the smallest object, ensuring
+that if two small objects are next to each other, they can still
+
+be clustered into two different instances. If a dataset con-
+tains both small and big objects, this constraint negatively
+inﬂuences the accuracy of big objects, since pixels far away
+from the centroid will not be able to point into this small
+region around the centroid. Although using a hinge loss in-
+corporates the clustering into the loss function, given the
+said downside it is not usable in practice.
+
+To solve this issue we propose to learn an instance spe-
+ciﬁc margin. For small instances a small margin should
+be used, while for bigger objects, a bigger margin would
+be preferred. This way, we relax the loss for pixels fur-
+ther away from the instance centroid, as they are no longer
+forced to point exactly at the instance centroid.
+
+In order to do so, we propose to use a gaussian func-
+tion φk for each instance Sk, which converts the distance
+between a (spatial) pixel embedding ei = xi + oi and the
+instance centroid Ck into a probability of belonging to that
+instance:
+
+φk(ei) = exp(cid:18)−
+
+kei − Ckk2
+
+2σ2
+k
+
+(cid:19)
+
+(5)
+
+A high probability means that the pixel embedding ei
+is close to the instance centroid and is likely to belong to
+that instance, while a low probability means that the pixel
+is more likely to belong to the background (or another in-
+stance). More speciﬁcally, if φk(ei) > 0.5, than that pixel,
+at location xi, will be assigned to instance k.
+
+Thus, by modifying the sigma parameter of the mapping
+
+function, the margin can be controlled:
+
+margin =q−2σ2
+
+k ln 0.5
+
+(6)
+
+A large sigma will result in a bigger margin, while a
+small sigma will result in a smaller margin. This addition-
+ally requires the network to output a σi at each pixel loca-
+tion. We deﬁne σk as the average of all σi belonging to
+instance k:
+
+σk =
+
+1
+
+|Sk| Xσi∈Sk
+
+σi
+
+(7)
+
+Since for each instance k the gaussian outputs a fore-
+ground/background probability map, this can be optimized
+by using a binary classiﬁcation loss with the binary fore-
+ground/background map of each instance as ground-truth.
+As opposed to using the standard cross-entropy loss func-
+tion, we opt for using the Lovasz-hinge loss [27] in-
+stead. Since this loss function is a (piecewise linear) con-
+vex surrogate to the Jaccard loss, it directly optimizes the
+intersection-over-union of each instance. Therefore we do
+not need to account for the class imbalance between fore-
+ground and background.
+
+Note that there is no direct supervision on the sigma
+and offset vector outputs of the network (as was the
+
+8839
+
+Figure 2. Instance segmentation pipeline. The bottom branch of the network predicts: a) a sigma value for each pixel, which directly
+translates into a clustering margin for each object. Bigger objects are more blueish, meaning a bigger margin, and smaller objects are
+more yellowish, meaning a smaller margin. b) Offset vectors for each pixel, pointing at the center of attraction, and displayed using a
+color-encoding where the color indicates the angle of the vector. The top branch predicts a seed map for each semantic class. A high value
+indicates that the offset vector of that pixel points directly at the object center. Notice therefore that the borders have a low value, since
+they have more difﬁculty of knowing to which center to point. The pixel embeddings (= offset vectors + coordinate vectors) and margins
+calculated from the predicted sigma are also displayed. The cluster centers are derived from the seed maps.
+
+case in the standard regression loss).
+Instead, they are
+jointly optimized to maximize the intersection-over-union
+of each instance mask, receiving gradients by backpropaga-
+tion through the Lovasz-hinge loss function and through the
+gaussian function.
+
+3.3. Intuition
+
+Let us ﬁrst consider the case where the sigma (margin)
+of the Gaussian function is kept ﬁxed. In contrast with the
+standard regression loss explained above, we don’t have an
+explicit loss term pulling instance pixels to the instance cen-
+troid. Instead, by minimizing the binary loss, instance pix-
+els are now indirectly forced to lay within the region around
+the instance centroid and background pixels are forced to
+point outside this region.
+
+When the sigma is not ﬁxed but a learnable parameter,
+the network can now also modify sigma to minimize the
+loss more efﬁciently. Aside from pulling instance pixels
+within the (normally small) region around the instance cen-
+troid and pushing background pixels outside this region, it
+can now also modify sigma such that the size of the region
+is more appropriate for that speciﬁc instance.
+Intuitively
+this would mean that for a big object it would adapt sigma
+to make the region around the centroid bigger, so that more
+instance pixels can point inside this region, and for small
+objects to choose a smaller region, so that it is easier for
+background pixels to point outside the region.
+
+3.4. Loss extensions
+
+Elliptical margin In the above formulation of the gaus-
+sian function we have used a scalar value for sigma. This
+
+will result in a circular margin. However, we can modify
+the mapping function to use a 2-dimensional sigma:
+
+φk(ei) = exp −
+
+(eix − Ckx)2
+
+2σ2
+kx
+
+−
+
+(eiy − Cky)2
+
+2σ2
+ky
+
+! (8)
+
+By doing so, the network has the possibility of also learn-
+ing an elliptical margin, which may be better suited for elon-
+gated objects such as pedestrians or trains. Note that in this
+case the network has to output two sigma maps, one for σx
+and one for σy.
+
+Learnable Center of Attraction Another modiﬁcation
+can be made on the center of the gaussian function. Cur-
+rently, we place the gaussian in the centroid Ck of each in-
+stance. By doing so, pixel embeddings are pulled towards
+the instance centroid. However, we can also let the network
+learn a more optimal Center of Attraction. This can be done
+by deﬁning the center as the mean over the embeddings of
+instance k. This way, the network can inﬂuence the location
+of the center of attraction by changing the location of the
+embeddings:
+
+φk(ei) = exp −
+
+kei − 1
+
+|Sk|Pej ∈Sk
+
+2σ2
+k
+
+ejk2
+
+!
+
+(9)
+
+We will test these modiﬁcations in the ablation experi-
+
+ment section.
+
+8840
+
+a)  sigma map(s)b) pixel offset vectors (x,y)c) class-specific seed mapscarpersonbikeSeed branchmarginsSamplingymapxmapInstance branch3.5. Seed map
+
+stance to the total loss:
+
+At inference time we need to cluster around the center of
+each object. Since the above loss function forces pixel em-
+beddings to lay close to the object’s center, we can sample a
+good pixel embedding and use that location as instance cen-
+ter. Therefore, for each pixel embedding we learn how far it
+is removed from the instance center. Pixel embeddings who
+lay very close to their instance center will get a high score
+in the seed map, pixel embeddings which are far away from
+the instance center will get a low score in the seed map.
+This way, at inference time, we can select a pixel embed-
+ding with a high seed score, indicating that that embedding
+will be very close to an object’s center.
+
+In fact, the seediness score of a pixel embedding should
+equal the output of the gaussian function, since it converts
+the distance between an embedding and the instance center
+into a closeness score. The closer the embedding is laying
+to the center, the closer the output will be to 1.
+
+Therefore, we train the seed map with a regression loss
+function. Background pixels are regressed to zero and fore-
+ground pixels are regressed to the output of the gaussian.
+We train a seed map for each semantic class, with the fol-
+lowing loss function:
+
+Lseed =
+
+1
+N
+
+N
+
+Xi
+
+✶{si∈Sk}ksi − φk(ei)k2 + ✶{si∈bg}ksi − 0k2
+
+(10)
+with si the network’s seed output of pixel i. Note that
+this time we consider φk(ei) to be a scalar: gradients are
+only calculated for si.
+
+3.6. Post-processing
+
+At inference time, we follow a sequential clustering ap-
+proach for each class-speciﬁc seed map. The pixels in the
+seed map with the highest value indicate which embeddings
+lay closest to an object’s center. The procedure is to sample
+the embedding with the highest seed value and use that lo-
+cation as instance center ˆC k. At the same location, we also
+take the sigma value, ˆσk. By using this center and accompa-
+nying sigma, we cluster the pixel embeddings into instance
+Sk:
+
+ei ∈ Sk ⇐⇒ exp −
+
+kei − ˆC kk2
+
+2 ! > 0.5
+
+2 ˆσk
+
+(11)
+
+We next mask out all clustered pixels in the seed map and
+continue sampling until all seeds are masked. We repeat this
+process for all classes.
+
+To ensure that during sampling ˆσk ≈ σk =
+σi, we add a smoothness term for each in-
+
+1
+
+|Sk|Pσi∈Sk
+
+Lsmooth =
+
+1
+
+|Sk| Xσi∈Sk
+
+kσi − σkk2
+
+(12)
+
+4. Experiments
+
+In this section we evaluate the performance of our in-
+stance segmentation method on the Cityscapes dataset. To
+ﬁnd the best settings of our loss function, we ﬁrst analyze
+the different aspects in an ablation study. Afterwards we re-
+port results of our best model on the test set of Cityscapes
+and compare with other top performing methods. Since our
+method is optimized for fast instance segmentation, we also
+report a time comparison with other instance segmentation
+methods.
+
+4.1. Implementation details
+
+network
+
+encoder-decoder
+
+architecture We
+
+the
+ERFNet
+
+Network
+ERFNet-
+use
+is a
+architecture [24] as base-network.
+dense-prediction
+optimized
+for real-time semantic segmentation. We convert the model
+into a 2-branch network, by sharing the encoder part and
+having 2 separate decoders. The ﬁrst branch predicts
+the sigma and offset values, with 3 or 4 output channels
+depending on sigma (σ vs σxy). The other branch outputs
+N seed maps, one for each semantic class. The offset values
+are limited between [-1,1] with a tanh activation function,
+sigma is made strictly positive by using an exponential
+activation function, effectively letting the network predict
+log( 1
+
+2σ2 ).
+
+Coordinate map Since the Cityscapes images are of size
+2048x1024, we construct a pixel coordinate map so that
+the x-coordinates are within the range of [0,2] and the y-
+coordinates within the range of [0,1]. This way, the differ-
+ence in coordinate between two neighboring pixel is 1/1024,
+both in x and y direction. Because the offset vectors can
+have a value between [-1,1], each pixel can point at most
+1024 pixels away from its current location.
+
+Training procedure We ﬁrst pre-train our models on
+500x500 crops, taken out of the original 2048x1024 train
+images and centered around an object, for 200 epochs with
+a batch-size of 12. This way, we don’t spend to much
+computation time on background patches without any in-
+stances. Afterwards we ﬁnetune the network for another 50
+epochs on 1024x1024 crops with a batch-size of 2 to in-
+crease the performance on the bigger objects who couldn’t
+ﬁt completely within the 500x500 crop. During this stage,
+we keep the batch normalization statistics ﬁxed. We use
+the Adam optimizer and polynomial learning rate decay
+(1 − epoch
+max epoch )0.9. During pre-training we use an initial
+
+8841
+
+method
+DIN [2]
+SGN [15]
+PolygonRNN++ [1]
+Mask R-CNN [8]
+GMIS [17]
+PANet [16]
+Mask R-CNN [8]
+PANet [16]
+ours
+
+training data
+fine + coarse
+
+fine + coarse
+
+fine
+
+fine
+
+fine + coarse
+
+fine
+
+fine + COCO
+
+fine + COCO
+
+fine
+
+AP
+23.4
+25.0
+25.5
+26.2
+27.6
+31.8
+31.9
+36.4
+27.6
+
+AP50
+45.2
+44.9
+45.5
+49.9
+44.6
+57.1
+58.1
+63.1
+50.9
+
+person
+
+20.9
+21.8
+29.4
+30.5
+29.3
+36.8
+34.8
+41.5
+34.5
+
+rider
+18.4
+20.1
+21.8
+23.7
+24.1
+30.4
+27.0
+33.6
+26.1
+
+car
+31.7
+39.4
+48.3
+46.9
+42.7
+54.8
+49.1
+58.2
+52.4
+
+truck
+22.8
+24.8
+21.1
+22.8
+25.4
+27.0
+30.1
+31.8
+21.7
+
+bus
+31.1
+33.2
+32.3
+32.2
+37.2
+36.3
+40.9
+45.3
+31.2
+
+train mcycle
+31.0
+30.8
+23.7
+18.6
+32.9
+25.5
+30.9
+28.7
+16.4
+
+19.6
+17.7
+13.6
+19.1
+17.6
+22.6
+24.1
+28.2
+20.1
+
+bicycle
+
+11.7
+12.4
+13.6
+16.0
+11.9
+20.8
+18.7
+24.1
+18.9
+
+Table 1. Results on Cityscapes test set. With a score of 27.6 AP we reach second place on the benchmark, compared with the fine-only
+methods.
+
+lowing classes with their respective number of objects:
+
+person
+17.9k
+
+rider
+1.8k
+
+car
+
+26.9k
+
+truck
+0.5k
+
+bus
+0.4k
+
+train mcycle
+0.2k
+
+0.7k
+
+bicycle
+
+3.7k
+
+Note that some classes (truck, bus, train) are highly un-
+derrepresented, which will negatively effect the model’s test
+performance on those speciﬁc classes.
+
+4.3. Ablation Experiments
+
+In this section we evaluate the inﬂuence of the differ-
+ent parameters of our loss function on the validation set of
+Cityscapes: we investigate the importance of a learnable
+sigma, the difference in using the instance centroid or a
+learnable center as the center of attraction, and the differ-
+ence in using a scalar or a 2 dimensional sigma. Since we
+want to measure the effect on the instance part, we remove
+the object detection and classiﬁcation part from the equation
+by using the ground truth annotations to localize the objects
+and assigning the correct semantic class, which is indicated
+in the tables as APgt.
+
+Fixed vs. learnable sigma
+In this experiment we evaluate
+the importance of a learnable, instance-unique sigma over a
+ﬁxed one. As explained in section 3.2, when using a ﬁxed
+sigma, the value has to be selected based on the size of the
+smallest object we still want to be able to separate, and is
+therefore set to correspond with a margin of 20 pixels. The
+results can be seen in table 2. The signiﬁcant performance
+difference (28 AP vs. 38.7 AP) shows the importance of
+having a unique, learnable sigma for each instance. Notice
+also that for classes with relatively more small instances,
+the difference is less pronounced, as expected.
+
+Fixed vs. learnable Center of Attraction As described
+in the method section, the center of attraction (CoA) of
+an instance can be deﬁned as either the centroid, or more
+general, as a learnable center calculated by taking the mean
+over all spatial embeddings belonging to the instance. Intu-
+itively, by giving the network the opportunity to decide on
+the location of the CoA itself, it can learn a more optimal
+
+8842
+
+Figure 3. Speed accuracy trade-off between instance segmentation
+methods on the Cityscapes benchmark. Our method is the ﬁrst
+real-time method with high accuracies. Image adapted from [25]
+
+learning rate of 5e-4, which we lower to 5e-5 for ﬁnetun-
+ing. Training takes roughly 24 hours on two NVIDIA 1080
+Ti GPU’s. Next to random cropping, we also apply random
+horizontal mirroring as data-augmentation.
+
+4.2. Cityscapes dataset
+
+The Cityscapes dataset is high quality dataset for urban
+scene understanding. It consists out of 5,000 ﬁnely anno-
+tated images (fine) of 2048 by 1024 pixels, with both se-
+mantic and instance-wise annotations, and 20,000 coarsely
+annotated images (coarse) with only semantic annota-
+tions. The wide range in object size and the varying scene
+layout makes this a challenging dataset for instance segmen-
+tation methods.
+
+The instance segmentation task consists in detecting ob-
+jects of 8 different semantic classes and generating a binary
+mask for each of them. The performance is evaluated by
+the average precision (AP) criterion on the region level and
+averaged over the different classes. Aside from AP, AP50%
+for an overlap of 50 %, AP100m and AP50m for objects re-
+stricted to respectively 100m and 50m are also reported.
+
+In the following experiments we will only use the fine
+train set to train our models, which consists out of the fol-
+
+real-timeAverage Precision (AP)FPS(ours)PANetMask R-CNNDiscriminate LossBox2PixSGNσ/σxy
+σf ixed
+
+σ
+σ
+σxy
+σxy
+
+CoA
+
+AP[val]gt
+
+person
+
+centroid
+centroid
+learnable
+centroid
+learnable
+
+28.0
+38.7
+39.5
+39.1
+40.5
+
+32.3
+36.4
+39.4
+38.0
+39.3
+
+rider
+28.1
+33.6
+35.4
+33.9
+34.5
+
+car
+45.1
+54.5
+56.0
+54.5
+55.5
+
+truck
+30.2
+42.7
+40.3
+42.0
+44.3
+
+bus
+37.3
+56.0
+57.6
+59.4
+59.8
+
+train mcycle
+14.4
+36.7
+34.6
+37.8
+41.2
+
+19.9
+24.9
+26.1
+23.0
+24.8
+
+bicycle
+
+16.9
+24.5
+26.5
+24.5
+25.0
+
+Table 2. Ablation experiments evaluated on the Cityscapes validation set using a ground-truth sampling approach. We measure the perfor-
+mance of a ﬁxed sigma, the difference in using a scalar vs. 2-dimensional sigma and the difference in using the centroid or learnable center
+as center of attraction.
+
+control over its value. Intuitively, since sigma controls the
+clustering margin, we speculated that for big objects sigma
+will be bigger, resulting in a bigger margin, and smaller for
+small objects. To verify this, in ﬁgure 4 we plotted sigma in
+function of the object’s size. As predicted, there is indeed a
+positive correlation between an object’s size and sigma.
+
+4.4. Results on Cityscapes
+
+In table 1 we report results on the Cityscapes test set and
+compare with other high performing methods. Note how-
+ever that it is important to pay attention at the training data
+on which a method is trained. Since the truck, bus and train
+classes are highly underrepresented in the fine set, meth-
+ods who only train on this set will perform less on these
+classes than methods who augment their dataset with the
+coarse or COCO set.
+
+Comparing our method against the other fine-only
+methods, we occupy the second place with an AP-score of
+27.6, locating ourselves between between the popular Mask
+R-CNN (26.2) and PANet(31.8). Notice however that we
+do much better on the person (34.5 vs 30.5), rider (26.1 vs
+23.7) and car class (52.4 vs 46.9) than Mask R-CNN. If we
+compare our method with GMIS, a method trained on both
+the fine and coarse set, we notice that although it has
+the same AP-score as our method, it only performs better on
+the truck, bus and train class (because of the extra coarse
+set) and performs worse on all other classes.
+
+Although it is not fair to compare our method against
+methods trained on fine+COCO, we do notice that we
+achieve similar results on person (34.5 vs 34.8) and rider
+(26.1 vs 27.0), and even perform better on car (52.4 vs 49.1)
+and bicycle (18.9 vs 18.7) with respect to Mask R-CNN.
+
+4.5. Timing
+
+In table 3 we compare the execution speed of differ-
+ent methods. This is also depicted in ﬁg 3. Up to this
+moment, most methods have put there focus on accuracy
+rather than on execution speed. Mask-RCNN (26.2 AP -
+1fps) and derivatives have high accuracy, but slow execu-
+tion speed. Other methods,like Discriminative loss (17.5
+AP - 5fps) or Box2Pix (13.1 AP - 10.9fps) achieve higher
+frame rates by downsampling resolution or using single shot
+detection methods, but dramatically lack behind in accuracy
+
+8843
+
+Figure 4. Learned margin against the object’s size. Each dot rep-
+resents an object in the dataset. As predicted, we notice a positive
+correlation between the margin and the object’s size.
+
+location than the standard centroid. In table 2 we evaluate
+the two different approaches on the Cityscapes validation
+set using a ground-truth sampling approach,both in the case
+of a scalar or a 2-dimensional sigma. As predicted, in both
+cases we achieve a higher AP-score when using a learnable
+center instead of the ﬁxed centroid, with a noticeable im-
+provement over all classes.
+
+Circular vs. elliptical margin The margin for each in-
+stance is deﬁned by the learnable sigma parameter in the
+gaussian function. This sigma can either be a scalar (σ),
+which results in a circular margin, or a two-dimensional
+vector (σxy), resulting in an elliptical margin. For rectan-
+gular objects (e.g. pedestrians) a circular margin is not op-
+timal, since it can only expand until it reaches the shortest
+border. An elliptical margin however would have the possi-
+bility to stretch and adapt to the shape of an object, possibly
+resulting in a higher accuracy. In table 2 we compare both
+methods and verify that a 2-dimensional sigma (elliptical
+margin) indeed performs better than a scalar one (circular
+margin).
+
+Since sigma is a learnable parameter, we have no direct
+
+Figure 5. Results on the Cityscapes dataset. From left to right: input image, ground-truth and our predicts. Notice that our method is very
+good at detection small objects and often predicts more correct objects than annotated in the ground-truth.
+
+Method
+Deep Contours [26]
+Box2Pix [25]
+BAIS [7]
+Discriminate Loss [5]
+DWT [3]
+Dynamic Net [2]
+SGN [15]
+Mask-RCNN [8] (ﬁne)
+PANet [16]
+ours
+
+AP
+2.3
+13.1
+17.4
+17.5
+19.4
+20.0
+25.0
+26.2
+31.8
+27.6
+
+AP50
+3.6
+27.2
+36.7
+35.9
+35.3
+38.3
+44.9
+49.9
+57.1
+50.9
+
+FPS
+
+5
+
+10.9
+<1
+5
+
+< 3
+< 3
+0.6
+2.2
+<1
+11
+
+Table 3. Approximate timing results of instance segmentation
+methods on a resolution of 2048x1024 with test set accuracy [25].
+Methods which are either to slow or have a very low accuracy are
+left out.
+
+bined with real time performance (27.6 AP - 11fps). More
+speciﬁcally, the forward pass at a resolution of 2MP takes
+65ms and the clustering step requires 26ms.
+
+5. Conclusions
+
+In this work we have proposed a new clustering
+loss function for instance segmentation.
+By using a
+gaussian function to convert pixel embeddings into a
+foreground/background probability, we can optimize the
+intersection-over-union of each object’s mask directly and
+learn an optimal, object-speciﬁc clustering margin. We
+show that when applied to a real-time, dense-prediction net-
+work, we achieve top results on the Cityscapes benchmark
+at more than 10 fps, making our method the ﬁrst proposal-
+free, real-time instance segmentation method with high ac-
+curacy.
+
+compared to Mask R-CNN. Since our method is based on
+the ERFNet network and combined with a clustering loss
+function, we are the ﬁrst ones to achieve high accuracy com-
+
+Acknowledgement: This work was supported by Toy-
+ota, and was carried out at the TRACE Lab at KU Leuven
+(Toyota Research on Automated Cars in Europe - Leuven).
+
+8844
+
+IEEE Conference on Computer Vision and Pattern Recogni-
+tion, pages 8759–8768, 2018. 2, 6, 8
+
+[17] Y. Liu, S. Yang, B. Li, W. Zhou, J. Xu, H. Li, and Y. Lu.
+Afﬁnity derivation and graph merge for instance segmenta-
+tion. In Proceedings of the European Conference on Com-
+puter Vision (ECCV), pages 686–703, 2018. 6
+
+[18] A. Newell, Z. Huang, and J. Deng. Associative embedding:
+End-to-end learning for joint detection and grouping.
+In
+Advances in Neural Information Processing Systems, pages
+2277–2287, 2017. 2
+
+[19] D. Novotny, S. Albanie, D. Larlus, A. Vedaldi, A. Nagrani,
+S. Albanie, A. Zisserman, T.-H. Oh, R. Jaroensri, C. Kim,
+et al. Semi-convolutional operators for instance segmenta-
+tion. arXiv preprint arXiv:1807.10712, 2018. 2
+
+[20] D. Novotny, D. Larlus, and A. Vedaldi. Learning 3d object
+categories by looking around them.
+In Proceedings of the
+IEEE International Conference on Computer Vision, pages
+5218–5227, 2017. 2
+
+[21] P. O. Pinheiro, R. Collobert, and P. Doll´ar. Learning to seg-
+ment object candidates. In Advances in Neural Information
+Processing Systems, pages 1990–1998, 2015. 2
+
+[22] P. O. Pinheiro, T.-Y. Lin, R. Collobert, and P. Doll´ar. Learn-
+In European Conference on
+
+ing to reﬁne object segments.
+Computer Vision, pages 75–91. Springer, 2016. 2
+
+[23] S. Ren, K. He, R. Girshick, and J. Sun. Faster r-cnn: Towards
+real-time object detection with region proposal networks. In
+Advances in neural information processing systems, pages
+91–99, 2015. 2
+
+[24] E. Romera, J. M. Alvarez, L. M. Bergasa, and R. Arroyo.
+Erfnet: Efﬁcient residual factorized convnet for real-time
+semantic segmentation.
+IEEE Transactions on Intelligent
+Transportation Systems, 19(1):263–272, 2018. 5
+
+[25] J. Uhrig, E. Rehder, B. Fr¨ohlich, U. Franke, and T. Brox.
+Box2pix: Single-shot instance segmentation by assigning
+pixels to object boxes.
+In IEEE Intelligent Vehicles Sym-
+posium (IV), 2018. 2, 6, 8
+
+[26] J. van den Brand, M. Ochs, and R. Mester.
+
+Instance-level
+segmentation of vehicles by deep contours. In Asian Con-
+ference on Computer Vision, pages 477–492. Springer, 2016.
+8
+
+[27] J. Yu and M. Blaschko. Learning submodular losses with
+the lov´asz hinge. In International Conference on Machine
+Learning, pages 1623–1631, 2015. 3
+
+References
+
+[1] D. Acuna, H. Ling, A. Kar, and S. Fidler. Efﬁcient interactive
+annotation of segmentation datasets with polygon-rnn++. In
+Proceedings of the IEEE Conference on Computer Vision
+and Pattern Recognition, pages 859–868, 2018. 6
+
+[2] A. Arnab and P. H. Torr. Pixelwise instance segmentation
+
+with a dynamically instantiated network. 6, 8
+
+[3] M. Bai and R. Urtasun. Deep watershed transform for in-
+stance segmentation. In 2017 IEEE Conference on Computer
+Vision and Pattern Recognition (CVPR), pages 2858–2866.
+IEEE, 2017. 8
+
+[4] J. Dai, K. He, and J. Sun. Instance-aware semantic segmen-
+tation via multi-task network cascades. In Proceedings of the
+IEEE Conference on Computer Vision and Pattern Recogni-
+tion, pages 3150–3158, 2016. 2
+
+[5] B. De Brabandere, D. Neven, and L. Van Gool. Semantic
+instance segmentation with a discriminative loss function.
+arXiv preprint arXiv:1708.02551, 2017. 2, 8
+
+[6] A. Fathi, Z. Wojna, V. Rathod, P. Wang, H. O. Song,
+Semantic instance
+arXiv preprint
+
+S. Guadarrama, and K. P. Murphy.
+segmentation via deep metric learning.
+arXiv:1703.10277, 2017. 2
+
+[7] Z. Hayder, X. He, and M. Salzmann. Boundary-aware in-
+stance segmentation. In 30Th Ieee Conference On Computer
+Vision And Pattern Recognition (Cvpr 2017), number CONF.
+Ieee, 2017. 8
+
+[8] K. He, G. Gkioxari, P. Doll´ar, and R. Girshick. Mask r-cnn.
+In Computer Vision (ICCV), 2017 IEEE International Con-
+ference on, pages 2980–2988. IEEE, 2017. 2, 6, 8
+
+[9] A. Kendall and Y. Gal. What uncertainties do we need in
+bayesian deep learning for computer vision?
+In Advances
+in neural information processing systems, pages 5574–5584,
+2017. 2
+
+[10] A. Kendall, Y. Gal, and R. Cipolla. Multi-task learning using
+uncertainty to weigh losses for scene geometry and seman-
+tics. arXiv preprint arXiv:1705.07115, 3, 2017. 2
+
+[11] S. Kong and C. Fowlkes. Recurrent pixel embedding for in-
+stance grouping.
+In Proceedings of the IEEE Conference
+on Computer Vision and Pattern Recognition, pages 9018–
+9028, 2018. 2
+
+[12] Y. Li, H. Qi, J. Dai, X. Ji, and Y. Wei. Fully convolu-
+tional instance-aware semantic segmentation. arXiv preprint
+arXiv:1611.07709, 2016. 2
+
+[13] X. Liang, Y. Wei, X. Shen, J. Yang, L. Lin, and S. Yan.
+Proposal-free network for instance-level object segmenta-
+tion. arXiv preprint arXiv:1509.02636, 2015. 2
+
+[14] R. Liu, J. Lehman, P. Molino, F. P. Such, E. Frank,
+A. Sergeev, and J. Yosinski. An intriguing failing of convo-
+lutional neural networks and the coordconv solution. arXiv
+preprint arXiv:1807.03247, 2018. 2
+
+[15] S. Liu, J. Jia, S. Fidler, and R. Urtasun. Sgn: Sequential
+grouping networks for instance segmentation. In The IEEE
+International Conference on Computer Vision (ICCV), 2017.
+6, 8
+
+[16] S. Liu, L. Qi, H. Qin, J. Shi, and J. Jia. Path aggregation
+In Proceedings of the
+
+network for instance segmentation.
+
+8845
+
+

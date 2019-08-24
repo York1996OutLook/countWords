@@ -1,0 +1,1228 @@
+Learning to Separate Multiple Illuminants in a Single Image
+
+Zhuo Hui,1 Ayan Chakrabarti,2 Kalyan Sunkavalli,3 and Aswin C. Sankaranarayanan1
+
+1Carnegie Mellon University
+
+2Washington University in St. Louis
+
+3Adobe Research
+
+Abstract
+
+We present a method to separate a single image cap-
+tured under two illuminants, with different spectra, into the
+two images corresponding to the appearance of the scene
+under each individual illuminant. We do this by training
+a deep neural network to predict the per-pixel reﬂectance
+chromaticity of the scene, which we use in a physics-based
+image separation framework to produce the desired two out-
+put images. We design our reﬂectance chromaticity net-
+work and loss functions by incorporating intuitions from the
+physics of image formation. We show that this leads to sig-
+niﬁcantly better performance than other single image tech-
+niques and even approaches the quality of the prior work
+that require additional images.
+
+1. Introduction
+
+Natural environments are often lit by multiple light
+sources with different illuminant spectra. Depending on
+scene geometry and material properties, each of these lights
+causes different light transport effects like color casts, shad-
+ing, shadows, specularities, etc. An image of the scene com-
+bines the effects from the different lights present, and is a
+superposition of the images that would have been captured
+under each individual light. We seek to invert this superpo-
+sition, i.e., separate a single image observed under two light
+sources, with different spectra, into two images, each cor-
+responding to the appearance of the scene under one light
+source alone. Such a decomposition can give users the abil-
+ity to edit and relight photographs, as well as provide infor-
+mation useful for photometric analysis.
+
+However, the appearance of a surface depends not only
+on the properties of the light sources, but also on its geom-
+etry and material properties. When all of these quantities
+are unknown, disentangling them is a signiﬁcantly ill-posed
+problem. Thus, past efforts to achieve such separation have
+relied heavily on extensive manual annotation [8, 7, 9] or
+access to calibrated scene and lighting information [12, 11].
+More recently, Hui et al. [24, 25] demonstrate that the light-
+ing separation problem can be reliably solved if one addi-
+tionally knows the reﬂectance chromaticity of all surface
+
+(a) Input image
+
+(b) Output separated images
+
+Figure 1. Our method separates a single image (a) captured under
+two illuminants with different spectra (sun and sky illumination
+here) into two images corresponding to the appearance of the scene
+under the individual lights. Note that we are able to accurately
+preserve the shading and shadows for each light.
+
+points — which they recover by capturing a second image
+of the same scene under ﬂash lighting. Given that the ﬂash
+image is used in their processing pipeline only for estimat-
+ing the reﬂectance chromaticity, could we computationally
+estimate the reﬂectance chromaticity from a single image,
+thereby avoiding the need to capture a ﬂash photograph all
+together? This would greatly enhance the applicability of
+the method especially for scenarios where it is challenging
+to sufﬁciently illuminate every pixel with the ﬂash; for ex-
+ample, when the ﬂash is not strong enough, the scene is
+large, or the ambient light sources are too strong.
+
+Our work is also motivated by the success of deep
+convolutional neural networks for solving closely related
+problems like intrinsic decompositions [32, 43], and re-
+ﬂectance estimation [41, 36, 34]; hence, we propose train-
+ing a deep convolution neural network to perform this sepa-
+ration. However, we ﬁnd that standard architectures, trained
+only with the respect to the quality of the ﬁnal separated
+images, are unable to learn to effectively perform the sepa-
+ration. Therefore, we guide the design of our network us-
+ing a physics-based analysis of the task [25] to match the
+expected sequence of inference steps and intermediate out-
+puts — reﬂectance chromaticities, shading chromaticities,
+separated shading maps, and ﬁnal separated images. In ad-
+dition to ensuring that our architecture has the ability to ex-
+press these required computations, this decomposition also
+allows us to provide supervision to intermediate layers in
+
+13780
+
+our network, which proves crucial to successful training.
+Once trained, we ﬁnd that our approach is able to success-
+fully solve this ill-posed problem and produce high-quality
+lighting decompositions that, as can be seen in Figure 1,
+capture complex shading and shadows. In fact, our network
+is able to match, and in speciﬁc instances outperform, the
+quality of results from Hui et al.’s two-image method [25],
+despite needing only a single image as input.
+
+pose the parametric model to characterize the sky and sun
+for the outdoor photographs. Hold-Geoffroy et al. [22] ex-
+tend the idea to model the outdoor illumination by incorpo-
+rating a deep neutral network. Gardner et al. [16] similarly
+train a deep neural network to recover indoor illumination
+from a single LDR photograph.
+In contrast, our method
+does not explicitly model the illuminants, but directly re-
+gresses the single-illuminant images.
+
+Contributions. We make the following contributions.
+1. We introduce a learning-based approach for separating a
+single image into two images, each illuminated by light
+source of a distinct spectra.
+
+2. We incorporate physical-based constraints in the net-
+work design and training, a strategy that is critical to our
+methods success.
+
+3. We demonstrate the practical utility of the method for a
+wide range of applications, including white balancing,
+sun/sky separation for the outdoor scenes.
+
+2. Related Work
+
+Estimating illumination and scene geometry from a sin-
+gle image is a highly ill-posed problem. Previous work has
+focused on speciﬁc subsets of this problem; we discuss pre-
+vious works on illumination analysis as well as prior intrin-
+sic image decomposition methods that aim to jointly esti-
+mate illumination and surface reﬂectance.
+
+Illumination estimation. Estimating the ambient illumi-
+nation from a single photograph has been a long-standing
+goal in computer vision and computer graphics. A number
+of past techniques have studied color constancy [18] — the
+problem of removing the color casts of ambient illumina-
+tion. One popular solution is to model the scene with single
+dominant light source [15, 14, 17]. To deal with mixtures of
+illuminants in a scene, previous works [13, 19, 37] typically
+characterize each local region with a different but single
+light source. However, these approaches do not generalize
+well to scenes where multiple light sources mix smoothly.
+To address this, Boyadzhiev et al. [10] utilize user scribbles
+to indicate scene attributes such as white surfaces and con-
+stant lighting regions. Hsu et al. [23] propose a method to
+address mixtures of two light sources in the scene; however,
+they require precise knowledge of the color of each illumi-
+nant. Prinet et al. [35] resolve the color chromaticity of two
+light sources from a sequence of images by leveraging the
+consistency of the reﬂectance of the scene. Sunkavalli et
+al. [40] demonstrate this (and image separation) for time-
+lapse sequences of outdoor scenes.
+
+In parallel, many techniques have been developed to ex-
+plicitly model the illumination of the scene, rather than re-
+moving the color of the illuminants. Lalonde et al. [31] pro-
+
+Intrinsic image decomposition.
+Intrinsic image decom-
+position methods seek to separate a single image into a
+product of reﬂectance and illumination layers. This prob-
+lem is commonly solved by assuming that the reﬂectance
+of the scene is piece-wise constant while the illumination
+varies smoothly [4]. Several approaches build on this by
+further imposing priors on non-local reﬂectance [42, 38, 5],
+or on the consistency of reﬂectance for image sequences
+captured with varying illumination [30, 21, 26]. A common
+assumption in intrinsic image methods is that the scene is lit
+by a single dominant illuminant. This does not generalize
+to real world scenes that are often illuminated with multiple
+light sources with different spectra. Recent methods have
+proposed using deep neural networks, trained with large
+amounts of data, to address this problem [43, 32, 33]. While
+effective, these techniques also focus on scenes illuminated
+with a single light source. Barron and Malik [2, 3] resolve
+this by incorporating a global lighting model with hand-
+crafted priors. While this lighting model works well for
+single objects, it is unable to capture high-frequency spa-
+tial information, like shadows that are often present in real
+scenes. In comparison, our technique generalizes well to
+complex scenes lit with mixtures of multiple light sources.
+In addition, as opposed to predicting the reﬂectance of the
+scene, our method only requires predicting its chromaticity,
+which is an easier problem to solve.
+
+3. Problem Statement
+
+Our objective is to take as input, a single photograph of
+a scene lit by a mixture of two illuminants, and estimate the
+images lit by each single light source. In this section, we
+set up the image formation model and describe the physi-
+cal priors we impose to supervise the intermediate results
+produced by the network.
+
+We adopt the image formation model from Hui et al. [25]
+by assuming that the scene is Lambertian and is imaged by
+a three-channel color camera. However, instead of mod-
+eling inﬁnite-dimensional spectra using subspaces, we as-
+sume that the camera color response is narrow-band, allow-
+ing us to characterize both the light source and albedo in
+RGB. That is, the intensity observed at a pixel p in a single
+
+3781
+
+RGB images
+
+Reflectance chromaticity
+
+Illuminant shadings 
+
+Separated images 
+
+ChromNet 
+
+Input RGB image
+
+Input
+
+Supervision
+
+Reflectance chromaticity
+
+ShadingNet 
+
+SeparateNet
+
+Figure 2. Given a single image lit by a mixture of two lights, our method automatically produces the images lit by each of these illuminants.
+We train a cascade of three sub-networks with three speciﬁc tasks. First, we estimate the reﬂectance color chromaticity of the scene via
+ChromNet. Given this estimation, we concatenate it with the input RGB image and feed them into ShadingNet to predict the illuminant
+shadings. We append these to the input image and pass it to SeparateNet to produce the output. During training, we supervise the reﬂectance
+chromaticity, illuminant shadings and the separated images.
+
+Illuminant shadings
+
+Separated images
+
+photograph I is given by:
+
+I c(p) = Rc(p)
+
+NX
+
+i=1
+
+λi(p) ℓc
+i ,
+
+for c ∈ {r, g, b},
+
+(1)
+
+i , ℓb
+
+i , ℓg
+
+where R(p) = [Rr(p), Rg(p), Rb(p)] is the three-color
+albedo. In our work, we focus on the scenes that are lit by
+N = 2 light sources and we denote the light chromatic-
+i ] ∈ R3 with
+ities as {ℓ1, ℓ2}. Note that ℓi = [ℓr
+Pc ℓc
+i = 1. Similar to Hui et al. [25], we assume that the
+light source chromaticities are unique, i.e., ℓ1 6= ℓ2. The
+term λi(p) is the shading observed at pixel p due to the
+i-th light source multiplied by the light-source brightness.
+Given the fact that two sources with the same color are clus-
+tered together, the shading term λi(p) has a complex depen-
+dency on the lighting geometry and does not have a simple
+analytical form. Our goal is to compute the separated im-
+ages corresponding to the each light source k as:
+
+bI c
+sep,k(p) = Rc(p) λk(p) ℓc
+k.
+
+(2)
+
+To solve this, Hui et al. [25] capture an additional im-
+age under ﬂash illumination to directly compute reﬂectance
+color chromaticities for each pixel. They use these to disen-
+tangle reﬂectance from illumination shading, and solve for
+the color of each light source as well as the per-pixel con-
+tribution of each illuminant. We provide a quick summary
+of the key steps of their computational pipeline below, and
+refer readers to their paper for more details.
+
+Step 1 — Flash to reﬂectance chromaticity. Given the ﬂash
+color, the pure ﬂash photograph enables us to estimate the
+reﬂectance chromaticity, αc(p), that is deﬁned as:
+
+αc(p) =
+
+Rc(p)
+P˜c R˜c(p)
+
+.
+
+(3)
+
+Step 2 — Estimate shading chromaticity. The reﬂectance
+chromaticity αc(p) can be used to remove the contribution
+from albedo as follows. We deﬁne βc(p) = I c(p)/αc(p)
+and normalize it to obtain shading chromaticities as:
+
+γc(p) =
+
+βc(p)
+P˜c β ˜c(p)
+
+= Pi λi(p) ℓc
+Pi λi(p)
+
+i
+
+= X
+
+i
+
+zi(p) ℓc
+i ,
+
+(4)
+
+where zi(p) = λi(p)/ (P˜i λ˜i(p)) is relative shading.
+
+Step 3 — Estimate relative shading. The histogram of shad-
+ing chromaticities across the image can be ﬁt to a multi-
+illuminant model (see [25] for details) to estimate the illu-
+minant shadings Sc
+
+i for each light source, deﬁned as:
+
+Sc
+i (p) = zi(p)ℓc
+i .
+
+The separated images can then be recovered as:
+
+bI c
+sep,k(p) = I c(p)
+
+Sc
+k(p)
+PN
+i=1 Sc
+
+i (p)
+
+.
+
+(5)
+
+(6)
+
+In this paper, we design our network by mimicking the
+steps in the derivation above, but each processing element is
+
+3782
+
+replaced with deep networks as shown in Figure 2. In par-
+ticular, we utilize three sub-networks — ChromNet, Shad-
+ingNet and SeparateNet — to estimate the reﬂectance chro-
+maticity, illuminant shadings and separated images, respec-
+tively. ChromNet predicts the values of reﬂectance chro-
+maticity α, deﬁned in (3), with its input being the RGB im-
+age that we seek to separate. ShadingNet takes in as the
+output of ChromeNet concatenated with the input RGB im-
+age to regress the illuminant shadings in (5). Finally, Sepa-
+rateNet gathers the estimated illuminant shadings as well as
+the input RGB image to estimate the separated images.
+
+4. Learning Illuminant Separation
+
+We now dicuss our proposed method for decomposing an
+input photo into images lit by individual illuminants, includ-
+ing how we generate training data with ground truth scene
+annotations (for reﬂectance and shading), and how we de-
+sign our proposed deep neural network for this problem.
+
+4.1. Generating the training dataset
+
+We utilize the databases of CGIntrinsics [32] and
+Flash/No-Flash [1] to produce images with (approximate)
+ground truth reﬂectance chromaticity, illuminant shadings
+and separated images. Figure 3 shows training data exam-
+ples from each dataset.
+
+The CGIintrinsics dataset consists of 20160 rendered
+scenes from SUNCG [39].
+It provides the ground truth
+reﬂectance, and hence, the reﬂectance chromaticity. The
+shadings chromaticity is then estimated via (4).
+
+The Flash/No-ﬂash dataset consists of 2775 image pairs.
+We estimate the reﬂectance chromaticity as the color chro-
+maticity of the pure ﬂash image, which is the difference be-
+tween the ﬂash and the no-ﬂash photograph. We anecdo-
+tally observed that the majority of the scenes in this dataset
+are only illuminated by a single light source — which, as
+such, makes it uninteresting for our application. To resolve
+this, we add the ﬂash image back to no-ﬂash image and
+create photographs illuminated by two light sources. By
+changing the color of the ﬂash photograph, we can enhance
+the amount of training data; this allows us to generate 29060
+input-output pairs, where the input is a photo, and the output
+is the reﬂectance chromaticity, a pair of its corresponding il-
+luminant shadings as well as the separated images.
+
+4.2. Network architecture
+
+As shown in Figure 2, we use a deep neural network
+to match the computation of the separation algorithm in
+Section 3. Speciﬁcally, our network consists of three sub-
+networks that produce the reﬂectance chromaticity, illumi-
+nant shadings, and the separated images respectively.
+
+s
+c
+i
+s
+n
+i
+r
+t
+n
+I
+G
+C
+
+s
+c
+i
+s
+n
+i
+r
+t
+n
+I
+G
+C
+
+h
+s
+a
+ﬂ
+-
+o
+N
+/
+h
+s
+a
+l
+F
+
+h
+s
+a
+ﬂ
+-
+o
+N
+/
+h
+s
+a
+l
+
+F
+
+(a) Input (Top) /
+
+(b) Illuminant
+
+(c) Separated
+
+shadings
+
+Chromaticity (Bottom)
+Figure 3. We showcase each sample of train pairs from CGIntrin-
+sics (top) and Flash/No-ﬂash database (bottom ). Given the input
+photograph (a), we use reﬂectance chromaticity together with il-
+luminant shadings (b) and separated images (c) to supervise the
+output of the network.
+
+images
+
+put color image. This essentially requires the network to
+solve the ill-posed problem of estimating and removing the
+illumination color cast given only a single photograph. We
+adopt an architecture similar to that of Johnson et al. [28]
+to map the input image to a three channel reﬂectance chro-
+maticity map.1
+
+ShadingNet. The second sub-network in our framework
+takes reﬂectance chromaticity estimates as inputs, and
+solves for the two illuminant shadings in (5). From Sec-
+tion 3, we expect the ﬁrst part of this computation to in-
+volve deriving γ from the chromaticities and original input,
+on a purely per-pixel basis as per (4). However, we found
+computing the γ values explicitly to lead to instability in
+training, likely since this involves a division. Instead, we
+produce a general feature map intended to encode the γ in-
+formation (note that we do not require it to exactly corre-
+spond to γ values) by concatenating the input image with
+the estimated chromaticities. Given this feature map, our
+second sub-network produces the two separated illuminant
+shading maps. Since this requires global reasoning, we use
+an architecture similar to the pixel-to-pixel network of Isola
+
+ChromNet. We design the ﬁrst sub-network to explic-
+itly estimate the reﬂectance chromaticity (3) from the in-
+
+1A detailed description of the construction of each subnetwork is pro-
+
+vided in the supplemental material.
+
+3783
+
+et al. [27] to incorporate a large receptive ﬁeld.
+
+SeparateNet. Given the illuminant shadings and previ-
+ously estimated reﬂectance chromaticity, the last computa-
+tion step is to produce the separated image. Here, we use
+a series of pixel-wise layers to express the computation in
+(6). Our third sub-network concatenates the two predicted
+shading maps and the input RGB photograph into a nine-
+channel input, and uses three 1 × 1 convolution layers to
+produce a six-channel output corresponding to the two ﬁnal
+separated RGB images.
+
+Note that
+
+the output of our ﬁrst
+
+sub-network—
+reﬂectance chromaticity—is sufﬁcient to perform separa-
+tion using the method of Hui et al. [25]. However, training
+this sub-network based directly on the quality of reﬂectance
+chromaticity estimates proves insufﬁcient, because the ﬁ-
+nal separated image quality can degrade differently with
+different kind of errors in chromaticity estimates. Thus,
+our goal is to instead train the reﬂectance chromaticity esti-
+mation sub-network to be optimal towards ﬁnal separation
+quality. Unfortunately, the separation algorithm in [25] has
+non-differentiable processing steps, as well as other com-
+putation that produces unstable gradients. Hence, we use
+two additional sub-networks to approximate the processing
+in Hui et al.’s algorithm [25]. However, once trained, we
+ﬁnd it is optimal to directly use the reﬂectance chromaticity
+estimates with the exact algorithm in [25], over the output
+of these sub-networks.
+
+4.3. Loss functions
+
+ChromNet loss. For the reﬂectance chromaticity estima-
+tion task, we use a scale-invariant loss. We also incorporate
+ℓ1 loss in gradient domain, to enforce that the estimated re-
+ﬂectance chromaticity is piece-wise constant. In particular,
+we deﬁne our loss function as
+
+Lα =
+
+1
+
+M
+
+M
+
+X
+
+i=1
+
+kα∗
+
+i − cααik1 +
+
+L
+
+X
+
+t=1
+
+1
+
+Mt
+
+Mt
+
+X
+
+i=1
+
+k∇α∗
+
+t,i − cα∇αt,ik1,
+
+(7)
+where α∗ denotes the predicted chromaticity, α is the
+ground truth provided, and cα is a term to compensate for
+the global scale difference, which can be estimated via least
+squares. We also use a mask to disregard the loss at pixels
+where we do not have reliable ground truth (e.g. pixels that
+are close to black or pixels corresponding to the outdoor
+environment map in the SUNCG dataset). M indicates the
+total number of valid pixels in an image. Similar to the
+approach of Li et al. [32], we include a multi-scale match-
+ing term, where L is the total number of layers speciﬁed (3
+in the paper) and Mt denotes the corresponding number of
+pixels not masked as invalid pixels.
+
+ShadingNet loss. We impose an ℓ2 loss on both the abso-
+lute value and the gradients of the relative shadings. This
+
+encourages spatially smooth shading solutions (as is com-
+monly done in prior intrinsic images work). However, the
+network outputs two potential relative shadings and swap-
+ping these two predictions should not induce any loss. To
+address this, we deﬁne our loss function as
+
+LS = min{LS11 + LS22 , LS12 + LS21 }
+
+where LSij denote the loss between the i-th output with j-
+th illuminant shadings deﬁned in (5). Speciﬁcally, LSij is
+deﬁned as LSij = Ldata(i,j) + Lgrad(i,j), where
+
+Ldata(i,j) =
+
+1
+
+M
+
+M
+
+X
+
+u=1
+
+kS ∗
+
+i,u − cS Sj,uk2,
+
+(8)
+
+Lgrad(i,j) =
+
+L
+
+X
+
+t=1
+
+1
+
+Mt
+
+Mt
+
+X
+
+u=1
+
+k∇S ∗
+
+i,t,u − cS∇Si,t,jk2,
+
+(9)
+
+Here, S ∗
+i denotes the i-th illuminant shading prediction
+while Sj is the ground truth, and cS is the global scale to
+compensate for the illuminant brightness.
+
+SeparateNet loss. Our loss for the two separated images
+is similar to our ShadingNet loss:
+
+LI = min{LI11 + LI22 , LI12 + LI21 },
+
+where LIij is the ℓ1 loss. Speciﬁcally, LIij is deﬁned as
+
+LIij
+
+=
+
+1
+
+M
+
+M
+
+X
+
+u=1
+
+kI ∗
+
+i,u − cI Ij,uk1,
+
+(10)
+
+i denote the i-th separated image predication while
+where, I ∗
+Ij is the ground truth for the j-th light source, and cI is scale
+factor for the global intensity difference.
+
+Training details. We resize our training images to 384 ×
+512. We use Adam optimizer
+[29] to train our network
+with β1 = 0.5. The initial learning rate is set to be 5 ×
+10−4 for all sub-networks. We cut down the learning rate
+by 1/10 after 35 epochs. We then train for 5 epochs with
+the reduced learning rate. We ensure that all our networks
+have converged with this scheme.
+
+5. Evaluation
+
+We now present an extensive quantitative and qualitative
+evaluation of our proposed method. Please refer to our sup-
+plementary material for more details and results.
+
+5.1. Test dataset
+
+Synthetic benchmark dataset. To quantitatively evalu-
+ate our method, we utilize the high quality synthetic dataset
+of [6]. This dataset has approximately 52 scenes, each ren-
+dered under several different single illuminants. We ﬁrst
+
+3784
+
+Name
+
+Chrom-Only
+Final-Only
+Full-Direct
+SingleNet
+
+Network architecture
+
+ChromNet
+
+Supervision
+
+Chromaticity
+Sep. images
+
+ChromNet + ShadingNet + SeparateNet
+ChromNet + ShadingNet + SeparateNet Chromaticity + Shadings + Sep. images
+
+Single Unet
+
+Sep. images
+
+Table 1. Variant versions of proposed network architectures with different supervisions.
+
+white balance each image of the same scene, and then mod-
+ulate the white-balanced images with pre-selected light col-
+ors; these represent the ground truth separated images. The
+input images are then created by adding pairs of these sepa-
+rated images, each corresponding to one of the lights in the
+scene. We produce 400 test samples in the dataset, and eval-
+uate our method using both the ground truth of reﬂectance
+chromaticity and separated results.
+
+Real dataset. We also evaluate the performance of our
+proposed technique on real images captured for both indoor
+and outdoor scenes. Speciﬁcally, we utilize the dataset of
+the indoor scenes collected by Hui et al. [25] as well as
+time-lapse videos for outdoor scenes. Hui et al. [25] cap-
+ture a pair of ﬂash/no-ﬂash for the same scene. We take the
+no-ﬂash images in the dataset as the input to the network.
+For the time-lapse videos, each frame serves as a test input
+as shown in Figure 1 (a).
+
+Error metric. We characterize the performance of our ap-
+proach on both reﬂectance chromaticity and the separated
+images. We adopt the ℓ1 error to quantitative measure the
+performance of the reﬂectance chromaticity. To evaluate the
+performance of the separated results, we compute the error
+for the separated result against the ground truth as:
+
+Loss = min{EI1,1 + EI2,2 , EI1,2 + EI2,1 }
+
+(11)
+
+where E denote the ℓ1 error between two images. We use
+a global scale-invariant loss because we are most interested
+in capturing relative variations between the two images.
+
+5.2. Quantitative results on synthetic benchmark
+
+In Table 2, we report the performance of our approach,
+and compare it to several baselines (summarized in Table 1).
+We begin by quantifying the importance of supervision.
+We train different models for our network: with full su-
+pervision, with supervision only on the quality of the ﬁnal
+separated images (Final-Only), and training only the ﬁrst
+sub-network, i.e., ChromNet, with supervision only on re-
+ﬂectance chromaticities (Chrom-Only). Moreover, for our
+fully supervised model (Full), we consider using the sepa-
+rated images directly predicted by our full network (Full-
+Direct), as well as taking only the reﬂectance chromatic-
+ity estimates and using Hui et al.’s algorithm [25]—which
+
+Methods Chromaticity
+
+Separated Images
+
+Proposed
+
+Chrom-Only
+
+0.0308
+
+Final-Only
+
+Full-Direct
+
+Full+[25]
+
+SingleNet
+
+Shen et al. [38]
+
+Bell et al. [5]
+
+Li et al. [32]
+
+†Hsu et al. [23]
+†Hui et al. [25]
+
+—
+
+0.0537
+
+0.0537
+
+—
+
+0.0821
+
+0.0785
+
+0.0833
+
+—
+
+—
+
+0.0398
+
+0.0351
+
+0.0288
+
+0.0207
+
+0.0679
+
+0.0791
+
+0.0763
+
+0.0821
+
+0.0678
+
+0.0101
+
+† Use additional information as input.
+
+Table 2. We measure performance of versions of our network—
+trained with different kinds of supervision, and with different ap-
+proaches to perform separation—as well as other baselines. Re-
+ported here are ℓ1 error values for both estimated reﬂectance chro-
+maticity (when available), as well as the ﬁnal separated images.
+
+includes more complex processing—to perform the sepa-
+ration (Full+[25]). For the model with only chromaticity
+supervision, we also use [25] perform separation, and for
+the ﬁnal-only supervised model (where intermediate chro-
+maticities are not meaningful), we only consider the ﬁnal
+output.
+
+We ﬁnd that our model trained with full supervision has
+the best performance in terms of the quality of ﬁnal sepa-
+rated images. Interestingly, the Chrom-Only model is bet-
+ter at predicting chromaticity, but as expected, this does
+not translate to higher quality image outputs. The Final-
+Only model also yields worse separation results despite be-
+ing trained with respect to their quality, highlighting the im-
+portance of intermediate supervision. Finally, we ﬁnd that
+using our Full model in combination with [25] yields com-
+paratively better results than taking the direct ﬁnal output of
+the network. Thus, our ﬁnal sub-networks (ShadingNet and
+SeparateNet) are able to only approximate [25]’s algorithm.
+Thus, their main beneﬁt in our framework is in allowing
+back-propagation to provide supervision for chromaticity
+estimation, in a manner that is optimal for separation.
+
+We also include comparisons to a network with a more
+traditional architecture (rather than three sub-networks) to
+
+3785
+
+(a) Input
+
+(b) SingleNet
+
+(c) Final-Only
+
+(d) Chrom-Only
+
+(e) Full-direct
+
+(f) Full+[25]
+
+Figure 4. Qualitative comparison of image separation results of different versions of our network, as well as of the single encoder-decoder
+architecture network (SingleNet). We see that both SingleNet (b) and our Final-only (c) model both fail to separate the effects of illuminant
+shading from the input. Our Chrom-Only model (d) yields a better result, but has severe artifacts in certain regions—highlighting that better
+chromaticity estimates do not lead to better separation. The results from our model with Full supervision yields the best results—with better
+separation of shadow and shading effects when we use its chromaticity outputs in conjunction with [25].
+
+do direct separation (SingleNet). We use the same architec-
+ture as the encoder-decoder portion of our ShadingNet, and
+train this again with supervision only on the ﬁnal separated
+outputs. We ﬁnd that this performs signiﬁcantly worse (than
+even Final-Only), illustrating the utility of our physically-
+motivated architecture. Finally, we also include the com-
+parisons with baselines where different intrinsic image de-
+composition methods [38, 5, 32] are used to estimate re-
+ﬂectance chromaticity from a single image, and these are
+used for separation with [25]. We ﬁnd these methods yield
+lower accuracy in both reﬂectance chromaticity estimation
+and lighting separation—likely because they, like most in-
+trinsic image methods, assume a single light source.
+
+Finally, we evaluate on two methods that require addi-
+tional information beyond a single image: ground truth light
+colors for Hsu et al. [23], and a ﬂash/no-ﬂash pair which
+provides direct access to reﬂectance chromaticity, for Hui
+et al. [25]. We produce better results than [23], but as ex-
+pected, [25] yields the most accurate separation, since it
+has direct access to chromaticity information—but requires
+capturing an additional ﬂash image.
+
+5.3. Qualitative evaluation on real data
+
+Figure 4 shows results on a real image for the different
+versions of our network (as well as of SingleNet), while
+Figure 5 compares our results comparison to Hui et al.’s
+method [25] when using a ﬂash/no-ﬂash pair. These re-
+
+sults conﬁrm our conclusions from Table 2—we ﬁnd that
+the version of our network trained with full supervision per-
+forms best, especially when used in combination with [25]
+to carry out the separation from predicted chromaticities.
+Moreover, despite requiring only a single image input, it
+comes close to matching Hui et al.’s [25] performance with
+a ﬂash/no-ﬂash pair. We show an example in Figure 6 where
+our method affords a distinct advantage even when an im-
+age with ﬂash is available, but when several regions in the
+scene are too far from the ﬂash. This leads to artifacts in
+those regions for [25], while our approach is able to per-
+form a higher quality separation.
+
+6. Conclusions
+
+We describe a learning-based approach to separate the
+lighting effect of two illuminants in an image. Our method
+relies on the use of a deep-neural network based estimator,
+whose architecture is motivated by a physics-based anal-
+ysis of the problem and associated intermediate supervi-
+sion. Our ablation experiments demonstrate the importance
+of this supervision. Crucially, we show that we are able to
+produce high-quality outputs that match the performance of
+previous methods that required a ﬂash/no-ﬂash pair, while
+being more practical in requiring only a single image.
+
+3786
+
+(a) Input photographs
+
+(b) Hui et al. [25]
+
+(c) Our results
+
+Figure 5. We evaluate our technique against the ﬂash photography technique by Hui et al [25]. While the proposed method may lead to
+small artifacts in the resulting image, we can achieve nearly the same visual quality as Hui et al. [25], which captures two photographs for
+the same scene. In comparison, by using a single photograph, our proposed technique yields a more practical solution to the problem.
+
+(a) Input
+
+(b) Hui et al. [25]
+
+(c) Our result
+
+Figure 6. In this outdoor scene (a), the camera ﬂash was not strong enough to illuminate the distant scene points, resulting in the artifacts
+in results using the ﬂash-based method of Hui et al. [25] (b). In contrast, our method takes a single photograph and does not rely on ﬂash
+illumination. As can be seen (c), the artifacts can be eliminated and visual quality has been signiﬁcantly improved.
+
+Acknowledgments
+
+This research was supported, in part, by the National
+Geospatial-Intelligence Agency’s Academic Research Pro-
+gram (Award No. HM0476-17-1-2000),
+the NSF CA-
+
+REER grant CCF-1652569, and a gift from Adobe Re-
+search. Chakrabarti was supported by the NSF Grant IIS-
+1820693.
+
+3787
+
+References
+
+[1] Ya˘gız Aksoy, Changil Kim, Petr Kellnhofer, Sylvain Paris,
+Mohamed Elgharib, Marc Pollefeys, and Wojciech Matusik.
+A dataset of ﬂash and ambient illumination pairs from the
+crowd. In ECCV, 2018. 4
+
+[2] Jonathan T Barron and Jitendra Malik. Color constancy, in-
+
+trinsic images, and shape estimation. In ECCV. 2012. 2
+
+[3] Jonathan T Barron and Jitendra Malik. Shape, illumina-
+tion, and reﬂectance from shading. PAMI, 37(8):1670–1687,
+2015. 2
+
+[4] H. Barrow and J. Tenenbaum. Recovering intrinsic scene
+characteristics from images. Computer Vision Systems, 1978.
+2
+
+[5] Sean Bell, Kavita Bala, and Noah Snavely. Intrinsic images
+
+in the wild. TOG, 33(4):159, 2014. 2, 6, 7
+
+[6] Nicolas Bonneel, Balazs Kovacs, Sylvain Paris, and Kavita
+Bala. Intrinsic decompositions for image editing. In Com-
+puter Graphics Forum, 2017. 5
+
+[7] Nicolas Bonneel, Kalyan Sunkavalli, James Tompkin, De-
+Interactive
+
+qing Sun, Sylvain Paris, and Hanspeter Pﬁster.
+intrinsic video editing. TOG, 33(6):197, 2014. 1
+
+[8] Adrien Bousseau, Sylvain Paris, and Fr´edo Durand. User-
+In TOG, volume 28, page 130,
+
+assisted intrinsic images.
+2009. 1
+
+[9] Ivaylo Boyadzhiev, Kavita Bala, Sylvain Paris, and Fr´edo
+Durand. User-guided white balance for mixed lighting con-
+ditions. TOG, 31(6):200, 2012. 1
+
+[10] Ivaylo Boyadzhiev, Sylvain Paris, and Kavita Bala. User-
+assisted image compositing for photographic lighting. TOG,
+32(4):36–1, 2013. 2
+
+[11] Paul Debevec. Rendering synthetic objects into real scenes:
+Bridging traditional and image-based graphics with global
+illumination and high dynamic range photography. In SIG-
+GRAPH 2008 classes, page 32, 2008. 1
+
+[12] Paul Debevec. The Light Stages and Their Applications to
+
+Photoreal Digital Actors. In SIGGRAPH Asia, 2012. 1
+
+[13] Marc Ebner. Color constancy using local color shifts.
+
+In
+
+ECCV, 2004. 2
+
+[14] Graham Finlayson, MS Drew, and BV Funt. Enhancing von
+
+kries adaptation via sensor transformations. 1993. 2
+
+[15] Graham D Finlayson, Mark S Drew, and Brian V Funt. Diag-
+onal transforms sufﬁce for color constancy. In ICCV, 1993.
+2
+
+[16] Marc-Andre Gardner, Kalyan Sunkavalli, Ersin Yumer, Xi-
+aohui Shen, Emiliano Gambaretto, Christian Gagn, and Jean-
+Franois Lalonde. Learning to predict indoor illumination
+from a single image. TOG, 9(4), 2017. 2
+
+[17] Peter Vincent Gehler, Carsten Rother, Andrew Blake, Tom
+Minka, and Toby Sharp. Bayesian color constancy revisited.
+In CVPR, 2008. 2
+
+[18] A. Gijsenij, T. Gevers, and J. van de Weijer. Computational
+color constancy: Survey and experiments. TIP, 20(9):2475–
+2489, 2011. 2
+
+[19] Arjan Gijsenij, Rui Lu, and Theo Gevers. Color constancy
+
+for multiple light sources. TIP, 21(2):697–707, 2012. 2
+
+[20] Roger Grosse, Micah K Johnson, Edward H Adelson, and
+William T Freeman. Ground truth dataset and baseline eval-
+uations for intrinsic image algorithms. In CVPR, 2009.
+
+[21] Daniel Hauagge, Scott Wehrwein, Kavita Bala, and Noah
+In CVPR, 2013.
+
+Snavely. Photometric ambient occlusion.
+2
+
+[22] Yannick Hold-Geoffroy, Kalyan Sunkavalli, Sunil Hadap,
+Emiliano Gambaretto, and Jean-Franc¸ois Lalonde. Deep out-
+door illumination estimation. In CVPR, 2017. 2
+
+[23] Eugene Hsu, Tom Mertens, Sylvain Paris, Shai Avidan, and
+Fredo Durand. Light mixture estimation for spatially varying
+white balance. In TOG, volume 27, page 70, 2008. 2, 6, 7
+
+[24] Zhuo Hui, Aswin C. Sankaranarayanan, Kalyan Sunkavalli,
+and Sunil Hadap. White balance under mixed illumination
+using ﬂash photography. In ICCP, 2016. 1
+
+[25] Zhuo Hui, Kalyan Sunkavalli, Sunil Hadap, and Aswin C.
+Sankaranarayanan. Illuminant spectra-based source separa-
+tion using ﬂash photography. In CVPR, 2018. 1, 2, 3, 5, 6,
+7, 8
+
+[26] Zhuo Hui, Kalyan Sunkavalli, Joon-Young Lee, Sunil
+Hadap, Jian Wang, and Aswin C. Sankaranarayanan. Re-
+ﬂectance capture using univariate sampling of brdfs.
+In
+ICCV, 2017. 2
+
+[27] Phillip Isola, Jun-Yan Zhu, Tinghui Zhou, and Alexei A
+Image-to-image translation with conditional adver-
+
+Efros.
+sarial networks. CVPR, 2017. 5
+
+[28] Justin Johnson, Alexandre Alahi, and Li Fei-Fei. Perceptual
+In
+
+losses for real-time style transfer and super-resolution.
+ECCV, 2016. 4
+
+[29] Diederik P Kingma and Jimmy Ba. Adam: A method for
+arXiv preprint arXiv:1412.6980,
+
+stochastic optimization.
+2014. 5
+
+[30] Pierre-Yves Laffont and Jean-Charles Bazin.
+
+Intrinsic de-
+composition of image sequences from local temporal varia-
+tions. In ICCV, 2015. 2
+
+[31] Jean-Franc¸ois Lalonde, Srinivasa G Narasimhan,
+
+and
+Alexei A Efros. What do the sun and the sky tell us about
+the camera? IJCV, 88(1):24–51, 2010. 2
+
+[32] Zhengqi Li and Noah Snavely. Cgintrinsics: Better intrinsic
+image decomposition through physically-based rendering. In
+ECCV, 2018. 1, 2, 4, 5, 6, 7
+
+[33] Zhengqi Li and Noah Snavely. Learning intrinsic image de-
+
+composition from watching the world. In CVPR, 2018. 2
+
+[34] Zhengqin Li, Kalyan Sunkavalli, and Manmohan Chan-
+draker. Materials for masses: Svbrdf acquisition with a sin-
+gle mobile phone image. In ECCV, 2018. 1
+
+[35] Veronique Prinet, Dani Lischinski, and Michael Werman.
+In ICCV,
+
+Illuminant chromaticity from image sequences.
+2013. 2
+
+[36] Konstantinos Rematas, Tobias Ritschel, Mario Fritz, Efstra-
+tios Gavves, and Tinne Tuytelaars. Deep reﬂectance maps.
+In CVPR, 2016. 1
+
+[37] Christian Riess, Eva Eibenberger, and Elli Angelopoulou.
+Illuminant color estimation for real-world mixed-illuminant
+scenes. In ICCVW, 2011. 2
+
+[38] Jianbing Shen, Xiaoshan Yang, Xuelong Li, and Yunde Jia.
+Intrinsic image decomposition using optimization and user
+
+3788
+
+scribbles.
+436, 2013. 2, 6, 7
+
+IEEE Transactions on Cybernetics, 43(2):425–
+
+[39] Shuran Song, Fisher Yu, Andy Zeng, Angel X Chang, Mano-
+lis Savva, and Thomas Funkhouser. Semantic scene comple-
+tion from a single depth image. CVPR, 2017. 4
+
+[40] Kalyan Sunkavalli, Fabiano Romeiro, Wojciech Matusik,
+Todd Zickler, and Hanspeter Pﬁster. What do color changes
+reveal about an outdoor scene? In CVPR, 2008. 2
+
+[41] Yichuan Tang, Ruslan Salakhutdinov, and Geoffrey Hinton.
+Deep lambertian networks. arXiv preprint arXiv:1206.6445,
+2012. 1
+
+[42] Qi Zhao, Ping Tan, Qiang Dai, Li Shen, Enhua Wu, and
+Stephen Lin. A closed-form solution to retinex with non-
+local texture constraints. PAMI, 34(7):1437–1444, 2012. 2
+
+[43] Tinghui Zhou, Philipp Krahenbuhl, and Alexei A Efros.
+Learning data-driven reﬂectance priors for intrinsic image
+decomposition. In ICCV, 2015. 1, 2
+
+3789
+
+

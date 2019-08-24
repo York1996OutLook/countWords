@@ -1,0 +1,1410 @@
+SpotTune: Transfer Learning through Adaptive Fine-tuning
+
+Yunhui Guo∗1
+
+,
+
+2, Honghui Shi1, Abhishek Kumar†, Kristen Grauman3, Tajana Rosing2, Rogerio Feris1
+
+1IBM Research & MIT-IBM Watson AI Lab, 2University of California, San Diego, 3The University of Texas at Austin
+
+Abstract
+
+Transfer learning, which allows a source task to affect
+the inductive bias of the target task, is widely used in com-
+puter vision. The typical way of conducting transfer learn-
+ing with deep neural networks is to ﬁne-tune a model pre-
+trained on the source task using data from the target task.
+In this paper, we propose an adaptive ﬁne-tuning approach,
+called SpotTune, which ﬁnds the optimal ﬁne-tuning strat-
+egy per instance for the target data.
+In SpotTune, given
+an image from the target task, a policy network is used
+to make routing decisions on whether to pass the image
+through the ﬁne-tuned layers or the pre-trained layers. We
+conduct extensive experiments to demonstrate the effective-
+ness of the proposed approach. Our method outperforms
+the traditional ﬁne-tuning approach on 12 out of 14 stan-
+dard datasets. We also compare SpotTune with other state-
+of-the-art ﬁne-tuning strategies, showing superior perfor-
+mance. On the Visual Decathlon datasets, our method
+achieves the highest score across the board without bells
+and whistles.
+
+1. Introduction
+
+Deep learning has shown remarkable success in many
+computer vision tasks, but current methods often rely on
+large amounts of labeled training data [22, 15, 16]. Trans-
+fer learning, where the goal is to transfer knowledge from
+a related source task, is commonly used to compensate for
+the lack of sufﬁcient training data in the target task [35, 3].
+Fine-tuning is arguably the most widely used approach for
+transfer learning when working with deep learning mod-
+els.
+It starts with a pre-trained model on the source task
+and trains it further on the target task. For computer vision
+tasks, it is a common practice to work with ImageNet pre-
+trained models for ﬁne-tuning [20]. Compared with training
+from scratch, ﬁne-tuning a pre-trained convolutional neural
+network on a target dataset can signiﬁcantly improve per-
+formance, while reducing the target labeled data require-
+ments [14, 51, 44, 20].
+
+∗This work was done when Yunhui Guo was an intern at IBM Research.
+†Abhishek Kumar is now with Google Brain. The work was done when he
+was at IBM Research.
+
+Figure 1: Given a deep neural network pre-trained on a
+source task, we address the question of where to ﬁne-tune
+its parameters with examples of the target task. We propose
+a novel method that decides, per training example, which
+layers of the pre-trained model should have their parame-
+ters ﬁxed, i.e., shared with the source task, and which layers
+should be ﬁne-tuned to improve the accuracy of the model
+in the target domain.
+
+There are several choices when it comes to realizing the
+idea of ﬁne-tuning of deep networks in practice. A natural
+approach is to optimize all the parameters of the deep net-
+work using the target training data (after initializing them
+with the parameters of the pre-trained model). However, if
+the target dataset is small and the number of parameters is
+huge, ﬁne-tuning the whole network may result in overﬁt-
+ting [51]. Alternatively, the last few layers of the deep net-
+work can be ﬁne-tuned while freezing the parameters of the
+remaining initial layers to their pre-trained values [44, 1].
+This is driven by a combination of limited training data in
+the target task and the empirical evidence that initial layers
+learn low-level features that can be directly shared across
+various computer vision tasks. However, the number of ini-
+tial layers to freeze during ﬁne-tuning still remains a man-
+
+4805
+
+ual design choice which can be inefﬁcient to optimize for,
+especially for networks with hundreds or thousands of lay-
+ers. Further, it has been empirically observed that current
+successful multi-path deep architectures such as ResNets
+[15] behave like ensembles of shallow networks [47]. It is
+not clear if restricting the ﬁne-tuning to the last contiguous
+layers is the best option, as the ensemble effect diminishes
+the assumption that early or middle layers should be shared
+with common low-level or mid-level features.
+
+Current methods also employ a global ﬁne-tuning strat-
+egy, i.e., the same decision of which parameters to freeze
+vs. ﬁne-tune is taken for all the examples in the target task.
+The assumption is that such a decision is optimal for the
+entire target data distribution, which may not be true, par-
+ticularly in the case of insufﬁcient target training data. For
+example, certain classes in the target task might have higher
+similarity with the source task, and routing these target ex-
+amples through the source pre-trained parameters (during
+inference) might be a better choice in terms of accuracy.
+Ideally, we would like these decisions to be made individ-
+ually for each layer (i.e., whether to use pre-trained param-
+eters or ﬁne-tuned parameters for that layer), per input ex-
+ample, as illustrated in Figure 1.
+
+In this paper, we propose SpotTune, an approach to learn
+a decision policy for input-dependent ﬁne-tuning. The pol-
+icy is sampled from a discrete distribution parameterized by
+the output of a lightweight neural network, which decides
+which layers of a pre-trained model should be ﬁne-tuned or
+have their parameters frozen, on a per instance basis. As
+these decision functions are discrete and non-differentiable,
+we rely on a recent Gumbel Softmax sampling approach
+[30, 18] to train the policy network. At test time, the policy
+decides whether the features coming out of a layer go into
+the next layer with the source pre-trained parameters or the
+ﬁne-tuned parameters.
+
+We summarize our contributions as follows:
+
+• We propose an input-dependent ﬁne-tuning approach
+that automatically determines which layers to ﬁne-tune
+per target instance. This is in contrast to current ﬁne-
+tuning methods which are mostly ad-hoc in terms of
+determining where to ﬁne-tune in a deep neural net-
+work (e.g., ﬁne-tuning last k layers).
+
+• We also propose a global variant of our approach that
+constrains all the input examples to ﬁne-tune the same
+set of k layers which can be distributed anywhere in
+the network. This variant results in fewer parameters in
+the ﬁnal model as the corresponding set of pre-trained
+layers can be discarded.
+
+• We conduct extensive empirical evaluation of the pro-
+posed approach, comparing it with several competitive
+baselines. The proposed approach outperforms stan-
+dard ﬁne-tuning on 12 out of 14 datasets. Moreover,
+
+we show the effectiveness of SpotTune compared to
+other state-of-the-art ﬁne-tuning strategies. On the Vi-
+sual Decathlon Challenge [37], which is a competi-
+tive benchmark for testing the performance of multi-
+domain learning algorithms with a total of 10 datasets,
+the proposed approach achieves the highest score com-
+pared with the state-of-the-art methods.
+
+2. Related Work
+
+Transfer Learning. There is a long history of transfer
+learning and domain adaptation methods in computer vision
+[8, 35]. Recently, transfer learning based on deep neural
+networks has received signiﬁcant attention in the commu-
+nity [12, 6, 7, 24, 13]. Fine-tuning a pre-trained network
+model such as ImageNet on a new dataset is the most com-
+mon strategy for knowledge transfer in the context of deep
+learning. Methods have been proposed to ﬁne-tune all net-
+work parameters [14], only the parameters of the last few
+layers [28], or to just use the pre-trained model as a ﬁxed
+feature extractor with a classiﬁer such as SVM on top [42].
+Kornblith et al. [20] studied several of these options to ad-
+dress the question of whether better ImageNet models trans-
+fer better. Yosinski et al. [51] conducted a study on the im-
+pact of transferability of features from the bottom, middle,
+or top of the network with early models, but it is not clear
+whether their conclusions hold for modern multi-path ar-
+chitectures such as Residual Networks [15] or DenseNets
+[16]. Yang et al. [50] have recently proposed to learn re-
+lational graphs as transferable representations, instead of
+unary features. Closely related to our work, Li et al. [25]
+investigated several regularization schemes that explicitly
+promote the similarity of the ﬁne-tuned model with the orig-
+inal pre-trained model. Different from all these methods,
+our proposed approach automatically decides the optimal
+set of layers to ﬁne-tune in a pre-trained model on a new
+task. In addition, we make this decision on a per-instance
+basis.
+
+Feature Sharing Across Tasks. In the multi-task set-
+ting, knowing which tasks or parameters are shareable is
+a longstanding challenge [19, 23, 45, 29]. Early methods
+were designed for shallow classiﬁcation models [52, 17,
+36], while more recent approaches address the problem of
+“with whom” each task should share features using deep
+neural networks [29, 32]. Cross-stitching networks [33] and
+Progressive Networks [40] have been recently proposed to
+learn an optimal combination of shared and task-speciﬁc
+representations for joint multi-task optimization and life-
+long learning, respectively. These methods rely on per-layer
+inter-column adapters, which requires more memory and
+leads to more computational cost. In addition, they learn
+global feature adapters per task, whereas SpotTune adap-
+tively routes computation per input example, which is im-
+portant to boost accuracy.
+
+4806
+
+Dynamic Routing. Our proposed approach is related
+to conditional computation methods [4, 27, 11], which aim
+to dynamically route information in neural networks with
+the goal of improving computational efﬁciency. Bengio
+et al. [2] used sparse activation policies to selectively ex-
+ecute neural network units on a per-example basis. Shazeer
+et al. [43] introduced a Sparsely-Gated Mixture-of-Experts
+layer, where a trainable gating network determines a sparse
+combination of sub-networks (experts) to use for each ex-
+ample. Wu, Nagarajan et al. proposed BlockDrop [49], a
+method that uses reinforcement learning to dynamically se-
+lect which layers of a Residual Network to execute, exploit-
+ing the fact that ResNets are resilient to layer dropping [47].
+Veit and Belongie [46] investigated the same idea using
+Gumbel Softmax [18] for on-the-ﬂy selection of residual
+blocks. Our work also explores dynamic routing based on
+the Gumbel trick. However, unlike previous methods, our
+goal is to determine the parameters in a neural network that
+should be frozen or ﬁne-tuned during learning to improve
+accuracy, instead of dropping layers to improve efﬁciency.
+
+3. Proposed Approach
+
+Given a pre-trained network model on a source task (e.g.,
+ImageNet pre-trained model), and a set of training exam-
+ples with associated labels in the target domain, our goal
+is to create an adaptive ﬁne-tuning strategy that decides,
+per training example, which layers of the pre-trained model
+should be ﬁne-tuned (adapted to the target task) and which
+layers should have their parameters frozen (shared with the
+source task) during training, in order to improve the accu-
+racy of the model in the target domain. To this end, we ﬁrst
+present an overview of our approach in Section 3.1. Then,
+we show how we learn our adaptive ﬁne-tuning policy using
+Gumbel Softmax sampling in Section 3.2. Finally, in Sec-
+tion 3.3, we present a global policy variant of our proposed
+image-dependent ﬁne-tuning method, which constrains all
+the images to follow a single ﬁne-tuning policy.
+
+3.1. SpotTune Overview
+
+Although our approach could be applied to different deep
+neural network architectures, in the following we focus
+on a Residual Network model (ResNet) [15]. Recently, it
+has been shown that ResNets behave as ensembles of shal-
+low classiﬁers and are resilient to residual block swapping
+[47]. This is a desirable property for our approach, as later
+we show that SpotTune dynamically swaps pre-trained and
+ﬁne-tuned blocks to improve performance.
+
+Consider the l-th residual block in a pre-trained ResNet
+
+model:
+
+xl = Fl(xl−1) + xl−1.
+
+(1)
+
+In order to decide whether or not to ﬁne-tune a residual
+block during training, we freeze the original block Fl and
+
+create a new trainable block ˆFl, which is initialized with the
+parameters of Fl. With the additional block ˆFl, the output
+of the l-th residual block in SpotTune is computed as below:
+
+xl = Il(x) ˆFl(xl−1) + (1 − Il(x))Fl(xl−1) + xl−1
+
+(2)
+
+where Il(x) is a binary random variable that indicates
+whether the residual block should be frozen or ﬁne-tuned,
+conditioned on the input image. During training, given an
+input image x, the frozen block Fl trained on the source
+task is left unchanged and the replicated block ˆFl, which
+is initialized from Fl, can be optimized towards the tar-
+get dataset. Hence, the given image x can either share the
+frozen block Fl, which allows the features computed on the
+source task to be reused, or ﬁne-tune the block ˆFl, which
+allows x to use the adapted features. Il(x) is sampled from
+a discrete distribution with two categories (freeze or ﬁne-
+tune), which is parameterized by the output of a lightweight
+policy network. More speciﬁcally, if Il(x) = 0, then the l-
+th frozen block is re-used. Otherwise, if Il(x) = 1 the l-th
+residual block is ﬁne-tuned by optimizing ˆFl.
+
+Figure 2 illustrates the architecture of our proposed Spot-
+Tune method, which allows each training image to have its
+own ﬁne-tuning policy. During training, the policy network
+is jointly trained with the target classiﬁcation task using
+Gumbel Softmax sampling, as we will describe next. At
+test time, an input image is ﬁrst fed into a policy network,
+whose output is sampled to produce routing decisions on
+whether to pass the image through the ﬁne-tuned or pre-
+trained residual blocks. The image is then routed through
+the corresponding residual blocks to produce the ﬁnal clas-
+siﬁcation prediction. Note that the effective number of exe-
+cuted residual blocks is the same as the original pre-trained
+model. The only additional computational cost is incurred
+by the policy network, which is designed to be lightweight
+(only a few residual blocks) in comparison to the original
+pre-trained model.
+
+3.2. Training with the Gumbel Softmax Policy
+
+SpotTune makes decisions as to whether or not to freeze
+or ﬁne-tune each residual block per training example. How-
+ever, the fact that the policy Il(x) is discrete makes the net-
+work non-differentiable and therefore difﬁcult to be opti-
+mized with backpropagation. There are several ways that
+allow us to “back-propagate” through the discrete nodes [4].
+In this paper, we use a recently proposed Gumbel Softmax
+sampling approach [30, 18] to circumvent this problem.
+
+The Gumbel-Max trick [30] is a simple and effective way
+to draw samples from a categorical distribution parameter-
+ized by {α1, α2, ..., αz}, where αi are scalars not conﬁned
+to the simplex, and z is the number of categories. In our
+work, we consider two categories (freeze or ﬁne-tune), so
+z = 2, and for each residual block, α1 and α2 are scalars
+corresponding to the output of a policy network.
+
+4807
+
+Figure 2: Illustration of our proposed approach. The policy network is trained to output routing decisions (ﬁne-tune or
+freeze parameters) for each block in a ResNet pre-trained on the source dataset. During learning, the ﬁne-tune vs. freeze
+decisions are generated based on a Gumbel Softmax distribution, which allows us to optimize the policy network using
+backpropagation. At test time, given an input image, for each residual block the computation is routed so that either the
+ﬁne-tuned path or the frozen path is activated.
+
+A random variable G is said to have a standard Gumbel
+distribution if G = − log(− log(U )) with U sampled from
+a uniform distribution, i.e. U ∼ U nif [0, 1]. Based on the
+Gumbel-Max trick [30], we can draw samples from a dis-
+crete distribution parameterized by αi in the following way:
+we ﬁrst draw i.i.d samples Gi, ..., Gz from Gumbel(0, 1)
+and then generate the discrete sample as follows:
+
+X = arg max
+
+[log αi + Gi].
+
+(3)
+
+i
+
+The arg max operation in Equation 3 is non-differentiable.
+However, we can use the Gumbel Softmax distribution
+[30, 18], which adopts softmax as a continuous relaxation
+to arg max. We represent X as a one-hot vector where the
+index of the non-zero entry of the vector is equal to X, and
+relax the one-hot encoding of X to a z-dimensional real-
+valued vector Y using softmax:
+
+Yi =
+
+exp((log αi + Gi)/τ )
+j=1 exp((log αj + Gj)/τ )
+
+Pz
+
+for i = 1, .., z
+
+(4)
+
+where τ is a temperature parameter, which controls the dis-
+creteness of the output vector Y . When τ becomes closer
+to 0, the samples from the Gumbel Softmax distribution be-
+come indistinguishable from the discrete distribution (i.e,
+almost the same as the one-hot vector).
+
+Sampling our ﬁne-tuning policy Il(x) from a Gumbel
+Softmax distribution parameterized by the output of a pol-
+icy network allows us to backpropagate from the discrete
+freeze/ﬁne-tune decision samples to the policy network, as
+the Gumbel Softmax distribution is smooth for τ > 0 and
+therefore has well-deﬁned gradients with respect to the pa-
+rameters αi. By using a standard classiﬁcation loss lc for
+
+the target task, the policy network is jointly trained with the
+pre-trained model to ﬁnd the optimal ﬁne-tuning strategy
+that maximizes the accuracy of the target task.
+
+Similar to [49], we generate all freeze/ﬁne-tune deci-
+sions for all residual blocks at once, instead of relying
+on features of intermediate layers of the pre-trained model
+to obtain the ﬁne-tuning policy. More speciﬁcally, sup-
+pose there are L residual blocks in the pre-trained model.
+The output of the policy network is a two-dimensional ma-
+trix β ∈ RL×2. Each row of β represents the logits of
+a Gumbel-Softmax Distribution with two categories, i.e,
+βl,0 = log α1 and βl,1 = log α2. After obtaining β, we
+use the straight-through version of the Gumbel-Softmax es-
+timator [18]. During the forward pass, we sample the ﬁne-
+tuning policy Il(x) using Equation 3 for the l-th residual
+block. During the backward pass, we approximate the gra-
+dient of the discrete samples by computing the gradient of
+the continuous softmax relaxation in Equation 4. This pro-
+cess is illustrated in Figure 2.
+
+3.3. Compact Global Policy Variant
+
+In this section, we consider a simple extension of the
+image-speciﬁc ﬁne-tuning policy, which constrains all the
+images to ﬁne-tune the same k blocks that can be distributed
+anywhere in the ResNet. This variant reduces both the
+memory footprint and computational costs, as k can be set
+to a small number so most blocks are shared with the source
+task, and at test time the policy network is not needed.
+
+Consider a pre-trained ResNet model with L residual
+blocks. For the l-th block, we can obtain the number of im-
+ages that use the ﬁne-tuned block and the pre-trained block
+
+4808
+
+based on the image-speciﬁc policy. We compute the frac-
+tion of images in the target dataset that uses the ﬁne-tuned
+block and denote it as vl ∈ [0, 1]. In order to constrain our
+method to ﬁne-tune k blocks, we introduce the following
+loss:
+
+L
+
+lk = ((
+
+X
+
+l=1
+
+vl) − k)2.
+
+(5)
+
+Moreover, in order to achieve a deterministic policy, we add
+another loss le:
+
+le =
+
+L
+
+X
+
+l=1
+
+−vl log vl.
+
+(6)
+
+The additional loss le pushes vl to be exactly 0 or 1, so that
+a global policy can be obtained for all the images. The ﬁnal
+loss is deﬁned below:
+
+l = lc + λ1lk + λ2le,
+
+(7)
+
+where lc is the classiﬁcation loss, λ1 is the balance param-
+eter for lk, and λ2 is the the balance parameter for le. The
+additional losses push the policy network to learn a global
+policy for all the images. As opposed to manually select-
+ing k blocks to ﬁne-tune, the global-k variant learns the
+k blocks that can achieve the best accuracy on the target
+dataset. We leave for future work the task of ﬁnding the op-
+timal k, which could be achieved e.g., by using reinforce-
+ment learning with a reward proportional to accuracy and
+inversely proportional to the number of ﬁne-tuned blocks.
+
+4. Experiments
+
+4.1. Experimental Setup
+
+Datasets and metrics. We compare our SpotTune method
+with other ﬁne-tuning and regularization techniques on 5
+public datasets, including three ﬁne-grained classiﬁcation
+benchmarks: CUBS [48], Stanford Cars [21] and Flowers
+[34], and two datasets with a large domain mismatch from
+ImageNet: Sketches [10] and WikiArt [41]. The statistics
+of these datasets are listed in Table 1. Performance is mea-
+sured by classiﬁcation accuracy on the evaluation set.
+
+We also report results on the datasets of the Visual
+Decathlon Challenge [37], which aims at evaluating vi-
+sual recognition algorithms on images from multiple vi-
+sual domains. There are a total of 10 datasets as part of
+this challenge: (1) ImageNet, (2) Aircraft, (3) CIFAR-100,
+(4) Describable textures, (5) Daimler pedestrian classiﬁca-
+tion, (6) German trafﬁc signs, (7) UCF-101 Dynamic Im-
+ages, (8) SVHN, (9) Omniglot, and (10) Flowers. The im-
+ages of the Visual Decathlon datasets are resized isotropi-
+cally to have a shorter side of 72 pixels, in order to alle-
+viate the computational burden for evaluation. Following
+[37], the performance is measured by a single scalar score
+
+Dataset
+CUBS
+
+Stanford Cars
+
+Flowers
+Sketch
+WikiArt
+
+Training Evaluation Classes
+
+5,994
+8,144
+2,040
+16,000
+42,129
+
+5,794
+8,041
+6,149
+4,000
+10,628
+
+200
+196
+102
+250
+195
+
+Table 1: Datasets used to evaluate SpotTune against other
+ﬁne-tuning baselines.
+
+i
+
+i
+
+i=1 αimax{0, Emax
+
+S = P10
+i − Ei}2, where Ei is the test
+error on domain Di, and Emax
+is the error of a reasonable
+baseline algorithm. The coefﬁcient αi is 1000(Emax
+)−2,
+so a perfect classiﬁer receives score 1000. The maximum
+score achieved across 10 domains is 10000. Compared with
+average accuracy across all the 10 domains, the score S is
+a more reasonable measurement for comparing different al-
+gorithms, since it considers the difﬁculty of different do-
+mains, which is not captured by the average accuracy [37].
+In total, our experiments comprise 14 datasets, as the
+Flowers dataset is listed in both sets described above. We
+note that for the experiments in Table 2, we use the full
+resolution of the images, while those are resized in the Vi-
+sual Decathlon experiments to be consistent with other ap-
+proaches.
+
+Baselines. We compare SpotTune with the following ﬁne-
+tuning and regularization techniques:
+
+• Standard Fine-tuning: This baseline ﬁne-tunes all
+the parameters of the pre-trained network on the tar-
+get dataset [14, 51].
+
+• Feature Extractor: We use the pre-trained network as
+a feature extractor [42, 9] and only add the classiﬁca-
+tion layer for each newly added dataset.
+
+• Stochastic Fine-tuning: We randomly sample 50% of
+
+the blocks of the pre-trained network to ﬁne-tune.
+
+• Fine-tuning last-k (k = 1, 2, 3): This baseline ﬁne-
+tunes the last k residual blocks of the pre-trained net-
+work on the target dataset [28, 44, 1]. In our experi-
+ments, we consider ﬁne-tuning the last one (k = 1), last
+two (k = 2) and the last three (k = 3) residual blocks.
+
+• Fine-tuning ResNet-101: We ﬁne-tune all the param-
+eters of a pre-trained ResNet-101 model on the target
+dataset. SpotTune uses ResNet-50 instead (for the ex-
+periments in Table 2), so this baseline is more compu-
+tationally expensive and can ﬁne-tune twice as many
+residual blocks. We include it as the total number of
+parameters during training is similar to SpotTune, so
+it will verify any advantage is not merely due to our
+having 2x residual blocks available.
+
+4809
+
+Model
+
+Feature Extractor
+
+Standard Fine-tuning
+Stochastic Fine-tuning
+
+Fine-tuning last-3
+Fine-tuning last-2
+Fine-tuning last-1
+
+Random Policy
+
+Fine-tuning ResNet-101
+
+L2-SP
+
+Progressive Neural Nets
+
+SpotTune (running ﬁne-tuned blocks)
+
+SpotTune (Global-k)
+
+SpotTune
+
+CUBS
+74.07%
+81.86%
+81.03%
+81.54%
+80.34%
+78.68%
+81.63 %
+82.13%
+83.69%
+83.08 %
+82.36%
+83.48%
+84.03 %
+
+Stanford Cars
+
+70.81%
+89.74%
+88.94%
+88.21%
+85.36%
+81.73%
+88.57%
+90.32%
+91.08%
+91.59%
+92.04%
+90.51%
+92.40%
+
+Sketches
+Flowers WikiArt
+75.50%
+85.67% 61.60%
+79.58%
+93.67% 75.60%
+92.95% 73.06%
+78.30%
+89.03% 72.68 % 77.72%
+91.81% 70.82%
+78.37%
+77.20%
+89.99% 68.96%
+93.44% 73.82%
+78.30%
+94.21% 76.52% 78.92%
+95.21% 75.38%
+79.60%
+79.71%
+95.55% 75.41%
+78.88%
+93.49% 67.27%
+96.60% 75.63%
+80.02%
+96.34% 75.77% 80.20%
+
+Table 2: Results of SpotTune and baselines on CUBS, Stanford Cars, Flowers, WikiArt and Sketches.
+
+• Random Policy: This baseline method adopts a ran-
+dom policy network that always ﬁnetunes the last three
+layers and randomly decides whether to ﬁne-tune or
+not for each training sample for other layers.
+
+• L2-SP [25]: This is a recently proposed state-of-the-
+art regularization method for ﬁne-tuning. The authors
+recommend using an L2 penalty to allow the ﬁne-tuned
+network to have an explicit inductive bias towards the
+pre-trained model, sharing similar motivation with our
+approach.
+
+• Progressive Neural Networks [40]: This is a recent
+method which learns an optimal combination of shared
+and task-speciﬁc representations for life-long learning.
+Different form the original work, which uses a random
+weight initialization, we use an ImageNet pre-trained
+model as the frozen source network, since the former
+leads to much worse performance for classiﬁcation.
+
+Regarding the methods that have reported results on the
+Visual Decathlon datasets, the most related to our work
+are models trained from Scratch, Standard Fine-tuning, the
+Feature Extractor baseline as described above, and Learn-
+ing without Forgetting (LwF) [26], which is a recently pro-
+posed technique that encourages the ﬁne-tuned network
+to retain the performance on ImageNet or previous tasks,
+while learning consecutive tasks. Other methods include
+Piggyback [31], Residual Adapters and its variants [37, 38],
+Deep Adaptation Networks (DAN) [39], and Batch Norm
+Adaptation (BN Adapt) [5], which are explicitly designed
+to minimize the number of model parameters, while our
+method sits at the other end of the spectrum, with a focus
+on accuracy instead of parameter reduction. We also com-
+pare with training from scratch using Residual Adapters
+(Scratch+), as well as the high-capacity version of Residual
+Adapters described in [37], which have a similar number of
+parameters as SpotTune.
+Pre-trained model. For comparing SpotTune with ﬁne-
+
+tuning baselines in Table 2, we use ResNet-50 pre-trained
+on ImageNet, which starts with a convolutional layer fol-
+lowed by 16 residual blocks. The residual blocks contain
+three convolutional layers and are distributed into 4 seg-
+ments (i.e, [3, 4, 6, 3]) with downsampling layers in be-
+tween. We use the pre-trained model from Pytorch which
+has a classiﬁcation accuracy of 75.15% on ImageNet. For
+the Visual Decathlon Challenge, we use a ResNet-26 as de-
+scribed in [38].
+
+Policy network architecture. For the experiments with
+ResNet-50 (Table 2), we use a ResNet with 4 blocks for the
+policy network. The channel size of each block is 64, 128,
+256, 512, respectively. For the Visual Decathlon Challenge
+with ResNet-26, the policy network consists of a ResNet
+with 3 blocks. The channel size of each block is 64, 128,
+256, respectively.
+
+Implementations details. We use SGD with momentum
+as the optimizer. For the Visual Decathlon Challenge, we
+freeze the ﬁrst macro blocks (4 residual blocks) of the
+ResNet-26 and only apply the adaptive ﬁne-tuning for the
+rest of the residual blocks. This choice reduces the number
+of parameters and has a regularization effect.
+
+4.2. Results and Analysis
+
+4.2.1 SpotTune vs. Fine-tuning Baselines
+
+The results of SpotTune and the ﬁne-tuning baselines are
+listed in Table 2. Clearly, SpotTune yields consistently
+better results than other methods. Using the pre-trained
+model on ImageNet as a feature extractor (with all parame-
+ters frozen) can reduce the number of parameters when the
+model is applied to a new dataset, but it leads to bad perfor-
+mance due to the domain shift. All the ﬁne-tuning variants
+(Standard Fine-tuning, Stochastic Fine-tuning, Fine-tuning
+last-k) achieve higher accuracy than the Feature Extractor
+baseline, as expected. Note that the results of Fine-tuning
+last-k show that manually deciding the number of layers
+
+4810
+
+to ﬁne-tune may lead to worse results than standard ﬁne-
+tuning. The Fine-tuned ResNet-101 has higher capacity and
+thus performs better than the other ﬁne-tuning variants. Al-
+though it has twice as many ﬁne-tuned blocks and is sig-
+niﬁcantly more computationally expensive than SpotTune,
+it still performs worse than our method in all datasets, ex-
+cept in WikiArt. We conjecture this is because WikiArt
+has more training examples than the other datasets. To test
+this hypothesis, we evaluated both models when 25% of
+the WikiArt training data is used. In this setting, SpotTune
+achieves 61.24% accuracy compared to 60.20% of the ﬁne-
+tuned ResNet-101. This gap increases even more when 10%
+of the data is considered (49.59% vs. 47.05%).
+
+By inducing the ﬁne-tuned models to be close to the pre-
+trained model, L2-SP achieves better results than other ﬁne-
+tuning variants, but it is inferior to SpotTune in all datasets.
+However, we note that L2-SP is complementary to Spot-
+Tune and can be combined with it to further improve results.
+Compared with Progressive Neural Networks, SpotTune is
+faster, requires less memory, and achieves more accuracy
+by adaptively routing computation per input example.
+
+SpotTune is different from all the baselines in two as-
+pects. On one hand, the ﬁne-tuning policy in SpotTune is
+specialized for each instance in the target dataset. This im-
+plicitly takes the similarities between the images in the tar-
+get dataset and the source dataset into account. On the other
+hand, sharing layers with the source task without parameter
+reﬁnement reduces overﬁtting and promotes better re-use
+of features extracted from the source task. We also con-
+sider three variants of SpotTune in the experiments. The
+ﬁrst one is SpotTune (running ﬁne-tuned blocks) in which
+during testing all the images are routed through the ﬁne-
+
+Figure 3: Visualization of policies on CUBS, Flowers,
+WikiArt, Sketches and Stanford Cars. Note that different
+datasets have very different policies. SpotTune automati-
+cally identiﬁes the right ﬁne-tuning policy for each dataset,
+for each training example.
+
+tuned blocks. With this setting, the accuracy drops on all
+the datasets. This suggests that certain images in the target
+data can beneﬁt from reusing some of the layers of the pre-
+trained network. The second variant is SpotTune (global-
+k) in which we set k to 3 in the experiments. Generally,
+SpotTune (global-3) performs worse than SpotTune, but is
+around 3 times more compact and, interestingly, is better
+than Fine-tuning last-3. This suggests that it is beneﬁcial
+to have an image-speciﬁc ﬁne-tuning strategy, and manu-
+ally selecting the last k layers is not as effective as choosing
+the optimal non-contiguous set of k layers for ﬁne-tuning.
+The third variant is Random Policy where we always ﬁne-
+tune the last three layers and use a random policy network
+for other layers. The results show that an optimized policy
+outperforms a random policy.
+
+4.2.2 Visualization of Policies
+
+To better understand the ﬁne-tuning policies learned by
+the policy network, we visualize them on CUBS, Flowers,
+WikiArt, Sketches, and Stanford Cars in Figure 3. The po-
+lices are learned on a ResNet-50 which has 16 blocks. The
+tone of red of a block indicates the number of images that
+were routed through the ﬁne-tuned path of that block. For
+example, a block with a dark tone of red and a 75% level
+of ﬁne-tuning (as shown in the scale depicted in the right
+of Figure 3) means 75% of the images in the test set use
+the ﬁne-tuned block and the remaining 25% images share
+the pre-trained ImageNet block. The illustration shows that
+different datasets have very different ﬁne-tuning policies.
+SpotTune allows us to automatically identify the right pol-
+icy for each dataset, as well as for each training example,
+which would be infeasible through a manual approach.
+
+4.2.3 Visualization of Block Usage
+
+Besides the learned policies for each residual block, we are
+also interested in the number of ﬁne-tuned blocks used by
+each dataset during testing. This can reveal the difference of
+the distribution of each target dataset and can also shed light
+on how the policy network works. In Figure 4, we show the
+distribution of the number of ﬁne-tuned blocks used by each
+target dataset. During testing, for each dataset we categorize
+the test examples based on the number of ﬁne-tuned blocks
+they use. For example, from Figure 4, we can see around
+1000 images in the test set of the CUBS dataset use 7 ﬁne-
+tuned blocks.
+
+We have the following two observations based on the
+results. First, for a speciﬁc dataset, different images tend
+to use a different number of ﬁne-tuned blocks. This again
+validates our hypothesis that it is more accurate to have an
+image-speciﬁc ﬁne-tuning policy rather than a global ﬁne-
+tuning policy for all images. Second, the distribution of
+ﬁne-tuned blocks usage differs signiﬁcantly across different
+target datasets. This demonstrates that based on the char-
+
+4811
+
+Scratch
+
+Scratch+ [37]
+
+Feature Extractor
+Fine-tuning [38]
+BN Adapt. [5]
+
+LwF [26]
+
+Series Res. adapt. [37]
+Parallel Res. adapt. [38]
+Res. adapt. (large) [37]
+Res. adapt. decay [37]
+
+Res. adapt. ﬁnetune all [37]
+
+DAN [39]
+
+PiggyBack [31]
+
+SpotTune (Global-k)
+
+SpotTune
+
+#par
+10x
+11x
+1x
+10x
+1x
+10x
+2x
+2x
+12x
+2x
+2x
+2x
+
+1.28x
+
+4x
+11x
+
+ImNet
+59.87
+59.67
+59.67
+60.32
+59.87
+59.87
+60.32
+60.32
+67.00
+59.67
+59.23
+57.74
+57.69
+60.32
+60.32
+
+Airc.
+57.10
+59.59
+23.31
+61.87
+43.05
+61.15
+61.87
+64.21
+67.69
+61.87
+63.73
+64.12
+65.29
+61.57
+63.91
+
+C100 DPed
+91.20
+75.73
+92.45
+76.08
+80.33
+63.11
+92.82
+82.12
+78.62
+92.07
+92.34
+82.23
+93.88
+81.22
+94.73
+81.92
+84.69
+94.28
+93.88
+81.20
+93.30
+81.31
+91.30
+80.07
+96.99
+79.87
+80.30
+95.78
+96.49
+80.48
+
+DTD GTSR
+96.55
+37.77
+96.90
+39.63
+68.18
+55.53
+99.42
+55.53
+51.60
+95.82
+97.57
+58.83
+99.27
+57.13
+99.38
+58.83
+59.41
+97.43
+97.57
+57.13
+97.47
+57.02
+98.46
+56.54
+97.27
+57.45
+55.80
+99.48
+99.52
+57.13
+
+Flwr
+56.30
+56.66
+73.69
+81.41
+74.14
+83.05
+81.67
+84.68
+84.86
+81.67
+83.43
+86.05
+79.09
+85.38
+85.22
+
+OGlt
+88.74
+88.74
+58.79
+89.12
+84.83
+88.08
+89.62
+89.21
+89.92
+89.62
+89.82
+89.67
+87.63
+88.41
+88.84
+
+SVHN
+96.63
+96.78
+43.54
+96.55
+94.10
+96.10
+96.57
+96.54
+96.59
+96.13
+96.17
+96.77
+97.24
+96.47
+96.72
+
+UCF
+43.27
+44.17
+26.80
+51.20
+43.51
+50.04
+50.12
+50.94
+52.39
+50.12
+50.28
+49.48
+47.48
+51.05
+52.34
+
+Score
+1625
+1826
+544
+3096
+1353
+2515
+3159
+3412
+3131
+2621
+2643
+2851
+2838
+3401
+3612
+
+Table 3: Results of SpotTune and baselines on the Visual Decathlon Challenge. The number of parameters is speciﬁed with
+respect to a ResNet-26 model as in [37].
+
+acteristics of the target dataset, standard ﬁne-tuning (which
+optimizes all the parameters of the pre-trained network to-
+wards the target task) may not be the ideal choice when con-
+ducting transfer learning with convolutional networks.
+
+Figure 4: Distribution of the number of ﬁne-tuned blocks
+used by the test examples. Different tasks and images re-
+quire substantially different ﬁne-tuning for best results, and
+this can be automatically inferred by SpotTune.
+
+4.2.4 Visual Decathlon Challenge
+
+We show the results of SpotTune and the baselines on the
+Visual Decathlon Challenge in Table 3. Among all the
+baselines, SpotTune achieves the highest Visual Decathlon
+score. Compared to standard ﬁne-tuning, SpotTune has al-
+most the same amount of parameters and improves the score
+by a large margin (3612 vs 3096). Considering the Visual
+Decathlon datasets, and the 5 datasets from our previous ex-
+periments, SpotTune shows superior performance on 12 out
+of 14 datasets over standard ﬁne-tuning. Compared with
+other recently proposed methods on the Visual Decathlon
+Challenge [31, 39, 37, 38, 26], SpotTune sets the new state
+of the art for the challenge by only exploiting the trans-
+ferability of the features extracted from ImageNet, without
+changing the network architecture. This is achieved with-
+out bells and whistles, i.e., we believe the results could be
+even further improved with more careful parameter tuning,
+
+and the use of other techniques such as data augmentation,
+including jittering images at test time and averaging their
+predictions. Compared to standard ﬁne-tuning, our method
+uses 1.47x time in training (tested with 4 Titan Xp GPUs,
+batch size 96). At test time, the additional cost is negligible
+(0.013s vs 0.015s per image).
+
+In SpotTune (Global-k), we ﬁne-tune 3 blocks of the
+pre-trained model for each task which greatly reduces the
+number of parameters and still preserves a very competitive
+score. Although we focus on accuracy instead of parame-
+ter reduction in our work, we note that training our global-
+k variant with a multi-task loss on all 10 datasets, as well
+as model compression techniques, could further reduce the
+number of parameters in our method. We leave this research
+thread for future work.
+5. Conclusion
+
+We proposed an adaptive ﬁne-tuning algorithm called
+SpotTune which specializes the ﬁne-tuning strategy for each
+training example of the target dataset. We showed that our
+method outperforms the key most popular and widely used
+protocols for ﬁne-tuning on a variety of public benchmarks.
+We also evaluated SpotTune on the Visual Decathlon chal-
+lenge, achieving the new state of the art, as measured by the
+overall score across the 10 datasets.
+
+Acknowledgements. We would like to thank Prof. Song Han for helpful discussions.
+
+This work is supported in part by IARPA via DOI/IBC contract number D17PC00341,
+
+by CRISP, one of six centers in JUMP, an SRC program sponsored by DARPA,
+
+NSF CHASE-CI #1730158, DARPA Lifelong Learning Machines, IBM OCR, and
+
+an IBM Faculty Award. The U.S. Government is authorized to reproduce and dis-
+
+tribute reprints for Governmental purposes notwithstanding any copyright annotation
+
+thereon. Disclaimer: The views and conclusions contained herein are those of the
+
+authors and should not be interpreted as necessarily representing the ofﬁcial policies
+
+or endorsements, either expressed or implied, of IARPA, DOI/IBC, or the U.S. Gov-
+
+ernment.
+
+4812
+
+References
+
+[1] H. Azizpour, A. S. Razavian, J. Sullivan, A. Maki, and
+S. Carlsson. Factors of transferability for a generic convnet
+representation.
+IEEE transactions on pattern analysis and
+machine intelligence, 38(9):1790–1802, 2016. 1, 5
+
+[2] E. Bengio, P.-L. Bacon, J. Pineau, and D. Precup. Con-
+ditional computation in neural networks for faster models.
+arXiv preprint arXiv:1511.06297, 2015. 3
+
+[3] Y. Bengio. Deep learning of representations for unsupervised
+and transfer learning. In ICML Workshop on Unsupervised
+and Transfer Learning, 2012. 1
+
+[4] Y. Bengio, N. L´eonard, and A. Courville. Estimating or prop-
+agating gradients through stochastic neurons for conditional
+computation. arXiv preprint arXiv:1308.3432, 2013. 3
+
+[5] H. Bilen and A. Vedaldi. Universal representations: The
+missing link between faces, text, planktons, and cat breeds.
+arXiv preprint arXiv:1701.07275, 2017. 6, 8
+
+[6] Q. Chen, J. Huang, R. Feris, L. M. Brown, J. Dong, and
+S. Yan. Deep domain adaptation for describing people based
+on ﬁne-grained clothing attributes. In CVPR, 2015. 2
+
+[7] S. Chopra, S. Balakrishnan, and R. Gopalan. Dlid: Deep
+learning for domain adaptation by interpolating between do-
+mains. In ICML workshop on challenges in representation
+learning, 2013. 2
+
+[8] G. Csurka. Domain adaptation for visual applications: A
+comprehensive survey. In Domain Adaptation in Computer
+Vision Applications. Springer, 2017. 2
+
+[9] J. Donahue, Y. Jia, O. Vinyals, J. Hoffman, N. Zhang,
+E. Tzeng, and T. Darrell. Decaf: A deep convolutional acti-
+vation feature for generic visual recognition. In ICML, 2014.
+5
+
+[10] M. Eitz, J. Hays, and M. Alexa. How do humans sketch
+objects? ACM Transactions on Graphics, 31(4):44–1, 2012.
+5
+
+[11] M. Figurnov, M. D. Collins, Y. Zhu, L. Zhang, J. Huang,
+D. P. Vetrov, and R. Salakhutdinov. Spatially adaptive com-
+putation time for residual networks. In CVPR, 2017. 3
+
+[12] Y. Ganin, E. Ustinova, H. Ajakan, P. Germain, H. Larochelle,
+F. Laviolette, M. Marchand, and V. Lempitsky. Domain-
+adversarial training of neural networks. The Journal of Ma-
+chine Learning Research, 17(1):2096–2030, 2016. 2
+
+[13] W. Ge and Y. Yu. Borrowing treasures from the wealthy:
+Deep transfer learning through selective joint ﬁne-tuning. In
+CVPR, 2017. 2
+
+[14] R. Girshick, J. Donahue, T. Darrell, and J. Malik. Rich fea-
+ture hierarchies for accurate object detection and semantic
+segmentation. In CVPR, 2014. 1, 2, 5
+
+[15] K. He, X. Zhang, S. Ren, and J. Sun. Deep residual learning
+
+for image recognition. In CVPR, 2016. 1, 2, 3
+
+[16] G. Huang, Z. Liu, L. van der Maaten, and K. Q. Weinberger.
+Densely connected convolutional networks. In CVPR, 2017.
+1, 2
+
+[17] L. Jacob, J.-p. Vert, and F. R. Bach. Clustered multi-task
+
+learning: A convex formulation. In NeurIPS, 2009. 2
+
+[18] E. Jang, S. Gu, and B. Poole. Categorical reparameterization
+arXiv preprint arXiv:1611.01144,
+
+with gumbel-softmax.
+2016. 2, 3, 4
+
+[19] Z. Kang, K. Grauman, and F. Sha. Learning with whom to
+
+share in multi-task feature learning. In ICML, 2011. 2
+
+[20] S. Kornblith, J. Shlens, and Q. V. Le. Do better imagenet
+models transfer better? arXiv preprint arXiv:1805.08974,
+2018. 1, 2
+
+[21] J. Krause, M. Stark, J. Deng, and L. Fei-Fei. 3d object rep-
+resentations for ﬁne-grained categorization. In ICCV Work-
+shop on Workshop on 3D Representation and Recognition,
+pages 554–561, 2013. 5
+
+[22] A. Krizhevsky, I. Sutskever, and G. E. Hinton.
+
+classiﬁcation with deep convolutional neural networks.
+NeurIPS, 2012. 1
+
+Imagenet
+In
+
+[23] A. Kumar and H. Daum´e III. Learning task grouping and
+In Proceedings of the 29th
+overlap in multi-task learning.
+International Coference on International Conference on Ma-
+chine Learning, pages 1723–1730, 2012. 2
+
+[24] A. Kumar, P. Sattigeri, K. Wadhawan, L. Karlinsky, R. S.
+Feris, W. T. Freeman, and G. Wornell. Co-regularized align-
+ment for unsupervised domain adaptation. In NeurIPS, 2018.
+2
+
+[25] X. Li, Y. Grandvalet, and F. Davoine. Explicit inductive bias
+for transfer learning with convolutional networks. In ICML,
+2018. 2, 6
+
+[26] Z. Li and D. Hoiem. Learning without forgetting.
+
+IEEE
+Transactions on Pattern Analysis and Machine Intelligence,
+2017. 6, 8
+
+[27] L. Liu and J. Deng. Dynamic deep neural networks: Opti-
+mizing accuracy-efﬁciency trade-offs by selective execution.
+In AAAI, 2018. 3
+
+[28] M. Long, Y. Cao, J. Wang, and M. I. Jordan. Learning trans-
+In ICML,
+
+ferable features with deep adaptation networks.
+2015. 2, 5
+
+[29] Y. Lu, A. Kumar, S. Zhai, Y. Cheng, T. Javidi, and R. S.
+Feris. Fully-adaptive feature sharing in multi-task networks
+with applications in person attribute classiﬁcation. In CVPR,
+2017. 2
+
+[30] C. J. Maddison, A. Mnih, and Y. W. Teh. The concrete dis-
+tribution: A continuous relaxation of discrete random vari-
+ables. arXiv preprint arXiv:1611.00712, 2016. 2, 3, 4
+
+[31] A. Mallya and S. Lazebnik. Piggyback: Adding multiple
+tasks to a single, ﬁxed network by learning to mask. arXiv
+preprint arXiv:1801.06519, 2018. 6, 8
+
+[32] E. Meyerson and R. Miikkulainen. Beyond shared hierar-
+chies: Deep multitask learning through soft layer ordering.
+In ICLR, 2018. 2
+
+[33] I. Misra, A. Shrivastava, A. Gupta, and M. Hebert. Cross-
+
+stitch networks for multi-task learning. In CVPR, 2016. 2
+
+[34] M.-E. Nilsback and A. Zisserman. Automated ﬂower classi-
+ﬁcation over a large number of classes. In Indian Conference
+on Computer Vision, Graphics & Image Processing, 2008. 5
+
+[35] S. J. Pan, Q. Yang, et al. A survey on transfer learn-
+ing. IEEE Transactions on knowledge and data engineering,
+22(10):1345–1359, 2010. 1, 2
+
+[36] A. Passos, P. Rai, J. Wainer, and H. Daume III. Flexible mod-
+eling of latent task structures in multitask learning. arXiv
+preprint arXiv:1206.6486, 2012. 2
+
+4813
+
+[37] S.-A. Rebufﬁ, H. Bilen, and A. Vedaldi. Learning multiple
+visual domains with residual adapters. In NeurIPS, 2017. 2,
+5, 6, 8
+
+[38] S.-A. Rebufﬁ, H. Bilen, and A. Vedaldi.
+
+parametrization of multi-domain deep neural networks.
+CVPR, 2018. 6, 8
+
+Efﬁcient
+In
+
+[39] A. Rosenfeld and J. K. Tsotsos. Incremental learning through
+deep adaptation. arXiv preprint arXiv:1705.04228, 2017. 6,
+8
+
+[40] A. A. Rusu, N. C. Rabinowitz, G. Desjardins, H. Soyer,
+J. Kirkpatrick, K. Kavukcuoglu, R. Pascanu, and R. Had-
+sell.
+arXiv preprint
+arXiv:1606.04671, 2016. 2, 6
+
+Progressive neural networks.
+
+[41] B. Saleh and A. Elgammal. Large-scale classiﬁcation of ﬁne-
+art paintings: Learning the right metric on the right feature.
+arXiv preprint arXiv:1505.00855, 2015. 5
+
+[42] A. Sharif Razavian, H. Azizpour, J. Sullivan, and S. Carls-
+son. Cnn features off-the-shelf: an astounding baseline for
+recognition. In CVPR DeepVision Workshop, 2014. 2, 5
+
+[43] N. Shazeer, A. Mirhoseini, K. Maziarz, A. Davis, Q. Le,
+G. Hinton, and J. Dean. Outrageously large neural networks:
+The sparsely-gated mixture-of-experts layer. In ICLR, 2017.
+3
+
+[44] N. Tajbakhsh, J. Y. Shin, S. R. Gurudu, R. T. Hurst, C. B.
+Kendall, M. B. Gotway, and J. Liang. Convolutional neural
+networks for medical image analysis: Full training or ﬁne
+tuning? IEEE transactions on medical imaging, 35(5):1299–
+1312, 2016. 1, 5
+
+[45] S. Thrun and J. OSullivan. Clustering learning tasks and the
+In Learning to
+
+selective cross-task transfer of knowledge.
+learn. Springer, 1998. 2
+
+[46] A. Veit and S. Belongie. Convolutional networks with adap-
+
+tive inference graphs. In ECCV, 2018. 3
+
+[47] A. Veit, M. J. Wilber, and S. Belongie. Residual networks
+In
+
+behave like ensembles of relatively shallow networks.
+NeurIPS, 2016. 2, 3
+
+[48] C. Wah, S. Branson, P. Welinder, P. Perona, and S. Belongie.
+
+The caltech-ucsd birds-200-2011 dataset. 2011. 5
+
+[49] Z. Wu, T. Nagarajan, A. Kumar, S. Rennie, L. S. Davis,
+K. Grauman, and R. Feris. Blockdrop: Dynamic inference
+paths in residual networks. In CVPR, 2018. 3, 4
+
+[50] Z. Yang, B. Dhingra, K. He, W. W. Cohen, R. Salakhutdi-
+nov, Y. LeCun, et al. Glomo: Unsupervisedly learned rela-
+tional graphs as transferable representations. arXiv preprint
+arXiv:1806.05662, 2018. 2
+
+[51] J. Yosinski, J. Clune, Y. Bengio, and H. Lipson. How trans-
+ferable are features in deep neural networks? In NeurIPS,
+2014. 1, 2, 5
+
+[52] J. Zhou, J. Chen, and J. Ye. Clustered multi-task learning via
+
+alternating structure optimization. In NeurIPS, 2011. 2
+
+4814
+
+

@@ -1,0 +1,1096 @@
+Structured Pruning of Neural Networks with Budget-Aware Regularization
+
+Carl Lemaire
+
+Andrew Achkar
+
+Pierre-Marc Jodoin
+
+Universit´e de Sherbrooke
+
+Miovision Technologies Inc.
+
+Universit´e de Sherbrooke
+
+Sherbrooke, Canada
+
+Kitchener, Canada
+
+Sherbrooke, Canada
+
+carl.lemaire@usherbrooke.ca
+
+aachkar@miovision.com
+
+pierre-marc.jodoin@usherbrooke.ca
+
+Abstract
+
+Pruning methods have shown to be effective at reduc-
+ing the size of deep neural networks while keeping accu-
+racy almost intact. Among the most effective methods are
+those that prune a network while training it with a spar-
+sity prior loss and learnable dropout parameters. A short-
+coming of these approaches however is that neither the size
+nor the inference speed of the pruned network can be con-
+trolled directly; yet this is a key feature for targeting de-
+ployment of CNNs on low-power hardware. To overcome
+this, we introduce a budgeted regularized pruning frame-
+work for deep CNNs. Our approach naturally ﬁts into tra-
+ditional neural network training as it consists of a learn-
+able masking layer, a novel budget-aware objective func-
+tion, and the use of knowledge distillation. We also provide
+insights on how to prune a residual network and how this
+can lead to new architectures. Experimental results reveal
+that CNNs pruned with our method are more accurate and
+less compute-hungry than state-of-the-art methods. Also,
+our approach is more effective at preventing accuracy col-
+lapse in case of severe pruning; this allows pruning factors
+of up to 16× without signiﬁcant accuracy drop.
+
+1. Introduction
+
+Convolutional Neural Networks (CNN) have proven to
+be effective feature extractors for many computer vision
+tasks [12, 15, 18, 31]. The design of several CNNs involve
+many heuristics, such as using increasing powers of two as
+the number of feature maps, or width, of each layer. While
+such heuristics allow achieving excellent results, they may
+be too crude in situations where the amount of compute
+power and memory is restricted, such as with mobile plat-
+forms. Thus arises the problem of ﬁnding the right number
+of layers that solve a given task while respecting a budget.
+Since the number of layers depends highly on the effective-
+ness of the learned ﬁlters (and their combination), one can-
+not determine these hyper-parameters a priori.
+
+Convolution operations constitute the main computa-
+tional burden of a CNN. The execution of these operations
+beneﬁt from a high degree of parallelism, which requires
+them to have regular structures. This implies that one can-
+
+not remove isolated neurons from a CNN ﬁlter as they must
+be full grids. To achieve the same effect as removing a neu-
+ron, one can zero-out its weights. While doing this reduces
+the theoretical size of the model, it does not reduce the com-
+putational demands of the model nor the amount of feature
+map memory. Therefore, to accelerate a CNN and reduce
+its memory footprint, one has to rely on structured sparsity
+pruning methods that aim at reducing the number of feature
+maps and not just individual neurons.
+
+By removing unimportant ﬁlters from a network and re-
+training it, one can shrink it while maintaining good perfor-
+mance [10, 19]. This can be explained by the following hy-
+pothesis: the initial value of a ﬁlter’s weights is not guaran-
+teed to allow the learning of a useful feature; thus, a trained
+network might contain many expendable features [7].
+
+Among the structured pruning methods, those that im-
+plement a sparsity learning (SL) framework have shown
+to be effective as pruning and training are done simulta-
+neously [1, 17, 21, 22, 24, 27]. Unfortunately, most SL
+methods cannot prune a network while respecting a neuron
+budget imposed by the very nature of a device on which the
+network shall be deployed. As of today, pruning a network
+while respecting a budget can only be done by trial-and-
+error, typically by training multiple times a network with
+various compression hyperparameters.
+
+In this paper, we present a SL framework which allows
+learning and selecting ﬁlters of a CNN while respecting a
+neuron budget. Our main contributions are:
+
+• We present a novel objective function which includes
+a variant of the log-barrier [2] function for simultane-
+ously training and pruning a CNN while respecting a
+total neuron budget;
+
+• We propose a variant of the barrier method [2] for op-
+
+timizing a CNN;
+
+• We demonstrate the effectiveness of combining SL and
+
+knowledge distillation [14];
+
+• We empirically conﬁrm the existence of the auto-
+matic depth determination property of residual net-
+works pruned with ﬁlter-wise methods, and give in-
+sights on how to ensure the viability of the pruned net-
+work by preventing “fatal pruning”;
+
+9108
+
+• We propose a new mixed-connectivity block which
+roughly doubles the effective pruning factors attain-
+able with our method.
+
+2. Previous Works
+
+Compressing neural networks without affecting too
+much their accuracy implies that networks are often over-
+parametrized. Denil et al. [5] have shown that typical neural
+networks are over-parametrized; in the best case of their ex-
+periments, they could predict 95% of the network weights
+from the others. Recent work by Frankle et al. [7] sup-
+port the hypothesis that a large proportion (typically 90%)
+of weights in standard neural networks are initialized to a
+value that will lead to an expendable feature. In this sec-
+tion, we review six categories of methods for reducing the
+size of a neural network.
+
+Neural network compression aims to reduce the stor-
+age requirements of the network’s weights.
+In [6, 16],
+low-rank approximation through matrix factorization, such
+as singular-value decomposition, is used to factorize the
+weight matrices. The factors’ rank is reduced by keeping
+only the leading eigenvalues and their associated eigenvec-
+tors. In [8], quantization is used to reduce the storage taken
+by the model; both scalar quantization and vector quantiza-
+tion (VQ) have been considered. Using VQ, a weight matrix
+can be reconstructed from a list of indices and a dictionary
+of vectors. Thus, practical computation savings can be ob-
+tained. Unfortunately, most network compression methods
+do not decrease the memory and compute usage during in-
+ference.
+
+Neural network pruning consists of identifying and re-
+moving neurons that are not necessary for achieving high
+performance. Some of the ﬁrst approaches used the second-
+order derivative to determine the sensitivity of the network
+to the value of each weight [19, 11]. A more recent,
+very simple and effective approach selects which neurons
+to remove by thresholding the magnitude of their weights;
+smaller magnitudes are associated with unimportant neu-
+rons [10]. The resulting network is then ﬁnetuned for better
+performance. Nonetheless, experimental results (c.f. Sec-
+tion 5) show that variational pruning methods (discussed
+below) outperform the previously mentioned works.
+
+Sparsity Learning (SL) methods aim at pruning a net-
+work while training it. Some methods add to the train-
+ing loss a regularization function such as L1 [21], Group
+LASSO [33], or an approximation of the L0 norm [22, 28].
+Several variational methods have also been proposed [1,
+17, 27, 24]. These methods formalize the problem of
+network pruning as a problem of learning the parameters
+of a dropout probability density function (PDF) via the
+reparametrization trick [17]. Pruning is enforced via a spar-
+sity prior that derives from a variational evidence lower
+bound (ELBO). In general, SL methods do not apply an ex-
+
+plicit constraint to limit the number of neurons used. To
+enforce a budget, one has to turn towards budgeted pruning.
+Budgeted pruning is an approach that provides a di-
+rect control on the size of the pruned network via some
+“network size” hyper-parameter. MorphNet [9] alternates
+between training with a L1 sparsifying regularizer and ap-
+plying a width multiplier to the layer widths to enforce the
+budget. Contrary to our method, this work does not lever-
+age dropout-based SL. Budgeted Super Networks [32] is
+a method that ﬁnds an architecture satisfying a resource
+budget by sparsifying a super network at the module level.
+This method is less convenient to use than ours, as it re-
+quires “neural fabric” training through reinforcement learn-
+ing. Another budgeted pruning approach is “Learning-
+Compression” [4], which uses the method of auxiliary co-
+ordinates [3] instead of back-propagation. Contrary to this
+method, our approach adopts a usual gradient descent opti-
+mization scheme, and does not rely on the magnitude of the
+weights as a surrogate of their importance.
+
+Architecture search (AS) is an approach that led to ef-
+ﬁcient neural networks in terms of performance and param-
+eterization. Using reinforcement learning and vast amounts
+of processing power, NAS [35] have learned novel archi-
+tectures; some that advanced the state-of-the-art, others that
+had relatively few parameters compared to similarly effec-
+tive hand-crafted models. PNAS [20] and ENAS [30] have
+extended this work by cutting the necessary compute re-
+sources. These works have been aggregated by EPNAS
+[29]. AS is orthogonal to our line of work as the learned ar-
+chitectures could be pruned by our method. In addition, AS
+is more complicated to implement as it requires learning a
+controller model by reinforcement learning. In contrast, our
+method features tools widely used in CNN training.
+
+3. Our Approach
+
+3.1. Dropout Sparsity Learning
+
+Before we introduce the speciﬁcs of our approach, let us
+ﬁrst summarize the fundamental concepts of Dropout Spar-
+sity Learning (DSL).
+
+Let hl be the output of the l-th hidden layer of a CNN
+computed by fl(hl−1), a transformation of the previous
+layer, typically a convolution followed by a batch norm and
+a non-linearity. As mentioned before, one way of reducing
+the size of a network is by shutting down neurons with an
+element-wise product ⊙ between the output of layer hl−1
+and a binary tensor zl−1:
+
+hl = fl(hl−1 ⊙ zl−1).
+
+(1)
+
+To enforce structured pruning and shutdown feature
+maps (not just individual neurons), one can redeﬁne zl−1
+as a vector of size dl−1 where dl−1 is the number of feature
+
+9109
+
+maps in hl−1. Then, zl−1 is applied over the spatial dimen-
+sions by performing an element-wise product with hl−1.
+
+As one might notice, Eq. (1) is the same as that of
+dropout [25] for which zl−1 is a tensor of independent ran-
+dom variables i.i.d. of a Bernoulli distribution q(z). To
+prune a network, DSL redeﬁnes zl−1 as random variables
+sampled from a distribution q(z|Φ) whose parameters Φ can
+be learned while training the model. In this way, the net-
+work can learn which feature maps to drop and which ones
+to keep.
+
+Since the operation of sampling zl−1 from a distribution
+is not differentiable, it is common practice to redeﬁne it with
+the reparametrization trick [17]:
+
+hl = fl(hl−1 ⊙ g(Φl−1, ǫ))
+
+(2)
+
+where g is a continuous function differentiable with respect
+to Φ and stochastic with respect to ǫ, a random variable typ-
+ically sampled from N (0, 1) or U (0, 1).
+
+In order to enforce network pruning, one usually incor-
+
+porates a two-term loss :
+
+L(W, Φ) = LD(W, Φ) + λLS(Φ)
+
+(3)
+
+where λ is the prior’s weight, W are the parameters of
+the network, LD(W, Φ) is a data loss that measures how
+well the model ﬁts the training data (e.g. the cross-entropy
+loss) and LS is a sparsity loss that measures how sparse the
+model is. While LS varies from one method to another, the
+KL divergence between q(z|Φ) and some prior distribution
+is typically used by variational approaches [17, 24]. Note
+that during inference, one can make the network determin-
+istic by replacing the random variable ǫ by its mean.
+
+3.2. Soft and hard pruning
+
+As mentioned before, g(Φl−1, ǫ) is a continuous func-
+tion differentiable with respect to Φl−1. Thus, instead of
+being binary, the pruning of Eq. (2) becomes continuous
+(soft pruning), so there is always a non-zero probability that
+a feature map will be activated during training. However, to
+achieve practical speedups, one eventually needs to “hard-
+prune” ﬁlters. To do so, once training is over, the values
+of Φ are thresholded to select which ﬁlters to remove com-
+pletely. Then, the network may be ﬁne-tuned for several
+epochs with the LD loss only, to let the network adapt to
+hard-pruning. We call this the “ﬁne-tuning phase”, and the
+earlier epochs constitute the “training phase”.
+
+3.3. Budget Aware Regularization (BAR)
+
+In our implementation, a budget is the maximum number
+of neurons a “hard-pruned” network is allowed to have. To
+compute this metric, one may replace z ∼ q(z|Φ) by its
+mean so feature maps with E[z|Φ] = 0 have no effect and
+can be removed, while the others are kept. The network size
+
+Algorithm 1: BAR Training
+
+Data: W : network weights; Φ: r.v. parametrization;
+
+TeacherLogits: the class-wise scores for all samples of the
+dataset; λ: all the hyperparameters of the method
+(including the budget); Prog ∈ [0, 1]: progress of the
+training process; g(·): function introduced in Eq. (2) of the
+paper; ˆy: predicted class-wise logits.
+
+Result: PrunedNet: the pruned neural network object including
+
+its weights.
+
+1 W ′ ⇐ TrainUnprunedNetwork()
+2 TeacherLogits ⇐ PredictWholeDataset(W ′)
+3 for b ∈ Minibatches do
+4
+
+(x, y) ⇐ b
+z ⇐ g(Φ, ǫ), ǫ ∼ U(0, 1)
+ˆy ⇐ ForwardPass(x, W, z)
+l ⇐ BARLoss(y, ˆy, z, λ, TeacherLogits, Prog)
+(∇W, ∇Φ) ⇐ BackwardPass(l)
+(W, Φ) ⇐ OptimizationStep(∇W, ∇Φ)
+
+5
+
+6
+
+7
+
+8
+
+9
+
+10 PruningMasks ⇐ g(Φ, E[ǫ])
+11 PrunedNet ⇐ ConvertNet(W , PruningMasks)
+
+is thus the total activation volume of the structurally “hard-
+pruned” network :
+
+V = X
+
+l
+
+X
+
+i
+
+1(E[zl,i|Φ] > 0) × Al
+
+(4)
+
+where Al is the area of the output feature maps of layer l and
+1 is the indicator function. Our training process is described
+in Algorithm 1.
+
+A budget constraint imposes on V to be smaller than the
+allowed budget b. If embedded in a sparsity loss, that con-
+straint makes the loss go to inﬁnity when V > b, and zero
+otherwise. This is a typical inequality constrained mini-
+mization problem whose binary (and yet non-differentiable)
+behavior is not suited to gradient descent optimization.
+One typical solution to such problem is the log-barrier
+method [2]. The idea of this barrier method is to approx-
+imate the zero-to-inﬁnity constraint by a differentiable log-
+arithmic function : −(1/t) log(b − V ) where t > 0 is a pa-
+rameter that adjusts the accuracy of the approximation and
+whose value increases at each optimization iteration (c.f.
+Algo 11.1 in [2]).
+
+Unfortunately, the log-barrier method requires beginning
+optimization with a feasible solution (i.e. V < b), and this
+brings two major problems. First, we need to compute Φ
+such that V < b, which is no trivial task. Second, this
+induces a setting similar to training an ensemble of pruned
+networks, as the probability that a feature map is “turned
+on” is very low. This means that ﬁlters will receive little
+gradient and will train very slowly. To avoid this, we need
+to start training with a V larger than the budget.
+
+We thus implemented a modiﬁed version of the barrier
+algorithm. First, as will be shown in the rest of this section,
+
+9110
+
+(a) Logarithmic barrier function
+
+(b) Our barrier function
+
+Figure 1: Comparing barrier functions. (a) Common bar-
+rier function −(1/t) log(b − V ) with b = 1. (b) Our barrier
+function f (V, a, b) with a = 1.
+
+we propose a barrier function f (V, a, b) as a replacement
+for the log barrier function (c.f. Fig. 1). Second, instead of
+having a ﬁxed budget b and a parameter t that grows at each
+iteration as required by the barrier method, we eliminate
+the hardness parameter t and instead decrease the budget
+constraint at each iteration. This budget updating schedule
+is discussed in Section 3.4.
+
+Our barrier function f (V, a, b) is designed such that:
+• it has an inﬁnite value when the volume used by a net-
+
+work exceeds the budget, i.e. V > b;
+
+• it has a value of zero when the budget is comfortably
+
+respected, i.e. V < a;
+
+• it has C 1 continuity.
+
+Instead of having a jump from zero to inﬁnity at the point
+where V > b, we deﬁne a range where a smooth transition
+occurs. To do so, we ﬁrst perform a linear mapping of V :
+
+c =
+
+V − a
+b − a
+
+such that V = a ⇒ c = 0 (the budget is comfortably re-
+spected), and V = b ⇒ c = 1 (our constraint V < b is
+violated). Then, we use the following function:
+
+g(c) =
+
+c2
+
+1 − c
+
+which has three useful properties: (i) g(0) = 0 and g(0)′ =
+0, (ii) limc→1− g(c) = ∞ and (iii) it has a C 1 continuity.
+Those properties correspond to the ones mentioned before.
+To obtain the desired function, we substitute c in g(c) and
+simplify:
+
+f (V, a, b) =
+
+0
+
+(V −a)2
+
+(b−V )(b−a)
+∞
+
+
+
+
+V ≤ a
+
+a < V < b
+V ≥ b.
+
+(5)
+
+As shown in Fig. 1, like for log barrier, V = b is an
+asymptote, as we require V < b. However, a < V < b cor-
+responds to a respected budget and for V ≤ a, the budget is
+respected with a comfortable margin, and this corresponds
+to a penalty of zero.
+
+Our proposed prior loss is as follows:
+
+LBAR(Φ, V, a, b) = LS(Φ)f (V, a, b)
+
+(6)
+
+where (a, b) are the lower and upper budget margins, V
+is the current “hard-pruned” volume as computed by Eq.
+(4), and LS(Φ) is a differentiable approximation of V . Note
+that since V is not differentiable w.r.t to Φ, we cannot solely
+optimize f (V, a, b).
+
+The content of LS(Φ) is bound to q(z|Φ). In our case,
+we use the Hard-Concrete distribution (which is a smoothed
+version of the Bernoulli distribution), as well as its corre-
+sponding prior loss, both introduced in [22]. This prior loss
+measures the expectation of the number of feature maps cur-
+rently unpruned. To account for the spatial dimensions of
+the output tensors of convolutions, we use:
+
+LS(Φ) = X
+
+l
+
+LS(Φl) = X
+
+l
+
+LHC(Φl) × Al
+
+where LHC is the hard-concrete prior loss [22] and Al is
+the area of the output feature maps of layer l. Thus, LS(Φ)
+measures the expectation of the activation volume of all
+convolution operations in the network.
+
+Note that V could also be replaced by another metric,
+such as the total FLOPs used by the network. In this case,
+LS(Φl) should also include the expectation of the number
+of feature maps of the preceding layer.
+
+3.4. Setting the budget margins (a, b)
+
+As mentioned earlier, initializing the network with a vol-
+ume that respects the budget (as required by the barrier
+method) leads to severe optimization issues.
+Instead, we
+iteratively shift the pruning target b during training. Specif-
+ically, we shift it from b = VF at the beginning, to b = B
+at the end (where VF is the unpruned network’s volume and
+B the maximum allowed budget).
+
+As shown in Fig. 1b, doing so induces a lateral shift to
+the “barrier”. This is unlike the barrier method in which the
+hardness parameter t evolves in time (c.f. Fig. 1a). Mathe-
+matically, the budget b evolves as follows:
+
+b = (1 − T (i)) VF + T (i) B,
+
+i =
+
+iteration index
+
+(7)
+
+num. training iterations
+
+while a = B − 10−4 VF is ﬁxed. Here T (i) is a tran-
+sition function which goes from zero at the ﬁrst iteration
+all the way to one at the last iteration. While T (i) could
+be a linear transition schedule, experimental results reveal
+that when b approaches B, some gradients suffers from ex-
+treme spikes due to the nature of f (V, a, b). This leads to
+erratic behavior towards the end of the training phase that
+can hurt performance. One may also implement an expo-
+nential transition schedule. This could compensate for the
+
+9111
+
+Figure 2: Sigmoidal transition function.
+
+shape of f (V, a, b) by having b change quickly during the
+ﬁrst epochs and slowly towards the end of training. While
+this gives good results for severe pruning (up to 16×), the
+increased stress at the beginning yields sub-optimal perfor-
+mance for low pruning factors.
+
+For our method, we propose a sigmoidal schedule, where
+b changes slowly at the beginning and at the end of the
+training phase, but quickly in the middle. This puts most
+of the “pruning stress” in the middle of the training phase,
+which accounts for the difﬁculty of pruning (1) during the
+ﬁrst epochs, where the ﬁlters’ relevance is still unknown,
+and (2) during the last epochs, where more compromises
+might have to be made. The sigmoidal transition function is
+illustrated in Fig. 2 (c.f. Supp. materials for details).
+
+3.5. Knowledge Distillation
+
+Knowledge Distillation (KD) [14] is a method for facil-
+itating the training of a small neural network (the student)
+by having it reproduce the output of a larger network (the
+teacher). The loss proposed by Hinton et al [14] is :
+
+LD(W ) = (1 − α)LCE(Ps, Ygt) + αT 2LCE(Ps, Pt)
+
+where LCE is a cross-entropy, Ygt is the groundtruth, Ps
+and Pt are the output logits of the student and teacher net-
+works, α ∈ [0, 1], and T ≥ 1 is a temperature parameter
+used to smooth the softmax output : pi = exp(zi/T )
+
+Pj exp(zj /T ) .
+
+In our case, the unpruned network is the teacher and the
+
+pruned network is the student. As such, our ﬁnal loss is:
+
+(1−α)LCE(Ps, Ygt)+αT 2LCE(Ps, Pt)+λLBAR(Φ, V, a, b).
+
+where λ, α and T are ﬁxed parameters.
+
+4. Pruning Residual Networks
+
+While our method can prune any CNN, pruning a CNN
+without residual connections does not affect the connectiv-
+ity patterns of the architecture, and simply selects the width
+at each layer [9]. In this paper, we are interested in allowing
+any feature map of a residual network to be pruned. This
+pruning regime can reduce the depth of the network, and
+generally results in architectures with atypical connectivity
+that require special care in their implementation to obtain
+maximum efﬁciency.
+
+Figure 3: Typical ResBlock vs. pooling block. (a) A typ-
+ical ResBlock. The “B” arrow is the sequence of convo-
+lutions done inside the block. (b) A pooling block at the
+beginning of a ResNet Layer, that deals with the change in
+spatial dimensions and number of feature maps. Notice that
+it breaks the continuity of the residual signal. The arrow
+labeled “1 × 1” is a 1 × 1 convolution with stride 2; the
+ﬁrst convolution of “B” also has stride 2. If all convolutions
+(arrows) are removed, no signal can pass.
+
+4.1. Automatic Depth Determination
+
+We found, as in [9], that ﬁlter-wise pruning can suc-
+cessfully prune entire ResBlocks and change the network
+depth. This effect was named Automatic Depth Determi-
+nation in [26]. Since a ResBlock computes a delta that
+is aggregated with the main (residual) signal by addition
+(c.f. Fig. 3a), such block can generally be removed with-
+out preventing the ﬂow of signal through the network. This
+is because the main signal’s identity connections cannot be
+pruned as they lack prunable ﬁlters.
+
+However, some ResBlocks, which we call “pooling
+blocks”, change the spatial dimensions and feature dimen-
+sionality of the signal. This type of block breaks the conti-
+nuity of the residual signal (c.f. Fig. 3b). As such, the con-
+volutions inside this block cannot be completely pruned, as
+this would prevent any signal from ﬂowing through it (a sit-
+uation we call “fatal pruning”). As a solution, we clamp the
+highest value of Φ to ensure that at least one feature map is
+kept in the 1 × 1 conv operation.
+
+4.2. Atypical connectivity of pruned ResNets
+
+Our method allows any feature map in the output of a
+convolution to be pruned (except for the 1 × 1 conv of the
+pooling block). This produces three types of atypical resid-
+ual connectivity that requires special care (see Fig. 4). For
+example, there could be a feature from the residual sig-
+nal that would pass through without another signal being
+added to it (Fig. 4b). New feature maps can also be created
+and concatenated (Fig. 4c). Furthermore, new feature maps
+could be created while others could pass through (Fig. 4d).
+To leverage the speedup incurred by a pruned feature
+map, the three cases in Fig. 4 must be taken into account
+through a mixed-connectivity block which allows these un-
+
+9112
+
+ageNet (with a width multiplier of 12 as per [34]), and
+ResNet50 [13] on Mio-TCD [23], a larger and more com-
+plex dataset devoted to trafﬁc analysis. TinyImageNet and
+Mio-TCD samples are resized to 64 × 64 and 128 × 128,
+respectively. Since this ResNet50 has a larger input and is
+deeper than its CIFAR counterpart, we do not opt for the
+“wide” version and thus save signiﬁcant training time. Both
+network architectures have approximately the same volume.
+For all experiments, we use the Adam optimizer with an
+initial learning rate of 10−3 and a weight decay of 5×10−4.
+For CIFAR and TinyImageNet, we use a batch size of 64.
+For our objective function, we use α = 0.9, T = 4,
+and λ = 10−5. We use PyTorch and its standard im-
+age preprocessing. For experiments on Mio-TCD, we start
+training/pruning with the weights of the unpruned network
+whereas we initialize with random values for CIFAR and
+TinyImageNet. Please refer to the Supplementary materials
+for the number of epochs used in each training phase.
+
+We compare our approach to the following methods:
+
+• Random. This approach randomly selects feature
+
+maps to be removed.
+
+• Weight Magnitude (WM) [10]. This method uses the
+absolute sum of the weights in a ﬁlter as a surrogate of
+its importance. Lower magnitude ﬁlters are removed.
+• Vector Quantization (VQ) [8] This approach vector-
+izes the ﬁlters and quantizes them into N clusters,
+where N is the target width for the layer. The clus-
+ters’ center are used as the new ﬁlters.
+
+• Interpolative Decomposition (ID). This method is
+based on low-rank approximation for network com-
+pression [6, 16]. This algorithm factorizes each ﬁlters
+W into U V , where U has a speciﬁc number of rows
+corresponding to the budget. U replaces W , and V is
+multiplied at the next layer (i.e. Wl+1 ← VlWl+1) to
+approximate the original sequence of transformations.
+
+• L0 regularization (LZR) [22]. This DSL method is
+the closest to our method. However, it incorporates no
+budget, penalizes layer width instead of activation ten-
+sor volume, and does not use Knowledge Distillation.
+• Information Bottleneck (IB) [1]. This DSL method
+uses a factorized Gaussian distribution (with parame-
+ters µ, σ) to mask the feature maps as well as the fol-
+lowing prior loss : LS = log(1 − µ2/σ2).
+
+• MorphNet [9]. This approach uses the γ scaling pa-
+rameter of Batch Norm modules as a learnable mask
+over features. The said γ parameters are driven to zero
+by a L1 objective that considers the resources used by
+a ﬁlter (e.g. FLOPs). This method computes a new
+width for each layer by counting the non-zero γ pa-
+rameters. We set the sparsity trade-off parameter λ af-
+ter an hyperparameter search, with 16× as the target
+pruning factor for CIFAR-10.
+
+9113
+
+Figure 4: Connectivity allowed by our approach. (a) A
+3-feature ResBlock with typical connectivity. Arrows rep-
+resent one or more convolutions. (b) With one feature map
+pruned, only two features are computed and added to the
+residual signal; one feature from the residual signal is left
+unchanged. (c) a new feature is created and concatenated
+to the residual signal. (d) a combination of (b) and (c) as a
+new feature is concatenated to the residual signal, one fea-
+ture from the residual is left unchanged, and a third feature
+has typical connectivity (best viewed in color).
+
+orthodox conﬁgurations. Without this special implementa-
+tion, some zeroed-out feature maps would still be computed
+because the summations of residual and reﬁnement signals
+must have the same number of feature maps. In fact, a naive
+implementation does not allow reﬁning only a subset of the
+features of the main signal (as in Fig. 4b), nor does it allow
+having a varying number of features in the main signal (as
+in Fig. 4c).
+
+Fig. 5 shows the beneﬁt of a mixed-connectivity block.
+In (a) is a ResNet Layer pruned by our method. Using a
+regular ResBlock implementation, all feature maps in pairs
+of tensors that are summed together need to have match-
+ing width. This means that, in Fig. 5, all feature maps
+of the ﬁrst, third and fourth rows (features) are computed,
+even if they are dotted. Only the second row can be fully
+removed.On the other hand, by using mixed-connectivity,
+only unpruned feature maps are computed, yielding archi-
+tectures such as in Fig. 5b, that saves substantial compute
+(c.f. Section 5).
+
+Technical details on our mixed-connectivity block are
+
+provided in the Supplementary materials.
+
+5. Experiments
+
+5.1. Experimental Setup
+
+We tested our pruning framework on two residual ar-
+chitectures and report results on four datasets. We pruned
+Wide-ResNet [34] on CIFAR-10, CIFAR-100 and TinyIm-
+
+a)
+
+b)
+
+Figure 5: (a) A 4-feature chunk of a ResNet Layer pruned by our method. Dotted feature maps are zeroed-out by their
+associated mask. An arrow labeled B represents a Block operation, which consist of a sequence of convolutions. Inner
+convolutions of the Block can be pruned, but only the output of the last convolution is shown (for clarity). (b) The same
+pruned subgraph, illustrated without the pruned feature maps. The resulting subgraph is shallower and narrower than its
+“full” counterpart (best viewed in color).
+
+For every method, we set a budget of tensor activa-
+tion volume corresponding to 1/2, 1/4, 1/8, 1/16 of the un-
+pruned volume VF . Since LZR and IB do not allow setting
+a budget, we went through trial-and-error to ﬁnd the hyper-
+parameter value that yield the desired resource usage. For
+Random, WM, VQ, and ID we scale the width of all lay-
+ers uniformly to satisfy the budget and implement a pruning
+scheme which revealed to be the most effective (c.f. Supple-
+mentary materials). We also apply our mixed-connectivity
+block to the output of every method for a fair comparison.
+
+5.2. Results
+
+Results for every method executed on all three datasets
+are shown in Fig. 6. The ﬁrst row shows test accuracies
+w.r.t.
+the network volume reduction factor for CIFAR-10,
+CIFAR-100, TinyImageNet and Mio-TCD. As one can see,
+our method is above the others (or competitive) for CIFAR-
+10 and CIFAR-100. It is also above every other method on
+TinyImageNet and Mio-TCD except for MorphNet which is
+better for pruning factors of 2 and 4. However, MorphNet
+gets a severe drop of accuracy at 16x, a phenomena we ob-
+served as well on CIFAR-10 and CIFAR-100. Our method
+is also always better than IB and LZR, the other two DSL
+methods. Overall, our method is resilient to severe (16x)
+pruning ratios.
+
+Furthermore, for every dataset, networks pruned with
+our method (as well as some others) get better results than
+the initial unpruned network. This illustrates the fact that
+Wide-ResNet and ResNet-50 are overparameterized for cer-
+tain tasks and that decreasing their number of feature maps
+reduces overﬁtting and thus improves test accuracy.
+
+We then took every pruned network and computed their
+FLOP reduction factor (we considered operations from con-
+volutions only). This is illustrated in the second row of
+Fig. 6. There again, our method outperforms (or is com-
+petitive with) the others for CIFAR-10 and CIFAR-100.
+Our method reduces FLOPs by up to a factor of ∼ 64x on
+CIFAR-10, ∼ 60x on CIFAR-100 and ∼ 200x on Mio-TCD
+without decreasing test accuracy. We get similar results
+
+Table 1: Test Accuracy for different conﬁgurations of
+our method (using WideResNet-CIFAR-10). The test ac-
+curacy of the unpruned network is 90.90%.
+
+Conﬁguration
+
+Pruning factor
+16x
+
+2x
+
+Our method
+w/o Knowledge Distillation
+w/o Sigmoid pruning schedule
+
+92.70% 91.62%
+-1.37% -0.40%
+-0.87% -0.92%
+
+Table 2: Reduction of the effective pruned volume when
+removing the mixed-connectivity block.
+
+Dataset
+CIFAR-10
+CIFAR-100
+MIO-TCD
+
+8x
+
+4x
+
+2x
+16x
+12% 43% 53% 58%
+14% 49% 55% 57%
+32% 37% 40% 52%
+
+as LZR for pruning ratios around 60x on CIFAR-10 and
+CIFAR-100 and 200x on Mio-TCD. MorphNet gets better
+accuracy for pruning ratios of 4x and 16x on Mio-TCD, but
+then drops signiﬁcantly around 256x. Results are similar
+for TinyImageNet.
+
+In Table 1, we report results of an ablation study on
+WideResNet-CIFAR-10 with two pruning factors. We re-
+placed the Knowledge Distillation data loss (c.f. Section
+3.5) by a cross-entropy loss, and changed the Sigmoid prun-
+ing schedule (c.f. Section 3.4) by a linear one. As can be
+seen, removing either of those reduces accuracy, thus show-
+ing their efﬁciency. We also studied the impact of not using
+the mixed-connectivity block introduced in Section 4.2. As
+shown in Table 2, when replacing our mixed-connectivity
+blocks by regular ResBlocks, we get a drop of the effective
+pruned volume of more than 50% for 16x (even up to 58%
+for CIFAR-10).
+
+We illustrate in Fig. 7 results of our pruning method for
+CIFAR-10 (for the other datasets, see supplementary mate-
+rials). The ﬁgure shows the number of neurons per residual
+
+9114
+
+Figure 6: Pruning results. Plots showing test accuracy w.r.t. volume and FLOP reduction factor (best viewed in color).
+
+Figure 7: Result of pruning with our method on
+WideResNet-CIFAR-10. Total number of active neurons in
+the full networks and with four different pruning rates. Sec-
+tions without an orange (8x) or red (16x) bar are those for
+which a res-Block has been eliminated.
+
+block for the full network, and for the networks pruned with
+varying pruning factors. These plots show that our method
+has the capability of eliminating entire residual blocks (es-
+pecially around 1.3 and 1.4). Also, the pruning conﬁgu-
+rations follow no obvious trend thus showing the inherent
+plasticity of a DSL method such as ours.
+
+As mentioned in Section 3.3, instead of the volume met-
+ric (Eq. (4)) the budget could be set w.r.t a FLOP metric
+by accounting for the expectation of the number of feature
+maps in the preceding layer. We compare in Fig. 8 the re-
+sults given by these two budget metrics for WideResnet-
+CIFAR-10. As one might expect, pruning a network with
+a volume metric (V-Trained) yields signiﬁcantly better per-
+formances w.r.t. the volume pruning factor whereas pruning
+
+Figure 8: Comparison of objective metrics. Test accuracy
+versus the volume pruning factor and the FLOP reduction
+factor for our method with a Volume metric (V-trained) and
+a FLOP metric (F-trained).
+
+a network with a FLOP metric (F-Trained) yields better per-
+formances w.r.t. to the FLOP reduction factor, although by
+a slight margin. In light of these results, we conclude that
+the volume metric (Eq. (4)) is overall a better choice.
+
+6. Conclusion
+
+We presented a structured budgeted pruning method
+based on a dropout sparsity learning framework. We pro-
+posed a knowledge distillation loss function combined with
+a budget-constrained sparsity loss whose formulation is that
+of a barrier function. Since the log-barrier solution is ill-
+suited for pruning a CNN, we proposed a novel barrier func-
+tion as well as a novel optimization schedule. We provided
+concrete insights on how to prune residual networks and
+used a novel mixed-connectivity block. Results obtained on
+two ResNets architecture and three datasets reveal that our
+method overall outperforms 7 other pruning methods.
+
+Acknowledgements
+
+We thank Christian Desrosiers for his insights. This work was sup-
+
+ported by FRQ-NT scholarship #257800 and Mitacs grant IT08995. Su-
+
+percomputers from Compute Canada and Calcul Quebec were used.
+
+9115
+
+References
+
+[1] David P. Wipf Bin Dai, Chen Zhu. Compressing neural networks
+
+using the variational information bottleneck. proc. of ICML, 2018.
+
+[2] Stephen Boyd and Lieven Vandenberghe. Convex Optimization.
+
+Cambridge University Press, 2004.
+
+[3] Miguel Carreira-Perpinan and Weiran Wang. Distributed optimiza-
+
+tion of deeply nested systems. In AI and Stats, pages 10–19, 2014.
+
+[4] Miguel A Carreira-Perpin´an and Yerlan Idelbayev.
+
+Learning-
+compression algorithms for neural net pruning. In Proc. of CVPR,
+pages 8532–8541, 2018.
+
+[5] Misha Denil, Babak Shakibi, Laurent Dinh, Nando De Freitas, et al.
+Predicting parameters in deep learning. In proc of NIPS, pages 2148–
+2156, 2013.
+
+[6] Emily L Denton, Wojciech Zaremba, Joan Bruna, Yann LeCun, and
+Rob Fergus. Exploiting linear structure within convolutional net-
+works for efﬁcient evaluation. In proc of NIPS, pages 1269–1277,
+2014.
+
+[21] Z. Liu, J. Li, Z. Shen, G.Huang, S. Yan, and C.Zhang. Learning
+efﬁcient convolutional networks through network slimming. In proc
+of ICCV, 2017.
+
+[22] Christos Louizos, Max Welling, and Diederik P. Kingma. Learning
+sparse neural networks through l0 regularization. In proc. of ICLR,
+2018.
+
+[23] Z. Luo, F. B-Charron, C. Lemaire, J. Konrad, S. Li, A. Mishra,
+A. Achkar, J. Eichel, and P-M Jodoin. Mio-tcd: A new bench-
+mark dataset for vehicle classiﬁcation and localization. IEEE TIP,
+27(10):5129–5141, 2018.
+
+[24] Dmitry Molchanov, Arsenii Ashukha, and Dmitry Vetrov. Variational
+
+dropout sparsiﬁes deep neural networks. proc of ICML, 2017.
+
+[25] A. Krizhevsky I. Sutskever R. Salakhutdinov N. Srivastava, J. Hin-
+ton. Dropout: A simple way to prevent neural networks from over-
+ﬁtting. Journal of ML Research, 15:1929–1958, 2014.
+
+[26] Eric Nalisnick and Padhraic Smyth.
+
+family through structured shrinkage priors.
+arXiv:1810.04045, 2018.
+
+Unifying the dropout
+arXiv preprint
+
+[7] Jonathan Frankle and Michael Carbin. The lottery ticket hypothesis:
+Training pruned neural networks. arXiv preprint arXiv:1803.03635,
+2018.
+
+[27] Kirill Neklyudov, Dmitry Molchanov, Arsenii Ashukha, and
+Dmitry P Vetrov. Structured bayesian pruning via log-normal multi-
+plicative noise. In proc of NIPS, 2017.
+
+[28] W. Pan, H. Dong, and Y. Guo. Dropneuron: Simplifying the structure
+of deep neural networks. In arXiv preprint arXiv:1606.07326, 2016.
+
+[29] Juan-Manuel P´erez-R´ua, Moez Baccouche, and Stephane Pateux.
+arXiv preprint
+
+Efﬁcient progressive neural architecture search.
+arXiv:1808.00391, 2018.
+
+[30] Hieu Pham, Melody Y Guan, Barret Zoph, Quoc V Le, and Jeff
+Dean. Efﬁcient neural architecture search via parameter sharing.
+arXiv preprint arXiv:1802.03268, 2018.
+
+[31] Olaf Ronneberger, Philipp Fischer, and Thomas Brox. U-net: Con-
+volutional networks for biomedical image segmentation. In proc of
+MICCAI, pages 234–241, 2015.
+
+[32] Tom Veniat and Ludovic Denoyer. Learning time-efﬁcient deep ar-
+chitectures with budgeted super networks. In Proc. of CVPR, 2018.
+
+[33] W.Wen, C Wu, Y.Wang, Y Chen, and H.Li. Learning structured spar-
+
+sity in deep neural networks. In proc of NIPS, 2016.
+
+[34] Sergey Zagoruyko and Nikos Komodakis. Wide residual networks.
+
+In proc. of BMVC, 2016.
+
+[35] Barret Zoph and Quoc V Le. Neural architecture search with rein-
+
+forcement learning. proc of ICLR, 2017.
+
+[8] Yunchao Gong, Liu Liu, Ming Yang, and Lubomir Bourdev. Com-
+pressing deep convolutional networks using vector quantization.
+arXiv preprint arXiv:1412.6115, 2014.
+
+[9] Ariel Gordon, Elad Eban, Oﬁr Nachum, Bo Chen, Hao Wu, Tien-
+Ju Yang, and Edward Choi. Morphnet: Fast & simple resource-
+constrained structure learning of deep networks. In Proc. of CVPR,
+2018.
+
+[10] Song Han, Jeff Pool, John Tran, and William Dally. Learning both
+In proc of
+
+weights and connections for efﬁcient neural network.
+NIPS, pages 1135–1143, 2015.
+
+[11] Babak Hassibi and David G Stork. Second order derivatives for net-
+work pruning: Optimal brain surgeon. In proc of NIPS, pages 164–
+171, 1993.
+
+[12] Kaiming He, Georgia Gkioxari, Piotr Doll´ar, and Ross Girshick.
+
+Mask r-cnn. In proc. of ICCV, pages 2980–2988, 2017.
+
+[13] Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun. Deep
+In Proc. of CVPR, June
+
+residual learning for image recognition.
+2016.
+
+[14] Geoffrey Hinton, Oriol Vinyals, and Jeff Dean. Distilling the knowl-
+
+edge in a neural network. proc of NIPS DLRL Workshop, 2015.
+
+[15] Gao Huang, Zhuang Liu, Laurens Van Der Maaten, and Kilian Q
+Weinberger. Densely connected convolutional networks. In proc. of
+CVPR, 2017.
+
+[16] Max Jaderberg, Andrea Vedaldi, and Andrew Zisserman. Speeding
+up convolutional neural networks with low rank expansions. proc of
+BMVC, 2014.
+
+[17] Diederik P Kingma, Tim Salimans, and Max Welling. Variational
+dropout and the local reparameterization trick. In proc of NIPS, pages
+2575–2583, 2015.
+
+[18] Alex Krizhevsky, Ilya Sutskever, and Geoffrey E Hinton. Imagenet
+classiﬁcation with deep convolutional neural networks. In Advances
+in neural information processing systems, pages 1097–1105, 2012.
+
+[19] Yann LeCun, John S Denker, and Sara A Solla. Optimal brain dam-
+
+age. In proc of NIPS, pages 598–605, 1990.
+
+[20] Chenxi Liu, Barret Zoph, Jonathon Shlens, Wei Hua, Li-Jia
+Li, Li Fei-Fei, Alan Yuille, Jonathan Huang, and Kevin Mur-
+phy.
+arXiv preprint
+arXiv:1712.00559, 2017.
+
+Progressive neural architecture search.
+
+9116
+
+

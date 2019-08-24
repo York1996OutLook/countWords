@@ -1,0 +1,1292 @@
+MVF-Net: Multi-View 3D Face Morphable Model Regression
+
+Fanzi Wu2†∗ Linchao Bao1∗ Yajing Chen3 Yonggen Ling1
+Yibing Song1
+
+Songnan Li2 King Ngi Ngan2
+
+4 Wei Liu1
+
+,
+
+3Shanghai Jiao Tong University 4University of Electronic Science and Technology of China
+
+1Tencent AI Lab
+
+2The Chinese University of Hong Kong
+
+Abstract
+
+We address the problem of recovering the 3D geometry of
+a human face from a set of facial images in multiple views.
+While recent studies have shown impressive progress in 3D
+Morphable Model (3DMM) based facial reconstruction, the
+settings are mostly restricted to a single view. There is an
+inherent drawback in the single-view setting: the lack of re-
+liable 3D constraints can cause unresolvable ambiguities.
+We in this paper explore 3DMM-based shape recovery in
+a different setting, where a set of multi-view facial images
+are given as input. A novel approach is proposed to regress
+3DMM parameters from multi-view inputs with an end-to-
+end trainable Convolutional Neural Network (CNN). Multi-
+view geometric constraints are incorporated into the net-
+work by establishing dense correspondences between dif-
+ferent views leveraging a novel self-supervised view align-
+ment loss. The main ingredient of the view alignment loss is
+a differentiable dense optical ﬂow estimator that can back-
+propagate the alignment errors between an input view and
+a synthetic rendering from another input view, which is pro-
+jected to the target view through the 3D shape to be in-
+ferred. Through minimizing the view alignment loss, better
+3D shapes can be recovered such that the synthetic projec-
+tions from one view to another can better align with the ob-
+served image. Extensive experiments demonstrate the supe-
+riority of the proposed method over other 3DMM methods.
+
+1. Introduction
+
+Reconstructing 3D facial shapes from 2D images is es-
+sential for many virtual reality (VR) and augmented real-
+ity (AR) applications.
+In order to obtain fully-rigged 3D
+meshes that are necessary for subsequent steps like facial
+animations and editing, 3D Morphable Model (3DMM) [2]
+is often adopted in the reconstruction to provide a paramet-
+ric representation of 3D face models. While conventional
+approaches recover the 3DMM parameters of given facial
+images through analysis-by-synthesis optimization [3, 25],
+
+∗Equal contributions. Emails: {wufanzi412, linchaobao}@gmail.com
+†This work was done when Fanzi Wu was an intern at Tencent AI Lab.
+
+Figure 1. An illustration of the view alignment loss. The rendered
+projection from view A to B via the optimal underlying 3D model
+should align best with the image observed at view B.
+
+recent work has demonstrated the effectiveness of regress-
+ing 3DMM parameters using convolutional neural networks
+(CNN) [40, 35, 32, 17, 12, 29, 28]. In spite of the remark-
+able progress in this topic, recovering 3DMM parameters
+from a single view suffers from an inherent drawback: the
+lack of reliable 3D constraints can cause unresolvable am-
+biguities, e.g., the height of nose and cheekbones of a face
+is difﬁcult to tell given only a frontal view.
+
+A better way to reconstruct more faithful 3D shapes from
+2D images is to exploit multi-view geometric constraints
+using a set of facial images in different views.
+In this
+case, structure-from-motion (SfM) and multi-view stereo
+(MVS) algorithms [9] can be employed to reconstruct an
+initial 3D model and then a 3DMM ﬁtting can be performed
+using the 3D geometric constraints from the initial model
+[2]. However, the separated two steps are error-prone: the
+SfM/MVS step cannot utilize the strong human facial prior
+from 3DMM and hence its results are usually rather noisy,
+which further leads to erroneous 3DMM ﬁtting. An alter-
+native approach is to directly ﬁt 3DMM parameters from
+multi-view images through analysis-by-synthesis optimiza-
+tion [25], but it requires a complicated, nonlinear optimiza-
+tion that can be difﬁcult to solve in practice.
+
+In this paper we propose a novel approach, which adopts
+an end-to-end trainable CNN to regress 3DMM parameters
+in the multi-view setting. Inspired by the photometric bun-
+
+959
+
+dle adjustment method [6] for camera pose and 3D shape
+estimation in multi-view 3D reconstruction, our method is
+also based on the assumption that the underlying optimal 3D
+model should best explain the observed images in different
+views. That is, the photometric reprojection error between
+each observed image and a rendered image induced by the
+underlying 3D model for this view should be minimized (as
+illustrated in Fig. 1). To incorporate this constraint into
+our CNN, we sample textures from an input view using the
+predicted 3D model and camera pose, and then render the
+textured 3D model to another view to compute the loss be-
+tween the rendered image and the observed image in the
+target view. In addition to the direct photometric loss be-
+tween the two images, we propose a novel view alignment
+loss utilizing a differentiable dense optical ﬂow estimator to
+backpropagate alignment errors, to avoid trapping into local
+minima during training. All the above procedures are differ-
+entiable and the whole network is end-to-end trainable. To
+the best of our knowledge, this is the ﬁrst work that proposes
+an end-to-end trainable network to exploit both 3DMM and
+multi-view geometric constraints. We conduct extensive ex-
+periments to show the effectiveness of the proposed method.
+
+2. Related Work
+
+In this section, we brieﬂy summarize the most related
+work to our approach. Please refer to the recent survey [41]
+for more detailed review.
+
+2.1. Morphable 3D Face Model (3DMM)
+
+Blanz and Vetter [2] introduced the 3D morphable model
+to represent textured 3D faces using linear combinations of
+a set of shape and texture bases, which is derived from col-
+lections of real 3D face scans. The model is later extended
+to include facial expressions by FaceWarehouse [5]. In this
+paper, we focus on recovering the underlying 3D shapes
+of human faces, hence we are only interested in regressing
+3DMM parameters for shapes and expressions. We argue
+that more realistic textures for 3D meshes can be obtained
+with more advanced texture synthesis techniques [26] in-
+stead of the 3DMM texture representations.
+
+2.2. Single view 3DMM based Reconstruction
+
+Conventional methods for single-view 3DMM ﬁtting are
+mostly based on analysis-by-synthesis optimization [3, 25,
+10, 34, 38, 39], by constraining the data similarities like
+pixel colors, facial landmarks, edges, etc., between ob-
+served images and the synthetic images induced by 3DMM.
+The optimization is usually sensitive to initial conditions
+and parameters, and hence brittle in practice. This leads
+to the recent interests in regression-based approaches with
+deep neural networks.
+
+Zhu et al. [40] proposed a cascaded CNN to regress and
+progressively reﬁne 3DMM parameters, trained with super-
+vision data generated by ﬁtting 3DMM parameters using
+
+conventional approaches and then augmented by their pro-
+posed face proﬁling technique. Later, Tran et al. [35] pre-
+sented that more discriminative results could be obtained
+with deeper networks and 3DMM pooling over face identi-
+ties. However, both methods require supervision obtained
+through optimization-based 3DMM ﬁtting techniques. Dou
+et al. [8] proposed to train the regression network using real
+3D scans together with synthetic rendered face images with
+a 3D vertex distance loss. Richardson et al. [23] showed
+that a 3DMM regression network can be trained using only
+synthetic rendered face images and later Kim et al. [17] pro-
+posed a bootstrapping algorithm to adapt the synthetic train-
+ing data distribution to match real data. Recently, Tewari et
+al. [32] and Genova et al. [12] demonstrated impressive re-
+sults by training 3DMM regression networks using only un-
+labeled images with a self-supervised photometric loss and
+a face recognition loss, respectively.
+
+To model detailed facial geometries beyond the repre-
+sentation power of 3DMM, some recent studies proposed
+to supplement additional geometric representations such as
+displacement maps [24, 36] or parametric correctives [33]
+besides 3DMM representations. Some other work used vol-
+umetric representations [15] or non-regular meshes [27] in-
+stead of parametric representations. These types of repre-
+sentations are out of the scope of this paper.
+
+2.3. Multi view 3DMM based Reconstruction
+
+the separated two steps are error-prone:
+
+In the multi-view setting, a straightforward solution [14]
+for 3DMM-based reconstruction is to ﬁrst perform tra-
+ditional multi-view 3D reconstruction [9] and then ﬁt a
+3DMM using the reconstructed 3D model as constraints.
+However,
+the
+SfM/MVS step cannot utilize the strong human facial prior
+from 3DMM and hence its results are usually rather noisy,
+which further leads to erroneous 3DMM ﬁtting. Dou et al.
+[7] recently proposed to address the problem using deep
+convolutional neural networks (CNNs) together with recur-
+rent neural networks (RNNs). They used RNNs to fuse
+identity-related features from CNNs to produce more dis-
+criminative reconstructions, but multi-view geometric con-
+straints are not exploited in their approach. Notice that there
+are some other 3DMM-based methods in multi-image set-
+tings [22], but in these work each input image is dealt indi-
+vidually, which is not the same as our multi-view setting.
+
+3. Approach
+
+3.1. Overview
+
+We employ an end-to-end trainable CNN to regress
+3DMM parameters from multiple facial images for the same
+person in different views. In order to establish multi-view
+geometric constraints like conventional multi-view 3D re-
+construction approaches [9], for now we assume the facial
+images are taken at the same time under the same lighting
+condition. Later we will illustrate that our approach is able
+
+960
+
+Concatenate
+
+FC1
+
+Xid, Xexp
+
+FC-ReLU-FC
+FC-ReLU-FC
+FC-ReLU-FC
+
+Non-Trainable
+Non-Trainable
+Non-Trainable
+
+Photo Loss
+
+Differentiable 
+
+Rendering
+
+Input A
+
+Shared 
+Weights
+
+Pose A
+
+Shared 
+Weights
+
+Input B
+
+Shared 
+Weights
+
+Pose B
+
+Shared 
+Weights
+
+Input C
+
+VGG
+
+Pose C
+
+FC2
+
+Texture 
+Sampling
+
+Differentiable 
+
+Rendering
+
+Align Loss
+
+Align Loss
+
+Rendered 
+
+B→ A
+
+Rendered 
+
+B→ C
+
+Photo Loss
+
+Figure 2. An overview of the proposed model.
+
+to handle inputs with lighting variance. For simplicity, we
+adopt three-view setting to describe our approach. Note that
+it can be easily generalized to other number of input views.
+Fig. 2 illustrates the overview of our proposed model in
+the case of three input views. We learn features from each
+input image by a shared weight CNN, and then concatenate
+the features together to regress a set of 3DMM parameters
+for the person. Differently, we regress the pose parameters
+for each input view from its individual features (Sec. 3.3).
+With the pose parameters and 3DMM parameters, we are
+able to render a textured 3D face model from each input im-
+age by sampling textures from the image (Sec. 3.4). Note
+that in the three-view setting, there will be three textured
+3D face models, with the same underlying 3D shape but
+with different textures. After obtaining the rendered 3D face
+models of different views, we then project each of them to a
+different view from the view where the textures are sampled
+(Sec. 3.5). For instance, we project the 3D model with tex-
+tures sampled from image at view A to view B. Then we can
+compute losses between the projected image with the input
+image at the target view. We will present the details of the
+adopted losses in Sec. 3.6. Please be noted that the ren-
+dering layer is non-parametric yet differentiable, like that in
+previous self-supervised approaches [32, 12], and the gra-
+dients can thus be backpropagated to the trainable layers.
+
+3.2. Model
+
+The 3DMM parameters to be regressed in this work in-
+clude both identity and expression parameters like [40]. A
+3D face model s can be represented as
+
+s = ¯s + Eidxid + Eexpxexp,
+
+(1)
+
+where ¯s is the vector format of the mean 3D face model,
+Eid and Eexp are the identity basis from BFM 2009 [19]
+and expression basis from FaceWarehouse [5] respectively,
+xid and xexp are the corresponding 199-dimension identity
+vector and 29-dimension expression vector to be regressed.
+To project 3D model onto 2D image plane, we employ
+the weak perspective projection model. Given a 3D point
+v, its 2D projection can be computed with a set of camera
+pose parameters P as follows
+
+Pr(v, P) = (cid:20)f
+
+0
+
+0
+f
+
+0
+
+0(cid:21) · R · v + t,
+
+(2)
+
+where f is the scaling factor, R is the rotation matrix, and
+t is the 2D translation [tx, ty]T. Since the rotation matrix R
+can be minimally parameterized as three Euler angles α, β,
+γ, the pose to be regressed contains 6 parameters in total,
+which reads as P = {f, α, β, γ, tx, ty}.
+
+3.3. Parametric Regression
+
+We denote the three-view input images as IA, IB, and
+IC . We assume IB is the image taken from the frontal
+view, IA and IC are taken from the left and right views
+respectively. Note that we do not need the images to be
+taken from precise known view angles. Each input im-
+age is sent through several convolutional layers (borrowed
+from VGG-Face [30] in our implementation) and pooled to
+a 512-dimentional feature vector. Then a set of pose pa-
+rameters P = {f, α, β, γ, tx, ty} is regressed for each view
+via two fully-connected layers. The three 512-dimentional
+feature vectors are concatenated together to regress the 228-
+dimentional 3DMM parameters X = {xid, xexp} (199 for
+
+961
+
+identity and 29 for expression) using another two fully-
+connected layers. Note that for each set of inputs, we
+regress one X and three pose parameters PA, PB, and PC .
+The networks to extract features and regress pose parame-
+ters for the three views have shared weights.
+
+3.4. Texture Sampling
+
+With the predicted 3DMM parameters X , as well as the
+known identity basis Eid and expression basis Eexp, we can
+compute the 3D face model using Eq. (1). Three differ-
+ent texture maps can be obtained by sampling textures from
+each image individually using its own pose parameters pre-
+dicted by the network. For each vertex v of the 3D model,
+we apply Eq. (2) to project the vertex to the image plane and
+fetch the texture color from each input image for the vertex
+using differentiable sampling scheme, as adopted in Spatial
+Transformer Networks [16]. For 3D point within a trian-
+gle on the mesh, we utilize barycentric interpolation to get
+its texture color from surrounding vertices. Note that since
+the texture sampling scheme does not handle occlusions, the
+textures sampled for occluded regions in each image are er-
+roneous. We deal with this problem using visibility masks
+which will be detailed in Sec. 3.5. Suppose now we have
+obtained three differently textured 3D models in this step.
+
+3.5. Rendered Projection and Visibility Masks
+
+The textured 3D model can be projected to an arbitrary
+view to render a 2D image, via the differentiable rendering
+layer introduced in [12]. For example, given a 3D model
+with textures sampled from image IA, we can render it to
+the view of IB using the pose parameters PB, which we
+denote as IA→B. Formally, for any 3D point v on the mesh
+surface (including points within triangles), the color of its
+projected pixel in the rendered image can be computed as
+
+IA→B[Pr(v, PB)] = IA[Pr(v, PA)],
+
+(3)
+
+where we use [·] to denote the pixel selection in an image. In
+practice, the rendering is implemented through rasterization
+on the target image plane, that is, denoting an arbitrary pixel
+in the target image as u, then Eq. (3) can be written as
+
+IA→B[u] = IA[Pr(Pr−1(u, X , PB), PA)],
+
+(4)
+
+where we use Pr−1(·) to denote the back projection from a
+2D point to 3D space. Note that since the back projection is
+essentially a ray in 3D space, we need the 3D surface of the
+face model, which can be induced by 3DMM parameters X ,
+in order to locate the back projection ray to a 3D point. Thus
+the back projection operator Pr−1(·) in the above equation
+takes X as input in addition to camera pose PB. Ideally,
+with the optimal underlying 3D model and camera poses,
+the observed image IB should be the same as the rendered
+image IA→B in non-occluded facial regions,
+
+IA→B(X ∗, P ∗
+
+B, P ∗
+
+A)[u] ≡ IB[u],
+
+for u ∈ M,
+
+(5)
+
+(a)
+
+(b)
+
+(c)
+
+(d)
+
+Figure 3. Visibility masks for rendered images: (a) IA→B; (b)
+IC→B; (c) IB→A; (d) IB→C . The dark regions are excluded using
+3D landmarks on nose tip and eyebrows (the white points).
+
+(a) Initial mask
+
+(b) After ﬁltering
+
+(c) After cropping
+
+Figure 4. The mask processing for an observed image. The initial
+mask is essentially the texture sampling regions. It is then ﬁltered
+using a joint edge-preserving ﬁlering with the image as guidance.
+The ﬁnal mask (c) is obtained by excluding occluded regions using
+2D detected landmarks on eyebrows (the white points).
+
+where M denotes the set of pixels in non-occluded facial
+regions. We will use this assumption to design our self-
+supervised losses in Sec. 3.6.2.
+
+Till now, we are discussing the rendered projections
+without considering occlusions. To exclude occluded fa-
+cial regions, we employ visibility masks to obtain M. Note
+that Eq. (5) is for the ideal case, where the visibility mask
+is the same for both rendered image and observed image.
+In practice, with imperfect 3DMM and pose parameters, we
+need different masks for rendered image and observed im-
+age to enforce the photometric consistency (see Sec. 3.6.2
+for details). For rendered image, we simply extract a vis-
+ibility mask by excluding regions that may be occluded in
+other views using 3D vertices corresponding to 2D facial
+landmarks (the correspondences between 3D vertices and
+68-points 2D facial landmarks are provided by [40]). Fig.
+3 illustrates an example of the visibility masks for all three
+views. For the observed real image, we obtain an initial
+mask using the texture sampling regions. Then a joint edge-
+preserving ﬁltering [11] is performed on the initial mask,
+with the input real image as guidance, to force the edges of
+the mask aligned well with the facial regions of the input
+image. Finally the regions that may be occluded in other
+views are excluded using 2D detected landmarks, similar
+to the processing of masks for rendered images (see Fig.
+4). Note that for the frontal observed image, there are two
+different visibility masks when viewed from left and right
+sides, respectively. We denote the set of pixels in the corre-
+sponding masks as M(A)
+
+B and M(C)
+B .
+
+3.6. Losses and Training
+
+In order to obtain a good initialization and avoid trapping
+into local minima, we ﬁrst pretrain the CNN using super-
+vised labels on the 300W-LP dataset [40], where ground-
+
+962
+
+truth 3DMM and pose parameters are obtained via conven-
+tional 3DMM ﬁtting algorithms and multi-view images are
+generated by face proﬁling augmentation. After the pre-
+training converges, we then perform self-supervised train-
+ing on the Multi-PIE dataset [13], where multi-view facial
+images are taken in controlled indoor settings. The training
+losses are detailed in the following section.
+
+3.6.1 Supervised Pretraining
+
+In supervised pretraining,
+the ground-truth landmarks,
+3DMM and pose parameters are provided. In the dataset
+300W-LP, for each real facial image, several synthetic ren-
+dered views are generated. During the training stage, we
+randomly select a set of multi-view images for each face,
+which contains left, frontal, and right views. We use
+ground-truth landmarks, 3DMM and pose parameters as su-
+pervision, as well as regularizations on 3DMM parameters.
+The supervised training loss is
+
+Lsup = λ1Llandmark + λ2Lpose + λ3L3DMM + λ4Lreg,
+
+(6)
+
+where Llandmark is the landmark alignment loss similar to
+[32], Lpose and L3DMM are L2 losses between predictions
+and ground-truths, Lreg is the regularization loss on 3DMM
+parameters also similar to [32]. The weighting λ1,2,3,4 are
+hyper-parameters controlling the trade-off between losses.
+
+3.6.2 Self-supervised Training
+
+During the self-supervised training stage, we enforce the
+photometric consistency between observed image and syn-
+thetic rendered image to incorporate multi-view geometric
+constraints. From Eq. (5) we derive the photometric loss
+
+Lphoto(IB, IA→B) = Xu∈M(A)
+
+∪MA→B
+
+B
+
+kIB[u]−IA→B[u]k2
+2,
+
+(7)
+where M(A)
+B and MA→B are the sets of pixels in visibil-
+ity masks for IB (viewed from the left side) and IA→B re-
+spectively. Note that here we use the union of M(A)
+B and
+MA→B such that misalignment errors can be taken into
+considerations. Unfortunately, we ﬁnd that using only the
+photometric loss could lead to bad alignment in practice.
+The reason is that the pixels within facial regions are similar
+to each other such that mis-matching easily happens. In or-
+der to increase the reliability of the dense correspondences
+between observed image and rendered image, we introduce
+an additional novel alignment loss into the training.
+
+We employ a differentiable dense optical ﬂow estimator
+to compute the ﬂow between observed image and rendered
+image, and then use the sum of squared ﬂow magnitudes at
+all pixels as the alignment loss. Since the dense optical ﬂow
+estimator tends to estimate smoothed ﬂow ﬁelds, individual
+mis-matchings can be largely suppressed. For example, to
+
+Input
+
+Rendered image
+
+Forward flow
+
+Backward flow
+
+Figure 5. Optical ﬂows between observed and rendered images.
+
+enforce the photometric consistency between IB and IA→B,
+we compute the alignment loss as
+
+Lalign(IB, IA→B) = |F(IB, IA→B)| + |F(IA→B, IB)|,
+
+(8)
+where F(·) denotes the optical ﬂow estimator. Note that
+here bi-directional optical ﬂows are employed. Besides, in
+order to reduce the distractions of optical ﬂow estimation
+errors in uninterested regions, we ﬁll in the the regions out-
+side visibility masks with textures whose ﬂow can be easily
+estimated (see Fig. 5 for an example).
+
+For the three-view setting, we compute the photomet-
+ric loss and alignment loss between 4 pairs of images:
+(IB, IA→B), (IB, IC→B), (IA, IB→A), and (IC , IB→C).
+Additionally, to increase the training stability, we also adopt
+the landmark loss Llandmark during self-supervised training,
+where the landmarks are detected via a state-of-the-art land-
+mark detector from [4] automatically. To sum, the self-
+supervised training loss is
+
+Lself-sup = λ5Llandmark + λ6Lphoto + λ7Lalign,
+
+(9)
+
+where both photometric loss Lphoto and alignment loss Lalign
+are computed from the above 4 pairs of images. The hyper-
+parameters λ5,6,7 control the trade-off between losses.
+
+4. Experiments
+
+In this section, we ﬁrst introduce the datasets, evalua-
+tion metrics, and implementation details for conducting the
+experiments (Sec. 4.1 and 4.2). We then demonstrate the
+effectiveness of the proposed approach with extensive ab-
+lation studies in Sec. 4.3. Finally, quantitative and qual-
+itative comparisons to state-of-the-art single-view 3DMM-
+based approaches are presented in Sec. 4.4.
+
+4.1. Datasets and Metrics
+
+Training Datasets. 1) Our supervised pretraining is
+performed on 300W-LP dataset [40], which contains over
+60,000 images derived from 3,837 face images by varying
+poses using face proﬁling synthesis method [40]. Ground-
+truth landmarks, 3DMM and pose parameters are provided
+by the dataset. We sample triplet consists of a front, left, and
+right view image from 300W-LP dataset using the provided
+yaw angles, which results in 140k training triplets in total.
+2) Our self-supervised training is performed on Multi-PIE
+dataset [13], which contains over 750,000 images recorded
+from 337 subjects using 15 cameras in different directions
+
+963
+
+under various lighting conditions. We take frontal-view im-
+ages as anchors and randomly select side-view images (left
+or right) to get 50k training triplets and 5k testing triplets,
+where the subjects in testing split do not appear in training
+split. Note that whether an image is in frontal, left, or right
+view can be determined by the provided camera ID.
+
+Evaluation Datasets. 1) We mainly perform quanti-
+tative and qualitative evaluations on the MICC Florence
+dataset [1], which consists of 53 identities of persons with
+neutral expression and ground-truth 3D scans are available.
+Each person contains three videos of “indoor-cooperative”,
+“indoor”, and “outdoor” respectively. To experiment with
+the multi-view setting addressed in this paper, we man-
+nually select a set of multi-view frames for each person,
+such that his/her expressions are consistent in different
+views. Since it is difﬁcult to select such sets of frames
+in the “outdoor” videos, we only perform evaluations on
+the “indoor-cooperative” and “indoor” videos. 2) Quali-
+tative evaluations are further performed on Color FERET
+dataset [20, 21] and MIT-CBCL face recognition database
+[37], where multi-view facial images are available.
+
+Evaluation Metrics. In the quantitative evaluations on
+MICC dataset, we follow the evaluation metrics from [12],
+which compute point-to-plane L2 errors between predict
+3D models and ground-truth 3D scans. Here, we abandon
+subjects of ID 2 and 27 as their ground-truth 3D scans are
+ﬂawed and also excluded in other work [32, 12].
+
+4.2. Implementation Details
+
+We use PWCNet [31] as our differentiable optical ﬂow
+estimator in the self-supervised training step. Note that dur-
+ing our training, the weights of PWCNet is ﬁxed. We crop
+input images according to bounding boxes of facial land-
+marks (either ground-truth or detected with [4]) and resize
+them to 224×224. To augment the training data, we add
+random shift with 0∼0.05 of input size to the bounding box.
+We adopt Adam [18] as the optimizer. The batchsize is set
+to 12. The supervised pretraining is trained on 300W-LP for
+10 epoches with learning rate 1e-5, and the self-supervised
+training is trained on Multi-PIE for 10 epoches with learn-
+ing rate 1e-6. The default weights for balancing losses are
+set to λ1 = 0.1, λ2 = 10, λ3 = 1, λ4 = 1, λ5 = 1,
+λ6 = 10, and λ7 = 0.1. We set different weights for dif-
+ferent loss terms to make their numbers in a similar scale.
+The weights λ1 and λ7 are set to relatively smaller values as
+they represent pixel distances. The weights λ2 and λ6 are
+set to larger values as pose parameters and pixel values of
+input images are normalized to [0, 1].
+
+4.3. Ablation Study
+
+We conduct a series of experiments on MICC dataset
+to demonstrate the effectiveness of each component in our
+approach. Table 1 shows the mean errors of different ver-
+sions of our model. From the results we observe that, com-
+pared with the supervised pretrained model (v1), the self-
+
+Ours
+
+v1
+v2
+v3
+v4
+
+Self-supervised Loss
+Llandmark Lphoto Lalign Mean
+
+INC
+
+IND
+
+Std Mean
+
+Std
+
+–
+√
+√
+√
+
+–
+√
+×
+√
+
+–
+1.266 0.297 1.252 0.285
+× 1.240 0.258 1.252 0.245
+√ 1.227 0.248 1.245 0.240
+√ 1.220 0.247 1.228 0.236
+
+Table 1. Mean error of our approach on the MICC dataset. The
+versions: v1 for the supervised pretrained model; v2-v4 for the
+self-supervised trained model with different losses.
+
+Input
+
+v1
+
+v2
+
+v3
+
+v4
+
+PTZ-Indoor 11
+
+Error:1.04
+
+Error:0.95
+
+Error:0.91
+
+Error:0.82
+
+Indoor-C 14
+
+Error:1.31
+
+Error:1.184
+
+Error:1.15
+
+Error:1.02
+
+Figure 6. Visual examples of ablation study on the MICC dataset.
+The meanings of the colors in the close-ups are as follows. Red:
+the projection area from 3D to 2D exceeds the observed facial
+boundary. Green:
+the projection area is smaller than the facial
+area. Yellow: overlap between projection and facial areas.
+
+supervised trained model with only photometric loss (v2)
+reduces the mean error by 0.026 for “indoor-cooperative”
+but none for “indoor” images, while the model with only
+alignment loss (v3) reduces the mean error by 0.039 for
+“indoor-cooperative” and 0.007 for “indoor” images, which
+is a moderate improvement over photometric loss. Combin-
+ing the photometric loss and alignment loss (v4) gives the
+best results, an error reduction of 0.046 and 0.024.
+
+Fig. 6 shows two visual examples of the ablation study.
+From the close-ups we can clearly observe the performance
+improvements from v1 to v4. Speciﬁcally, take the right-
+side view of the bottom person as an example, we can ob-
+
+964
+
+Inputs
+
+Ours
+
+Tran17
+
+MoFA
+
+Genova18
+
+1.026±0.879
+
+1.65±1.199
+
+1.525±1.199  2.012±1.417
+
+1.12±0.953
+
+1.95±1.623
+
+1.244±0.99 
+
+1.777±1.47 
+
+Figure 7. Examples of error map comparison on the MICC dataset.
+
+1.333±1.038
+
+1.65±1.199
+
+1.525±1.199
+
+2.012±1.417
+
+Method
+
+INC
+
+IND
+
+Mean
+
+Std Mean
+
+Std
+
+Consistent lighting
+
+Inconsistent lighting
+
+Figure 8. Experiments on inconsistent lighting conditions across
+views. First row: input. Second row: results obtained with only
+the photometric loss. Third row: results obtained with both photo-
+metric loss and alignment loss.
+
+serve that the facial silhouette of the input face is ﬂat, while
+in the result from v1 it seems a little bit plump and it be-
+comes much more ﬂatter in the result from v4. The same
+trends can be found in other examples by inspecting the
+alignment of 3D models to the facial silhouettes.
+
+We further conduct studies under varying lighting con-
+ditions across views to demonstrate the effectiveness of the
+proposed alignment loss to handle lighting changes. Fig.
+8 shows an example.
+In this example, when the light-
+ing is consistent across the three views (left), the model
+trained with only photometric loss performs almost as good
+as the model trained with both photometric loss and align-
+ment loss. But when the lighting is inconsistent across the
+views, the result obtained from only photometric loss is
+much worse than that from both losses. The reason why
+the alignment loss is robust to lighting changes is due to the
+optical ﬂow estimator, which is already trained to deal with
+
+MoFA [32]
+
+Tran et al. [35]
+
+Tran et al. + pool
+Tran et al. + [22]
+
+1.443 0.292 1.471 0.290
+1.397 0.290 1.381 0.322
+1.382 0.272 1.430 0.306
+1.405 0.306 1.306 0.261
+1.370 0.321 1.286 0.266
+1.363 0.326 1.293 0.276
+1.405 0.339 1.271 0.293
+Genova et al. + pool 1.372 0.353 1.260 0.310
+Genova et al. + [22] 1.360 0.346 1.246 0.302
+1.220 0.247 1.228 0.236
+
+MoFA + pool
+MoFA + [22]
+
+Genova et al. [12]
+
+Ours
+
+Table 2. Comparison of mean error on the MICC dataset.
+
+lighting changes of input images.
+
+4.4. Comparisons to State of the art Methods
+
+We ﬁrst compare our results on MICC dataset with state-
+of-the-art single-view 3DMM reconstruction methods. To
+evaluate single-view methods on our three-view evaluation
+triplets for each person, we ﬁrst use their model to predict
+3D model a 3D model for each input image. Then three dif-
+ferent evaluation settings are employed to ensure fair com-
+parisons. The ﬁrst one is to calculate the point-to-plane er-
+rors for each 3D model and then average the errors. The
+second one is to average the three predicted 3D models in a
+triplet and then compute the point-to-plane errors between
+the pooled 3D model with ground-truth model (shown in
+Table 2 as “+pool” entries). The third one is to compute
+the weighted average of three predicted 3D models as [22]
+and then compute the point-to-plane errors (shown in Table
+
+965
+
+Inputs
+
+Ours
+
+Tran17
+
+MoFA
+
+Genova18
+
+Figure 9. Examples of visual comparison with the other methods. More examples are in supplementary materials.
+
+Indoor-Cooperative
+
+Input
+
+Ours
+
+MoFA
+
+Input
+
+Ours
+
+MoFA
+
+Genova18+pool MoFA+pool
+
+Tran17+pool
+
+Ours
+
+r
+o
+r
+r
+e
+
+ 
+
+e
+n
+a
+p
+-
+o
+
+l
+
+t
+-
+t
+n
+o
+p
+
+i
+
+1
+
+11
+
+21
+
+31
+
+41
+
+Subject ID
+
+PTZ-Indoor
+
+Genova18+pool
+
+MoFA+pool
+
+Tran17+pool
+
+Ours
+
+r
+o
+r
+r
+e
+
+ 
+
+e
+n
+a
+p
+-
+o
+
+l
+
+t
+-
+t
+n
+o
+p
+
+i
+
+1
+
+11
+
+21
+
+31
+
+41
+
+Subject ID
+
+Figure 11. Examples of visual comparison to MoFA in different
+facial expressions. Our method can produce more accurate shapes
+and expressions. More examples are in supplementary materials.
+
+view methods can be observed in these comparisons.
+
+Figure 10. Detailed comparisons for each subject in MICC dataset.
+
+5. Conclusions
+
+2 as “+[22]” entries). Table 2 shows the mean errors of the
+comparison. The proposed method outperforms all single-
+view methods in both settings. Fig. 10 shows the detailed
+numerical comparisons for each subject in the dataset. Sev-
+eral examples of the comparison of detailed error maps are
+presented in Fig. 7.
+
+We further present some visual comparisons using im-
+ages from other datasets such as Color FERET dataset
+[20, 21] and MIT-CBCL face recognition database [37],
+where multi-view facial images are available. Fig. 9 shows
+several examples of the visual comparisons to single-view
+methods in neutral expression. Fig. 11 shows several ex-
+amples of the visual comparisons to MoFA in different fa-
+cial expressions. The superiority of our method over single-
+
+In this paper, we presented a novel approach to regress
+3DMM parameters from multi-view facial images with
+an end-to-end trainable CNN. Different from single-view
+3DMM-based CNNs, our approach explicitly incorporates
+multi-view geometric constraints as the photometric loss
+and alignment loss between different views with the help of
+rendered projections via predicted 3D models. The align-
+ment loss was computed via a differentiable dense optical
+ﬂow estimator, which enables the ﬂow errors to backprop-
+agate to the 3DMM parameters to be predicted. The ef-
+fectiveness of the proposed approach was validated through
+the extensive experiments. Our study essentially explores
+model-based multi-view reconstruction using deep learn-
+ing, which we believe will inspire more future research.
+
+966
+
+References
+
+[1] Andrew D. Bagdanov, Alberto Del Bimbo, and Iacopo Masi.
+The ﬂorence 2d/3d hybrid face dataset.
+In Proceedings of
+the 2011 Joint ACM Workshop on Human Gesture and Be-
+havior Understanding, J-HGBU 11, page 7980, New York,
+NY, USA, 2011. ACM. 6
+
+[2] Volker Blanz and Thomas Vetter. A morphable model for the
+synthesis of 3d faces. In SIGGRAPH, pages 187–194. ACM,
+1999. 1, 2
+
+[3] Volker Blanz and Thomas Vetter. Face recognition based on
+ﬁtting a 3d morphable model. IEEE Transactions on pattern
+analysis and machine intelligence, 25(9):1063–1074, 2003.
+1, 2
+
+[4] Adrian Bulat and Georgios Tzimiropoulos. How far are we
+from solving the 2d & 3d face alignment problem?(and a
+dataset of 230,000 3d facial landmarks). In ICCV, volume 1,
+page 4, 2017. 5, 6
+
+[5] Chen Cao, Yanlin Weng, Shun Zhou, Yiying Tong, and Kun
+Zhou. Facewarehouse: A 3d facial expression database for
+visual computing. IEEE Transactions on Visualization and
+Computer Graphics, 20(3):413–425, 2014. 2, 3
+
+[6] Ama¨el Delaunoy and Marc Pollefeys. Photometric bundle
+In CVPR,
+
+adjustment for dense multi-view 3d modeling.
+pages 1486–1493, 2014. 2
+
+[7] Pengfei Dou and Ioannis A Kakadiaris. Multi-view 3d face
+reconstruction with deep recurrent neural networks. Image
+and Vision Computing, 80:80–91, 2018. 2
+
+[8] Pengfei Dou, Shishir K Shah, and Ioannis A Kakadiaris.
+End-to-end 3d face reconstruction with deep neural net-
+works. In CVPR, pages 21–26, 2017. 2
+
+[9] Yasutaka Furukawa, Carlos Hern´andez, et al. Multi-view
+stereo: A tutorial. Foundations and Trends R(cid:13) in Computer
+Graphics and Vision, 9(1-2):1–148, 2015. 1, 2
+
+[10] Pablo Garrido, Levi Valgaerts, Chenglei Wu, and Christian
+Theobalt. Reconstructing detailed dynamic face geometry
+from monocular video. ACM Trans. Graph., 32(6):158–1,
+2013. 2
+
+[11] Eduardo SL Gastal and Manuel M Oliveira. Domain trans-
+form for edge-aware image and video processing. In ACM
+Trans. Graph, volume 30, page 69. ACM, 2011. 4
+
+[12] Kyle Genova, Forrester Cole, Aaron Maschinot, Aaron
+Sarna, Daniel Vlasic, and William T Freeman. Unsupervised
+training for 3d morphable model regression. In CVPR, pages
+8377–8386, 2018. 1, 2, 3, 4, 6, 7
+
+[13] Ralph Gross, Iain Matthews, Jeffrey Cohn, Takeo Kanade,
+and Simon Baker. Multi-pie. Image and Vision Computing,
+28(5):807–813, 2010. 5
+
+[14] Alexandru Eugen Ichim, Soﬁen Bouaziz, and Mark Pauly.
+Dynamic 3d avatar creation from hand-held video input.
+ACM Trans. Graph, 34(4):45, 2015. 2
+
+[15] Aaron S Jackson, Adrian Bulat, Vasileios Argyriou, and
+Georgios Tzimiropoulos. Large pose 3d face reconstruction
+from a single image via direct volumetric cnn regression. In
+ICCV, pages 1031–1039. IEEE, 2017. 2
+
+[16] Max Jaderberg, Karen Simonyan, Andrew Zisserman, et al.
+In NIPS, pages 2017–2025,
+
+Spatial transformer networks.
+2015. 4
+
+[17] Hyeongwoo Kim, Michael Zollh¨ofer, Ayush Tewari, Justus
+Thies, Christian Richardt, and Christian Theobalt. Inverse-
+facenet: Deep monocular inverse face rendering. In CVPR,
+pages 4625–4634, 2018. 1, 2
+
+[18] Diederik P Kingma and Jimmy Ba. Adam: A method for
+arXiv preprint arXiv:1412.6980,
+
+stochastic optimization.
+2014. 6
+
+[19] Pascal Paysan, Reinhard Knothe, Brian Amberg, Sami
+Romdhani, and Thomas Vetter. A 3d face model for pose
+and illumination invariant face recognition. In AVSS, pages
+296–301. IEEE, 2009. 3
+
+[20] P Jonathon Phillips, Hyeonjoon Moon, Syed A Rizvi, and
+Patrick J Rauss. The feret evaluation methodology for face-
+recognition algorithms. IEEE Transactions on pattern anal-
+ysis and machine intelligence, 22(10):1090–1104, 2000. 6,
+8
+
+[21] P Jonathon Phillips, Harry Wechsler, Jeffery Huang, and
+Patrick J Rauss. The feret database and evaluation procedure
+for face-recognition algorithms. Image and vision comput-
+ing, 16(5):295–306, 1998. 6, 8
+
+[22] Marcel Piotraschke and Volker Blanz. Automated 3d face
+reconstruction from multiple images using quality measures.
+In CVPR, pages 3418–3427, 2016. 2, 7, 8
+
+[23] Elad Richardson, Matan Sela, and Ron Kimmel. 3d face re-
+construction by learning from synthetic data. In 3DV, pages
+460–469. IEEE, 2016. 2
+
+[24] Elad Richardson, Matan Sela, Roy Or-El, and Ron Kimmel.
+Learning detailed face reconstruction from a single image.
+In CVPR, pages 5553–5562. IEEE, 2017. 2
+
+[25] Sami Romdhani and Thomas Vetter. Estimating 3d shape
+and texture using pixel intensity, edges, specular highlights,
+texture constraints and a prior. In CVPR, volume 2, pages
+986–993. IEEE, 2005. 1, 2
+
+[26] Shunsuke Saito, Lingyu Wei, Liwen Hu, Koki Nagano, and
+Hao Li. Photorealistic facial texture inference using deep
+neural networks. In CVPR, volume 3, 2017. 2
+
+[27] Matan Sela, Elad Richardson, and Ron Kimmel. Unre-
+stricted facial geometry reconstruction using image-to-image
+translation. In ICCV, pages 1585–1594. IEEE, 2017. 2
+
+[28] Yantao Shen, Hongsheng Li, Tong Xiao, Shuai Yi, Dapeng
+Chen, and Xiaogang Wang. Deep group-shufﬂing random
+walk for person re-identiﬁcation. In Proceedings of the IEEE
+Conference on Computer Vision and Pattern Recognition,
+pages 2265–2274, 2018. 1
+
+[29] Yantao Shen, Hongsheng Li, Shuai Yi, Dapeng Chen,
+and Xiaogang Wang. Person re-identiﬁcation with deep
+similarity-guided graph neural network.
+In Proceedings
+of the European Conference on Computer Vision (ECCV),
+pages 486–504, 2018. 1
+
+[30] K. Simonyan and A. Zisserman. Very deep convolutional
+networks for large-scale image recognition. In ICLR, 2015.
+3
+
+[31] Deqing Sun, Xiaodong Yang, Ming-Yu Liu, and Jan Kautz.
+Pwc-net: Cnns for optical ﬂow using pyramid, warping, and
+cost volume. In CVPR, pages 8934–8943, 2018. 6
+
+[32] Ayush Tewari, Michael Zollh¨ofer, Hyeongwoo Kim, Pablo
+Garrido, Florian Bernard, Patrick P´erez, and Christian
+Theobalt. Mofa: Model-based deep convolutional face au-
+toencoder for unsupervised monocular reconstruction.
+In
+ICCV, volume 2, page 5, 2017. 1, 2, 3, 5, 6, 7
+
+967
+
+[33] Ayush Tewari, Michael Zollhfer, Pablo Garrido, Florian
+Bernard, Hyeongwoo Kim, Patrick Prez, and Christian
+Theobalt. Self-supervised multi-level face model learning
+for monocular reconstruction at over 250 hz. In CVPR, June
+2018. 2
+
+[34] Justus Thies, Michael Zollhofer, Marc Stamminger, Chris-
+tian Theobalt, and Matthias Nießner. Face2face: Real-time
+face capture and reenactment of rgb videos. In CVPR, pages
+2387–2395, 2016. 2
+
+[35] Anh Tuan Tran, Tal Hassner, Iacopo Masi, and G´erard
+Medioni. Regressing robust and discriminative 3d mor-
+phable models with a very deep neural network. In CVPR,
+pages 1493–1502. IEEE, 2017. 1, 2, 7
+
+[36] Anh Tuan Tran, Tal Hassner, Iacopo Masi, Eran Paz, Yuval
+Nirkin, and G´erard Medioni. Extreme 3D face reconstruc-
+tion: Seeing through occlusions. In CVPR, 2018. 2
+
+[37] Benjamin Weyrauch, Bernd Heisele, Jennifer Huang, and
+Volker Blanz. Component-based face recognition with 3d
+morphable models. In Computer Vision and Pattern Recog-
+nition Workshop, 2004. CVPRW’04. Conference on, pages
+85–85. IEEE, 2004. 6, 8
+
+[38] Fanzi Wu, Songnan Li, Tianhao Zhao, and King Ngi Ngan.
+Model-based face reconstruction using sift ﬂow registration
+and spherical harmonics. In 2016 23rd International Con-
+ference on Pattern Recognition (ICPR), pages 1774–1779.
+IEEE, 2016. 2
+
+[39] Fanzi Wu, Songnan Li, Tianhao Zhao, King Ngi Ngan, and
+Lv Sheng. 3d facial expression reconstruction using cas-
+caded regression. arXiv preprint arXiv:1712.03491, 2017.
+2
+
+[40] Xiangyu Zhu, Zhen Lei, Xiaoming Liu, Hailin Shi, and
+Stan Z Li. Face alignment across large poses: A 3d solu-
+tion. In CVPR, pages 146–155, 2016. 1, 2, 3, 4, 5
+
+[41] Michael Zollh¨ofer, Justus Thies, Pablo Garrido, Derek
+Bradley, Thabo Beeler, Patrick P´erez, Marc Stamminger,
+Matthias Nießner, and Christian Theobalt. State of the art
+on monocular 3d face reconstruction, tracking, and applica-
+tions. In Computer Graphics Forum, volume 37, pages 523–
+550. Wiley Online Library, 2018. 2
+
+968
+
+

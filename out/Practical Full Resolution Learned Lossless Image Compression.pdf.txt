@@ -1,0 +1,3501 @@
+Practical Full Resolution Learned Lossless Image Compression
+
+Fabian Mentzer Eirikur Agustsson Michael Tschannen
+
+Radu Timofte
+
+Luc Van Gool
+
+mentzerf@vision.ee.ethz.ch
+
+aeirikur@vision.ee.ethz.ch
+
+michaelt@nari.ee.ethz.ch
+
+timofter@vision.ee.ethz.ch
+
+vangool@vision.ee.ethz.ch
+
+ETH Z¨urich, Switzerland
+
+Abstract
+
+We propose the ﬁrst practical learned lossless image com-
+pression system, L3C, and show that it outperforms the pop-
+ular engineered codecs, PNG, WebP and JPEG2000. At
+the core of our method is a fully parallelizable hierarchi-
+cal probabilistic model for adaptive entropy coding which
+is optimized end-to-end for the compression task.
+In con-
+trast to recent autoregressive discrete probabilistic models
+such as PixelCNN, our method i) models the image distri-
+bution jointly with learned auxiliary representations instead
+of exclusively modeling the image distribution in RGB space,
+and ii) only requires three forward-passes to predict all pixel
+probabilities instead of one for each pixel. As a result, L3C
+obtains over two orders of magnitude speedups when sam-
+pling compared to the fastest PixelCNN variant (Multiscale-
+PixelCNN). Furthermore, we ﬁnd that learning the auxiliary
+representation is crucial and outperforms predeﬁned auxil-
+iary representations such as an RGB pyramid signiﬁcantly.
+
+1. Introduction
+
+Since likelihood-based discrete generative models learn
+a probability distribution over pixels, they can in theory be
+used for lossless image compression [40]. However, recent
+work on learned compression using deep neural networks has
+solely focused on lossy compression [4, 41, 42, 34, 1, 3, 44].
+Indeed, the literature on discrete generative models [46, 45,
+35, 32, 20] has largely ignored the application as a loss-
+less compression system, with neither bitrates nor runtimes
+being compared with classical codecs such as PNG [31],
+WebP [47], JPEG2000 [38], and FLIF [39]. This is not sur-
+prising as (lossless) entropy coding using likelihood-based
+discrete generative models amounts to a decoding complexity
+essentially identical to the sampling complexity of the model,
+which renders many of the recent state-of-the-art autoregres-
+sive models such as PixelCNN [46], PixelCNN++ [35], and
+Multiscale-PixelCNN [32] impractical, requiring minutes or
+hours on a GPU to generate moderately large images, typi-
+cally <256 × 256px (see Table 2). The computational com-
+
+p(x|f (1))
+
+x
+
+E(1)
+
+E(2)
+E(1)
+
+E(3)
+
+z(1)
+
+z(2)
+
+z(3)
+
+Q
+
+Q
+
+Q
+
+D(1)
+
+<latexit sha1_base64="u3Q1uGUfKwtLn7PsOvnF1uOcuVk=">AAAHVnictVXdbtMwFM7Guo7CYAVuJm4MFVLHuirpkEAalSZxw+WQ2I+URJPjnLRmjh05Dl0X5TkQPADPBC+DsJtN69auYmM7UaTj8x2fz+eLdRIkjKbKtn/Pzd9bqCxWl+7XHjxcfvR4pf5kLxWZJLBLBBPyIMApMMphV1HF4CCRgOOAwX5w9MHg+19BplTwz2qYgB/jHqcRJVjp0GF94WfNC6BHea7o0UlCicokFK4ph74IyrtSZDz0a17Si2Ks+imoGBMpco9kARwXuVNcgQ1nYCdFbrenoiKK9MLAnavhwOBvNB5KPHAzpiRGqk95K6KMdQOWwQvH9lHTbulnDW1soPX15kZ54vGQ3SqDw/PQpSQyJAy2rkdkFmXdkxlEJmss6SZEUzua4L5ORz0JwM+ZTuW+OwVn892+kDfo77/0lBBOsAV3J+dMuttX8/rd/auYwMML86hWO1xp2G17ZGjScU6dxvbq6ndtP3YO63PfvFCQLAauCMNp6jp2ovwcS0U1iR4eWQoJJke4B652OY4h9fPRRC3QKx0JUSSkfrlCo+j4jhzHaTqMA505GlCXMROcih2fEUxCQTwt7GYqeufnlCeZAk7Ko0UZQ0ogM9BRSCUQxYba0TOS6u4Q6WOJidJj/wKBUVT3zWFARBxjHr72CJVajNB1/NwzsHv2L+k2TZG2Wa75eQ2NmcdFCG7axwl0y/3ldRj0qYKWuSktyjlIpJm7Ha05GtVaQ3nDKbaKQn9K5/KHm3T2Om1ns9355DS2n1mlLVnPrZdW03Kst9a29dHasXYtUlmubFbeV7qLvxb/VCvVapk6P3e656l1waorfwE0mTsw</latexit>
+
+f (1)
+
+p(z(1)|f (2))
+
+D(1)
+D(2)
+
+f (2)
+
+p(z(2)|f (3))
+
+D(3)
+
+f (3)
+
+Figure 1: Overview of the architecture of L3C. The feature extrac-
+tors E(s) compute quantized (by Q) auxiliary hierarchical feature
+representation z(1), . . . , z(S) whose joint distribution with the im-
+age x, p(x, z(1), . . . , z(S)), is modeled using the non-autoregressive
+predictors D(s). The features f (s) summarize the information up to
+scale s and are used to predict p for the next scale.
+
+plexity of these models is mainly caused by the sequential na-
+ture of the sampling (and thereby decoding) operation, where
+a forward pass needs to be computed for every single (sub)
+pixel of the image in a raster scan order.
+
+In this paper, we address these challenges and develop
+a fully parallelizeable learned lossless compression system,
+outperforming the popular classical systems PNG, WebP and
+JPEG2000.
+
+Our system (see Fig. 1 for an overview) is based on a hier-
+archy of fully parallel learned feature extractors and predic-
+tors which are trained jointly for the compression task. Our
+code is available online1. The role of the feature extractors is
+to build an auxiliary hierarchical feature representation which
+helps the predictors to model both the image and the auxiliary
+
+1https://github.com/fab-jul/L3C-PyTorch
+
+110629
+
+<
+l
+a
+t
+e
+x
+i
+t
+ 
+s
+h
+a
+1
+_
+b
+a
+s
+e
+6
+4
+=
+"
+0
+6
+r
+E
+W
+v
+W
+P
+E
++
+m
+R
+3
+c
+L
+r
+a
+/
+x
+J
+6
+0
+a
+k
+b
+/
+c
+=
+"
+>
+A
+A
+A
+K
+d
+H
+i
+c
+v
+V
+Z
+b
+b
+9
+M
+w
+G
+M
+3
+G
+Z
+V
+0
+Y
+s
+A
+F
+v
+8
+G
+C
+o
+J
+n
+W
+s
+q
+5
+J
+y
+m
+z
+Q
+q
+T
+d
+o
+D
+P
+A
+6
+J
+X
+a
+Q
+k
+m
+h
+z
+H
+a
+c
+0
+c
+J
+3
+I
+c
+t
+t
+b
+K
+z
++
+G
+V
+R
+/
+4
+L
+j
+/
+w
+J
+n
+r
+G
+T
+D
+b
+r
+e
+N
+E
+C
+N
+q
+0
+q
+f
+v
+/
+P
+Z
+x
++
+f
+E
+0
+m
+c
+/
+o
+S
+Q
+V
+l
+v
+V
+9
+Y
+f
+H
+G
+z
+V
+u
+3
+l
+2
+r
+L
+5
+p
+2
+V
+u
+/
+f
+u
+r
+6
+4
+9
+O
+E
+z
+j
+j
+C
+N
+8
+g
+G
+I
+a
+8
+2
+M
+f
+p
+p
+g
+S
+h
+g
+8
+E
+E
+R
+Q
+f
+J
+x
+z
+D
+y
+K
+f
+4
+y
+D
+/
+d
+0
+/
+j
+R
+Z
+8
+x
+T
+E
+r
+O
+P
+o
+p
+9
+g
+L
+4
+J
+d
+R
+k
+K
+C
+o
+F
+C
+p
+k
+7
+W
+l
+L
+6
+b
+r
+4
+y
+5
+h
+U
+p
+D
+T
+Q
+U
+K
+Q
+y
+D
+j
+O
+H
+b
+0
+d
++
+B
+Q
+T
+1
+u
+F
+x
+x
+g
+L
+P
+d
+J
+N
+u
+G
+E
+H
+R
+S
+7
+G
+I
+I
+O
+K
+x
+d
+F
+H
+m
+4
+/
+N
+c
+2
+v
+k
+U
+r
+D
+8
+D
+G
++
+T
+S
+a
+l
+m
+v
+J
+s
+F
+x
+G
+K
+q
+J
+x
+t
+v
+T
+Y
+V
+/
+j
+L
+6
+f
+j
+S
+O
+O
+v
+p
++
+O
+B
+x
+r
+c
+V
+H
+n
+B
+4
+5
+m
+R
+U
+c
+A
+h
+E
+j
+7
+B
+m
+S
+C
+j
+t
+7
+K
+k
+T
+F
+s
+5
+5
+o
+G
+E
+1
+1
+W
+8
+D
+b
+G
+2
+B
+z
+c
+3
+G
+V
+i
+l
+6
+O
+G
+U
+1
+y
+2
+T
+/
+T
+2
+q
+k
+C
+P
+U
+R
+x
+T
+t
+/
+S
+6
+U
+n
+5
+c
+6
+D
+G
+V
+S
+6
+a
+q
+j
+o
+3
+6
+g
+m
+q
+h
+p
+j
+/
+x
+9
+V
+F
+6
+5
+X
+Z
++
+M
+I
+4
+f
+z
+N
+v
+I
+7
+C
+e
+V
+j
+q
+V
++
+6
+p
+X
+7
+m
+p
+s
+z
+X
+O
+w
+1
+V
+U
+u
+a
+u
+o
+c
+l
+d
+n
+a
+5
+y
+H
+q
+0
+H
+l
+r
+g
+a
+V
+u
+z
+p
+b
+4
+3
+V
+d
+x
+S
+y
+4
+0
+o
+5
+N
+8
+2
+S
+1
+r
+h
+p
+m
+M
+c
+B
+4
+Y
+F
+8
+E
+9
+d
+1
+6
+6
+9
+H
+g
+x
+7
+u
+v
++
+y
+d
+r
+C
+9
+/
+c
+I
+E
+Z
+Z
+h
+J
+l
+A
+F
+K
+a
+p
+Y
+1
+u
+J
+8
+C
+T
+k
+g
+i
+g
+S
+1
+f
+q
+y
+F
+C
+c
+Q
+n
+c
+I
+u
+d
+l
+T
+I
+Y
+I
+R
+T
+T
+x
+Y
+P
+i
+h
+y
+s
+q
+0
+w
+A
+w
+p
+i
+r
+P
+x
+O
+g
+y
+A
+6
+v
+k
+D
+B
+K
+0
+3
+7
+k
+q
+8
+q
+i
+v
+Y
+5
+i
+O
+j
+k
+R
+O
+7
+8
+k
+G
+I
+f
+8
+a
+F
+L
+a
+y
+U
+S
+4
+7
+U
+n
+C
+k
+k
+x
+g
+h
+s
+q
+j
+h
+R
+k
+F
+I
+g
+b
+6
+P
+Q
+M
+C
+w
+j
+E
+S
+t
+K
+8
+C
+1
+e
+G
+J
+U
+g
+d
+Q
+D
+3
+K
+I
+h
+H
+r
+1
+X
+C
+H
+Q
+j
+i
+r
+d
+D
+J
++
+h
+O
+I
+o
+g
+C
+5
+6
+7
+i
+H
+B
+l
+R
+u
+D
+Y
+n
+n
+Q
+1
+7
+F
+w
++
+p
+T
+o
+N
+v
+U
+l
+L
+T
+z
+c
+8
+a
+Y
+K
+h
+4
+b
+I
+4
+w
+E
+7
+a
+g
+w
+n
+u
+l
+O
+v
+L
+G
+3
+H
+W
+I
+w
+I
+3
+9
+W
+V
+p
+E
+s
+Y
+w
+B
+4
+q
+5
+0
+1
+a
+e
+g
+2
+K
+v
+D
+S
+D
+r
+d
+r
+6
+T
+q
+x
+M
+U
+H
+l
+A
+s
+5
+O
+9
+L
+l
+E
+u
+f
+q
+l
+M
++
+t
+a
+1
+c
+f
+W
+l
+7
+9
+L
+u
+O
+B
+4
+f
+t
+l
+v
+2
+i
+1
+f
+5
+g
+1
+3
+f
+b
+R
+j
+l
+q
+x
+m
+P
+j
+m
+d
+E
+w
+b
+O
+O
+N
+s
+W
+u
+8
+N
+/
+a
+N
+A
+w
+P
+V
+V
+m
+r
+t
+2
+k
+7
+t
+7
+f
+J
+P
+8
+4
+l
+Z
+N
+9
+f
+L
+0
+s
+W
+F
+i
+z
+U
+P
+j
+S
+v
+D
+b
+P
+0
+C
+1
+i
+A
+z
+R
+g
+=
+=
+<
+/
+l
+a
+t
+e
+x
+i
+t
+>
+<
+l
+a
+t
+e
+x
+i
+t
+ 
+s
+h
+a
+1
+_
+b
+a
+s
+e
+6
+4
+=
+"
+0
+6
+r
+E
+W
+v
+W
+P
+E
++
+m
+R
+3
+c
+L
+r
+a
+/
+x
+J
+6
+0
+a
+k
+b
+/
+c
+=
+"
+>
+A
+A
+A
+K
+d
+H
+i
+c
+v
+V
+Z
+b
+b
+9
+M
+w
+G
+M
+3
+G
+Z
+V
+0
+Y
+s
+A
+F
+v
+8
+G
+C
+o
+J
+n
+W
+s
+q
+5
+J
+y
+m
+z
+Q
+q
+T
+d
+o
+D
+P
+A
+6
+J
+X
+a
+Q
+k
+m
+h
+z
+H
+a
+c
+0
+c
+J
+3
+I
+c
+t
+t
+b
+K
+z
++
+G
+V
+R
+/
+4
+L
+j
+/
+w
+J
+n
+r
+G
+T
+D
+b
+r
+e
+N
+E
+C
+N
+q
+0
+q
+f
+v
+/
+P
+Z
+x
++
+f
+E
+0
+m
+c
+/
+o
+S
+Q
+V
+l
+v
+V
+9
+Y
+f
+H
+G
+z
+V
+u
+3
+l
+2
+r
+L
+5
+p
+2
+V
+u
+/
+f
+u
+r
+6
+4
+9
+O
+E
+z
+j
+j
+C
+N
+8
+g
+G
+I
+a
+8
+2
+M
+f
+p
+p
+g
+S
+h
+g
+8
+E
+E
+R
+Q
+f
+J
+x
+z
+D
+y
+K
+f
+4
+y
+D
+/
+d
+0
+/
+j
+R
+Z
+8
+x
+T
+E
+r
+O
+P
+o
+p
+9
+g
+L
+4
+J
+d
+R
+k
+K
+C
+o
+F
+C
+p
+k
+7
+W
+l
+L
+6
+b
+r
+4
+y
+5
+h
+U
+p
+D
+T
+Q
+U
+K
+Q
+y
+D
+j
+O
+H
+b
+0
+d
++
+B
+Q
+T
+1
+u
+F
+x
+x
+g
+L
+P
+d
+J
+N
+u
+G
+E
+H
+R
+S
+7
+G
+I
+I
+O
+K
+x
+d
+F
+H
+m
+4
+/
+N
+c
+2
+v
+k
+U
+r
+D
+8
+D
+G
++
+T
+S
+a
+l
+m
+v
+J
+s
+F
+x
+G
+K
+q
+J
+x
+t
+v
+T
+Y
+V
+/
+j
+L
+6
+f
+j
+S
+O
+O
+v
+p
++
+O
+B
+x
+r
+c
+V
+H
+n
+B
+4
+5
+m
+R
+U
+c
+A
+h
+E
+j
+7
+B
+m
+S
+C
+j
+t
+7
+K
+k
+T
+F
+s
+5
+5
+o
+G
+E
+1
+1
+W
+8
+D
+b
+G
+2
+B
+z
+c
+3
+G
+V
+i
+l
+6
+O
+G
+U
+1
+y
+2
+T
+/
+T
+2
+q
+k
+C
+P
+U
+R
+x
+T
+t
+/
+S
+6
+U
+n
+5
+c
+6
+D
+G
+V
+S
+6
+a
+q
+j
+o
+3
+6
+g
+m
+q
+h
+p
+j
+/
+x
+9
+V
+F
+6
+5
+X
+Z
++
+M
+I
+4
+f
+z
+N
+v
+I
+7
+C
+e
+V
+j
+q
+V
++
+6
+p
+X
+7
+m
+p
+s
+z
+X
+O
+w
+1
+V
+U
+u
+a
+u
+o
+c
+l
+d
+n
+a
+5
+y
+H
+q
+0
+H
+l
+r
+g
+a
+V
+u
+z
+p
+b
+4
+3
+V
+d
+x
+S
+y
+4
+0
+o
+5
+N
+8
+2
+S
+1
+r
+h
+p
+m
+M
+c
+B
+4
+Y
+F
+8
+E
+9
+d
+1
+6
+6
+9
+H
+g
+x
+7
+u
+v
++
+y
+d
+r
+C
+9
+/
+c
+I
+E
+Z
+Z
+h
+J
+l
+A
+F
+K
+a
+p
+Y
+1
+u
+J
+8
+C
+T
+k
+g
+i
+g
+S
+1
+f
+q
+y
+F
+C
+c
+Q
+n
+c
+I
+u
+d
+l
+T
+I
+Y
+I
+R
+T
+T
+x
+Y
+P
+i
+h
+y
+s
+q
+0
+w
+A
+w
+p
+i
+r
+P
+x
+O
+g
+y
+A
+6
+v
+k
+D
+B
+K
+0
+3
+7
+k
+q
+8
+q
+i
+v
+Y
+5
+i
+O
+j
+k
+R
+O
+7
+8
+k
+G
+I
+f
+8
+a
+F
+L
+a
+y
+U
+S
+4
+7
+U
+n
+C
+k
+k
+x
+g
+h
+s
+q
+j
+h
+R
+k
+F
+I
+g
+b
+6
+P
+Q
+M
+C
+w
+j
+E
+S
+t
+K
+8
+C
+1
+e
+G
+J
+U
+g
+d
+Q
+D
+3
+K
+I
+h
+H
+r
+1
+X
+C
+H
+Q
+j
+i
+r
+d
+D
+J
++
+h
+O
+I
+o
+g
+C
+5
+6
+7
+i
+H
+B
+l
+R
+u
+D
+Y
+n
+n
+Q
+1
+7
+F
+w
++
+p
+T
+o
+N
+v
+U
+l
+L
+T
+z
+c
+8
+a
+Y
+K
+h
+4
+b
+I
+4
+w
+E
+7
+a
+g
+w
+n
+u
+l
+O
+v
+L
+G
+3
+H
+W
+I
+w
+I
+3
+9
+W
+V
+p
+E
+s
+Y
+w
+B
+4
+q
+5
+0
+1
+a
+e
+g
+2
+K
+v
+D
+S
+D
+r
+d
+r
+6
+T
+q
+x
+M
+U
+H
+l
+A
+s
+5
+O
+9
+L
+l
+E
+u
+f
+q
+l
+M
++
+t
+a
+1
+c
+f
+W
+l
+7
+9
+L
+u
+O
+B
+4
+f
+t
+l
+v
+2
+i
+1
+f
+5
+g
+1
+3
+f
+b
+R
+j
+l
+q
+x
+m
+P
+j
+m
+d
+E
+w
+b
+O
+O
+N
+s
+W
+u
+8
+N
+/
+a
+N
+A
+w
+P
+V
+V
+m
+r
+t
+2
+k
+7
+t
+7
+f
+J
+P
+8
+4
+l
+Z
+N
+9
+f
+L
+0
+s
+W
+F
+i
+z
+U
+P
+j
+S
+v
+D
+b
+P
+0
+C
+1
+i
+A
+z
+R
+g
+=
+=
+<
+/
+l
+a
+t
+e
+x
+i
+t
+>
+features themselves. Our experiments show that learning the
+feature representations is crucial, and heuristic (predeﬁned)
+choices such as a multiscale RGB pyramid lead to subopti-
+mal performance.
+
+In more detail, to encode an image x, we feed it through
+the S feature extractors E(s) and predictors D(s). Then, we
+obtain the predictions of the probability distributions p, for
+both x and the auxiliary features z(s), in parallel in a single
+forward pass. These predictions are then used with an adap-
+tive arithmetic encoder to obtain a compressed bitstream of
+both x and the auxiliary features (Sec. 3.1 provides an in-
+troduction to arithmetic coding). However, the arithmetic de-
+coder now needs p to be able to decode the bitstream. Starting
+from the lowest scale of auxiliary features z(S), for which we
+assume a uniform prior, D(S) obtains a prediction of the dis-
+tribution of the auxiliary features of the next scale, z(S−1),
+and can thus decode them from the bitstream. Prediction and
+decoding is alternated until the arithmetic decoder obtains the
+image x. The steps are visualized in Fig. A4 in the appendix.
+In practice, we only need to use S = 3 feature extrac-
+tors and predictors for our model, so when decoding we only
+need to perform three parallel (over pixels) forward passes in
+combination with the adaptive arithmetic coding.
+
+The parallel nature of our model enables it to be orders
+of magnitude faster for decoding than autoregressive models,
+while learning enables us to obtain compression rates com-
+petitive with state-of-the-art engineered lossless codecs.
+
+In summary, our contributions are the following:
+
+• We propose a fully parallel hierarchical probabilistic
+model, learning both the feature extractors that produce an
+auxiliary feature representation to help the prediction task,
+as well as the predictors which model the joint distribution
+of all variables (Sec. 3).
+
+• We show that entropy coding based on our non-
+autoregressive probabilistic model optimized for discrete
+log-likelihood can obtain compression rates outperform-
+ing WebP, JPEG2000 and PNG, the latter by a large mar-
+gin. We are only marginally outperformed by the state-
+of-the-art, FLIF, while being conceptually much simpler
+(Sec. 5.1).
+
+• At the same time, our model is practical in terms of runtime
+complexity and orders of magnitude faster than PixelCNN-
+based approaches. In particular, our model is 5.31 · 104×
+faster than PixelCNN++[35] and 5.06 · 102× faster than
+the highly speed-optimized MS-PixelCNN [32] (Sec. 5.2).
+
+2. Related Work
+
+Likelihood-Based Generative Models As previously
+mentioned, essentially all likelihood-based discrete genera-
+tive models can be used with an arithmetic coder for lossless
+
+compression. A prominent group of models that obtain state-
+of-the-art performance are variants of the auto-regressive
+PixelRNN/PixelCNN [46, 45]. PixelRNN and PixelCNN
+organize the pixels of the image distribution as a sequence
+and predict the distribution of each pixel conditionally on
+(all) previous pixels using an RNN and a CNN with masked
+convolutions, respectively.
+These models hence require
+a number of network evaluations equal to the number of
+predicted sub-pixels2 (3 ·W ·H). PixelCNN++ [35] improves
+on this in various ways, including modeling the joint dis-
+tribution of each pixel, thereby eliminating conditioning on
+previous channels and reducing to W · H forward passes.
+MS-PixelCNN [32] parallelizes PixelCNN by reducing
+dependencies between blocks of pixels and processing them
+in parallel with shallow PixelCNNs, requiring O(log W H)
+[20] equips PixelCNN with auxiliary
+forward passes.
+variables (grayscale version of the image or RGB pyramid)
+to encourage modeling of high-level features, thereby im-
+proving the overall modeling performance. [7, 29] propose
+autoregressive models similar to PixelCNN/PixelRNN, but
+they additionally rely on attention mechanisms to increase
+the receptive ﬁeld.
+
+Engineered Codecs The well-known PNG [31] operates in
+two stages: ﬁrst the image is reversibly transformed to a more
+compressible representation with a simple autoregressive ﬁl-
+ter that updates pixels based on surrounding pixels, then it
+is compressed with the deﬂate algorithm [11]. WebP [47]
+uses more involved transformations, including the use of en-
+tire image fragments to encode new pixels and a custom en-
+tropy coding scheme. JPEG2000 [38] includes a lossless
+mode where tiles are reversibly transformed before the cod-
+ing step, instead of irreversibly removing frequencies. The
+current state-of-the-art (non-learned) algorithm is FLIF [39].
+It relies on powerful preprocessing and a sophisticated en-
+tropy coding method based on CABAC [33] called MANIAC,
+which grows a dynamic decision tree per channel as an adap-
+tive context model during encoding.
+
+Context Models in Lossy Compression In lossy compres-
+sion, context models have been studied as a way to efﬁciently
+losslessly encode the obtained image representations. Classi-
+cal approaches are discussed in [24, 26, 27, 50, 48]. Recent
+learned approaches include [22, 25, 28], where shallow au-
+toregressive models over latents are learned. [5] presents a
+model somewhat similar to L3C: Their autoencoder is simi-
+lar to our ﬁst scale, and the hyper encoder/decoder is similar
+to our second scale. However, since they train for lossy image
+compression, their autoencoder predicts RGB pixels directly.
+Also, they predict uncertainties σ for z(1) instead of a mixture
+of logistics. Finally, instead of learning a probability distribu-
+tion for z(2), they assume the entries to be i.i.d. and ﬁt a uni-
+
+2A RGB “pixel” has 3 “sub-pixels”, one in each channel.
+
+10630
+
+variate non-parametric density model, whereas in our model,
+many more stages can be trained and applied recursively.
+
+Continuous Likelihood Models for Compression The ob-
+jective of continuous likelihood models, such as VAEs [19]
+and RealNVP [12], where p(x′) is a continuous distribution,
+is closely related to its discrete counterpart.
+In particular,
+by setting x′ = x + u where x is the discrete image and
+u is uniform quantization noise, the continuous likelihood
+of p(x′) is a lower bound on the likelihood of the discrete
+q(x) = Eu[p(x′)] [40]. However, there are two challenges
+for deploying such models for compression. First, the dis-
+crete likelihood q(x) needs to be available (which involves a
+non-trivial integration step). Additionally, the memory com-
+plexity of (adaptive) arithmetic coding depends on the size
+of the domain of the variables of the factorization of q (see
+Sec. 3.1 on (adaptive) arithmetic coding). Since the domain
+grows exponentially in the number of pixels in x, unless q
+is factorizable, it is not feasible to use it with adaptive arith-
+metic coding.
+
+3. Method
+
+3.1. Lossless Compression
+
+In general, in lossless compression, some stream of sym-
+bols x is given, which are drawn independently and iden-
+tically distributed (i.i.d.) from a set X = {1, . . . , |X |} ac-
+cording to the probability mass function ˜p. The goal is to
+encode this stream into a bitstream of minimal length us-
+ing a “code”, s.t. a receiver can decode the symbols from
+the bitstream.
+Ideally, an encoder minimizes the expected
+
+bits per symbol ˜L = Pj∈X ˜p(j)ℓ(j), where ℓ(j) is the
+
+length of encoding symbol j (i.e., more probable symbols
+should obtain shorter codes).
+Information theory provides
+(e.g., [9]) the bound ˜L ≥ H(˜p) for any possible code, where
+H(˜p) = Ej∼ ˜p[− log ˜p(j)] is the Shannon entropy [36].
+
+Arithmetic Coding A strategy that almost achieves the
+lower bound H(˜p) (for long enough symbol streams) is arith-
+metic coding [49].3 It encodes the entire stream into a single
+number a′ ∈ [0, 1), by subdividing [0, 1) in each step (en-
+coding one symbol) as follows: Let a, b be the bounds of the
+current step (initialized to a = 0 and b = 1 for the initial
+interval [0, 1)). We divide the interval [a, b) into |X | sections
+where the length of the j-th section is ˜p(j)/(b − a). Then we
+pick the interval corresponding to the current symbol, i.e., we
+update a, b to be the boundaries of this interval. We proceed
+recursively until no symbols are left. Finally, we transmit a′,
+which is a rounded to the smallest number of bits s.t. a′ ≥ a.
+Receiving a′ together with the knowledge of the number of
+encoded symbols and ˜p uniquely speciﬁes the stream and al-
+lows the receiver to decode.
+
+3We use (adaptive) arithmetic coding for simplicity of exposition, but any
+
+adaptive entropy-achieving coder can be used with our method.
+
+Adaptive Arithmetic Coding
+In contrast to the i.i.d. set-
+ting we just described, in this paper we are interested in
+losslessly encoding the pixels of a natural image, which are
+known to be heavily correlated and hence not i.i.d. at all. Let
+xt be the sub-pixels2 of an image x, and ˜pimg(x) the joint dis-
+tribution of all sub-pixels. We can then consider the factor-
+ization ˜pimg(x) = Qt ˜p(xt|xt−1, . . . , x1). Now, to encode x,
+we can consider the sub-pixels xt as our symbol stream and
+encode the t-th symbol/sub-pixel using ˜p(xt|xt−1, . . . , x1).
+Note that this corresponds to varying the ˜p(j) of the previ-
+ous paragraph during encoding, and is in general referred to
+as adaptive arithmetic coding (AAC) [49]. For AAC the re-
+ceiver also needs to know the varying ˜p at every step, i.e.,
+they must either be known a priori or the factorization must
+be causal (as above) so that the receiver can calculate them
+from already decoded symbols.
+
+Cross-Entropy In practice, the exact ˜p is usually unknown,
+and instead is estimated by a model p. Thus, instead of us-
+ing length log 1/˜p(x) to encode a symbol x, we use the sub-
+optimal length log 1/p(x). Then
+
+H(˜p, p) = Ej∼ ˜p [− log p(j)]
+
+= − X
+
+j∈X
+
+˜p(j) log p(j)
+
+(1)
+
+is the resulting expected (sub-optimal) bits per symbol, and
+is called cross-entropy [9].
+
+Thus, given some p, we can minimize the bitcost needed to
+encode a symbol stream with symbols distributed according
+to ˜p by minimizing Eq. (1). This naturally generalizes to the
+non-i.i.d. case described in the previous paragraph by using
+different ˜p(xt) and p(xt) for each symbol xt and minimizing
+Pt H(˜p(xt), p(xt)).
+The following sections describe how a hierarchical causal
+factorization of pimg for natural images can be used to efﬁ-
+ciently do learned lossless image compression (L3C).
+
+3.2. Architecture
+
+A high-level overview of the architecture is given in Fig. 1,
+while Fig. 2 shows a detailed description for one scale s.
+Unlike autoregressive models such as PixelCNN and Pixel-
+RNN, which factorize the image distribution autoregressively
+over sub-pixels xt as p(x) = QT
+t=1 p(xt|xt−1, . . . , x1), we
+jointy model all the sub-pixels and introduce a learned hi-
+erarchy of auxiliary feature representations z(1), . . . , z(S) to
+simplify the modeling task.We ﬁx the dimensions of z(s) to
+be C×H ′×W ′, where the number of channels C is a hy-
+perparameter (C = 5 in our reported models), and H ′ =
+H/2s, W ′ = W/2s given a H×W -dimensional image.4
+
+4Considering that z(s) is quantized, this conveniently upper bounds the
+information that can be contained within each z(s), however, other dimen-
+sions could be explored.
+
+10631
+
+s2f 5
+
+s1f 1
+
+E(s)
+in
+
++
+
+Q
+
+f (s)
+
+s1f 1
+
++
+
+s1f 1
+
++
+
+U A∗
+
+f (s)
+
+σ
+
+,
+
+µ
+
+,
+
+π
+
+p(z(s−1)|f (s))
+
+U
+L
+e
+R
+
++
+
+C
+
+E(s+1)
+
+in
+
+E(s)
+
+z(s)
+
+f (s+1)
+
+D(s)
+
+4Cf
+
+C (s−1)
+
+p
+
+Figure 2: Architecture details for a single scale s. For s = 1, E(1)
+is the RGB image x normalized to [−1, 1]. All vertical black lines
+are convolutions, which have Cf = 64 ﬁlters, except when denoted otherwise beneath. The convolutions are stride 1 with 3×3 ﬁlters,
+except when denoted otherwise above (using sSfF = stride s, ﬁlter f ). We add the features f (s+1) from the predictor D(s+1) to those
+of the ﬁrst layer of D(s) (a skip connection between scales). The gray blocks are residual blocks, shown once on the right side. C is the
+number of channels of z(s), C (s−1)
+is the ﬁnal number of channels, see Sec. 3.4. Special blocks are denoted in red: U is pixelshufﬂing
+upsampling [37]. A∗ is the “atrous convolution” layer described in Sec. 3.2. We use a heatmap to visualize z(s), see Sec. A.4.
+
+in
+
+p
+
+Speciﬁcally, we model the joint distribution of the image x
+and the feature representations z(s) as
+
+parallel, with rates 1, 2, and 4, then concatenate the resulting
+feature maps to a 3Cf -dimensional feature map.
+
+p(x, z(1), . . . , z(S)) =
+
+p(x|z(1), . . . , z(S))
+
+S
+
+Y
+
+s=1
+
+p(z(s)|z(s+1), . . . , z(S))
+
+where p(z(S)) is a uniform distribution. The feature repre-
+sentations can be hand designed or learned. Speciﬁcally, on
+one side, we consider an RGB pyramid with z(s) = B2s (x),
+where B2s is the bicubic (spatial) subsampling operator with
+subsampling factor 2s. On the other side, we consider a
+learned representation z(s) = F (s)(x) using a feature extrac-
+tor F (s). We use the hierarchical model shown in Fig. 1 using
+the composition F (s) = Q ◦ E(s) ◦ · · · ◦ E(1), where the E(s)
+are feature extractor blocks and Q is a scalar differentiable
+quantization function (see Sec. 3.3). The D(s) in Fig. 1 are
+predictor blocks, and we parametrize E(s) and D(s) as con-
+volutional neural networks.
+
+Letting z(0) = x, we parametrize the conditional distribu-
+
+tions for all s ∈ {0, . . . , S} as
+
+p(z(s)|z(s+1), . . . , z(S)) = p(z(s)|f (s+1)),
+
+using the predictor features f (s) = D(s)(f (s+1), z(s)).5 Note
+that f (s+1) summarizes the information of z(S), . . . , z(s+1).
+The predictor is based on the super-resolution architec-
+ture from EDSR [23], motivated by the fact that our predic-
+tion task is somewhat related to super-resolution in that both
+are dense prediction tasks involving spatial upsampling. We
+mirror the predictor to obtain the feature extractor, and fol-
+low [23] in not using BatchNorm [16]. Inspired by the “atrous
+spatial pyramid pooling” from [6], we insert a similar layer at
+the end of D(s): In A∗, we use three atrous convolutions in
+
+5 The ﬁnal predictor only sees z(S), i.e., we let f (S+1) = 0.
+
+3.3. Quantization
+
+We use the scalar quantization approach proposed in [25]
+to quantize the output of E(s): Given levels L =
+{ℓ1, . . . , ℓL} ⊂ R, we use nearest neighbor assignments to
+quantize each entry z′ ∈ z(s) as
+
+z = Q(z′) := arg minjkz′ − ℓjk,
+
+(2)
+
+but use differentiable “soft quantization”
+
+˜Q(z′) =
+
+L
+
+X
+
+j=1
+
+exp(−σqkz′ − ℓjk)
+l=1 exp(−σqkz′ − ℓlk)
+
+PL
+
+ℓj
+
+(3)
+
+to compute gradients for the backward pass, where σq is a
+hyperparameter relating to the “softness” of the quantization.
+For simplicity, we ﬁx L to be L = 25 evenly spaced values
+in [−1, 1].
+
+3.4. Mixture Model
+
+For ease of notation, let z(0) = x again. We model
+the conditional distributions p(z(s)|z(s+1), . . . , z(S)) using a
+generalization of the discretized logistic mixture model with
+K components proposed in [35], as it allows for efﬁcient
+training: The alternative of predicting logits per (sub-)pixel
+has the downsides of requiring more memory, causing sparse
+gradients (we only get gradients for the logit corresponding to
+the ground-truth value), and does not model that neighbour-
+ing values in the domain of p should have similar probability.
+Let c denote the channel and u, v the spatial location. For
+cuv to be independent
+
+all scales, we assume the entries of z(s)
+across u, v, given f (s+1). For RGB (s = 0), we deﬁne
+
+p(x|f (1)) = Y
+
+u,v
+
+p(x1uv, x2uv, x3uv|f (1)),
+
+(4)
+
+10632
+
+where we use a weak autoregression over RGB channels
+to deﬁne the joint probability distribution via a mixture pm
+(dropping the indices uv for shorter notation):
+
+p(x1, x2, x3|f (1)) = pm(x1|f (1)) · pm(x2|f (1), x1) ·
+
+pm(x3|f (1), x2, x1).
+
+(5)
+
+We deﬁne pm as a mixture of logistic distributions pl (deﬁned
+in Eq. (10) below). To this end, we obtain mixture weights6
+cuv, means µk
+πk
+from f (1) (see further below), and get
+
+cuv, as well as coefﬁcients λk
+
+cuv, variances σk
+
+cuv
+
+pm(x1uv|f (1)) = X
+
+k
+
+pm(x2uv|f (1), x1uv) = X
+
+k
+
+pm(x3uv|f (1), x1uv, x2uv) = X
+
+k
+
+πk
+1uv pl(x1uv|˜µk
+
+1uv, σk
+
+1uv)
+
+πk
+2uv pl(x2uv|˜µk
+
+2uv, σk
+
+2uv)
+
+πk
+3uv pl(x3uv|˜µk
+
+3uv, σk
+
+3uv),
+
+where we use the conditional dependency on previous xcuv
+to obtain the updated means ˜µ, as in [35, Sec. 2.2],
+
+(6)
+
+˜µk
+1uv = µk
+
+1uv
+
+˜µk
+3uv = µk
+
+3uv + λk
+
+2uv = µk
+˜µk
+βuv x1uv + λk
+
+2uv + λk
+γuv x2uv.
+
+αuv x1uv
+
+(7)
+
+Note that the autoregression over channels in Eq. (5) is only
+used to update the means µ to ˜µ.
+
+For the other scales (s > 0), the formulation only changes
+in that we use no autoregression at all, i.e., ˜µcuv = µcuv for
+all c, u, v. No conditioning on previous channels is needed,
+and Eqs. (4)-(6) simplify to
+
+p(z(s)|f (s+1)) = Y
+
+c,u,v
+
+pm(z(s)
+
+cuv|f (s+1))
+
+pm(z(s)
+
+cuv|f (s+1)) = X
+
+k
+
+cuv pl(xcuv|µk
+πk
+
+cuv, σk
+
+cuv).
+
+(8)
+
+(9)
+
+For all scales, the individual logistics pl are given as
+
+pl(z|µ, σ) = (cid:0)sigmoid((z + b/2 − µ)/σ)−
+sigmoid((z − b/2 − µ)/σ)(cid:1).
+
+(10)
+
+Here, b is the bin width of the quantization grid (b = 1 for
+s = 0 and b = 1/12 otherwise). The edge-cases z = 0 and
+z = 255 occurring for s = 0 are handled as described in [35,
+Sec. 2.1].
+
+For all scales, we obtain the parameters of p(z(s−1)|f (s))
+from f (s) with a 1×1 convolution that has C (s−1)
+output
+channels (see Fig. 2). For RGB, this ﬁnal feature map must
+contain the three parameters π, µ, σ for each of the 3 RGB
+
+p
+
+6Note that in contrast to [35] we do not share mixture weights πk across
+
+channels. This allows for easier marginalization of Eq. (5).
+
+channels and K mixtures, as well as λα, λβ, λγ for every
+mixture, thus requiring C (0)
+p = 3 · 3 · K + 3 · K channels.
+For s > 0, C (s)
+p = 3 · C · K, since no λ are needed. With
+the parameters, we can obtain p(z(s)|f (s+1)), which has di-
+mensions 3×H×W ×256 for RGB and C×H ′×W ′×L oth-
+erwise (visualized with cubes in Fig. 1).
+
+We emphasize that in contrast to [35], our model is not
+cuv are modelled as inde-
+
+autoregressive over pixels, i.e., z(s)
+pendent across u, v given f (s+1) (also for z(0) = x).
+
+3.5. Loss
+
+We are now ready to deﬁne the loss, which is a gen-
+eralization of the discrete logistic mixture loss introduced
+in [35]. Recall from Sec. 3.1 that our goal is to model the
+true joint distribution of x and the representations z(s), i.e.,
+˜p(x, z(1), . . . , z(s)) as accurately as possible using our model
+p(x, z(1), . . . , z(s)). Thereby, the z(s) = F (s)(x) are de-
+ﬁned using the learned feature extractor blocks E(s), and
+p(x, z(1), . . . , z(s)) is a product of discretized (conditional)
+logistic mixture models with parameters deﬁned through the
+f (s), which are in turn computed using the learned predic-
+tor blocks D(s). As discussed in Sec. 3.1, the expected cod-
+ing cost incurred by coding x, z(1), . . . , z(s) w.r.t. our model
+p(x, z(1), . . . , z(s)) is the cross entropy H(˜p, p).
+
+We therefore directly minimize H(˜p, p) w.r.t. the parame-
+ters of the feature extractor blocks E(s) and predictor blocks
+D(s) over samples. Speciﬁcally, given N training samples
+x1, . . . , xN , let F (s)
+i = F (s)(xi) be the feature representa-
+tion of the i-th sample. We minimize
+
+L(E(1), . . . , E(S), D(1), . . . , D(S))
+
+= −
+
+= −
+
+= −
+
+N
+
+X
+
+i=1
+
+N
+
+X
+
+i=1
+
+N
+
+X
+
+i=1
+
+log (cid:16)p(cid:0)xi, F (1)
+
+i
+
+, . . . , F (S)
+
+i
+
+(cid:1)(cid:17)
+
+i
+
+S
+
+log (cid:16)p(cid:0)xi|F (1)
+p(cid:0)F (s)
+(cid:16) log p(xi|F (1)
+
+Y
+
+s=1
+
+i
+
+i
+
+·
+
+, . . . , F (S)
+
+i
+
+(cid:1)
+
+|F (s+1)
+
+i
+
+, . . . , F (S)
+
+i
+
+(cid:1)(cid:17)
+
+, . . . , F (S)
+
+)
+
+i
+
++
+
+S
+
+X
+
+s=1
+
+log p(F (s)
+
+i
+
+|F (s+1)
+
+i
+
+, . . . , F (S)
+
+i
+
+)(cid:17).
+
+(11)
+
+Note that the loss decomposes into the sum of the cross-
+entropies of the different representations. Also note that this
+loss corresponds to the negative log-likelihood of the data
+w.r.t. our model which is typically the perspective taken in
+the generative modeling literature (see, e.g., [46]).
+
+Propagating Gradients through Targets We emphasize
+that
+literature, we
+learn the representations, propagating gradients to both E(s)
+
+to the generative model
+
+in contrast
+
+10633
+
+[bpsp]
+
+Ours
+
+Method
+
+L3C
+
+Learned
+Baselines
+
+RGB Shared
+RGB
+
+Non-Learned
+Approaches
+
+PNG
+JPEG2000
+WebP
+FLIF
+
+Open Images
+
+DIV2K
+
+RAISE-1k
+
+2.604
+
+3.097
+
+2.747
+
+2.918 +12%
+2.819 +8.2%
+
+3.779 +45%
+2.778 +6.7%
+2.666 +2.3%
+2.473 −5.1%
+
+3.657 +18%
+3.457 +12%
+
+4.527 +46%
+3.331 +7.5%
+3.234 +4.4%
+3.046 −1.7%
+
+3.170 +15%
+3.042 +11%
+
+3.924 +43%
+2.940 +7.0%
+2.826 +2.9%
+2.602 −5.3%
+
+Table 1: Compression performance of our method (L3C) and learned baselines (RGB Shared and RGB) to previous (non-learned) ap-
+proaches, in bits per sub-pixel (bpsp). We emphasize the difference in percentage to our method for each other method in green if L3C
+outperforms the other method and in red otherwise.
+
+and D(s), since each component of our loss depends on
+D(s+1), . . . , D(S) via the parametrization of the logistic dis-
+tribution and on E(s), . . . , E(1) because of the differentiable
+Q. Thereby, our network can autonomously learn to navigate
+the trade-off between a) making the output z(s) of feature ex-
+tractor E(s) more easily estimable for the predictor D(s+1)
+and b) putting enough information into z(s) for the predictor
+D(s) to predict z(s−1).
+
+3.6. Relationship to MS PixelCNN
+
+When the auxiliary features z(s) in our approach are re-
+stricted to a non-learned RGB pyramid (see baselines in
+Sec. 4), this is somewhat similar to MS-PixelCNN [32]. In
+particular, [32] combines such a pyramid with upscaling net-
+works which play the same role as the predictors in our ar-
+chitecture. Crucially however, they rely on combining such
+predictors with a shallow PixelCNN and upscaling one di-
+mension at a time (W ×H→2W ×H→2W ×2H). While
+their complexity is reduced from O(W H) forward passes
+needed for PixelCNN [46] to O(log W H), their approach is
+in practice still two orders of magnitude slower than ours (see
+Sec. 5.2). Further, we stress that these similarities only apply
+for our RGB baseline model, whereas our best models are
+obtained using learned feature extractors trained jointly with
+the predictors.
+
+4. Experiments
+
+Models We compare our main model (L3C) to two learned
+baselines: For the RGB Shared baseline (see Fig. A2) we
+use bicubic subsampling as feature extractors, i.e., z(s) =
+B2s (x), and only train one predictor D(1). During testing,
+we obtain multiple z(s) using B and apply the single predic-
+tor D(1) to each. The RGB baseline (see Fig. A3) also uses
+bicubic subsampling, however, we train S = 3 predictors
+D(s), one for each scale, to capture the different distributions
+of different RGB scales. For our main model, L3C, we ad-
+ditionally learn S = 3 feature extractors E(s).7 Note that
+
+7We chose S = 3 because increasing S comes at the cost of slower train-
+ing, while yielding negligible improvements in bitrate. For an image of size
+
+the only difference to the RGB baseline is that the represen-
+tations z(s) are learned. We train all these models until they
+converge at 700k iterations.
+
+Datasets We train our models on 213 487 images randomly
+selected from the Open Images Train dataset [21]. We down-
+scale the images to 768 pixels on the longer side to remove
+potential artifacts from previous compression, discarding im-
+ages where rescaling does not result in at least 1.25× down-
+scaling. Further, following [5] we discard high saturation/
+non-photographic images, i.e., images with mean S > 0.9
+or V > 0.8 in the HSV color space. We evaluate on 500
+randomly selected images from Open Images Test and the
+100 images from the commonly used super-resolution dataset
+DIV2K [2], both preprocessed like the training set. Finally,
+we evaluate on RAISE-1k [10], a “real-world image dataset”
+with 1000 images: To show how our network generalizes to
+arbitrary image sizes, we randomly resize these images s.t.
+the longer side is 500 − 2000 pixels.
+
+In order to compare to the PixelCNN literature, we ad-
+ditionally train L3C on the ImageNet32 and ImageNet64
+datasets [8], each containing 1 281 151 training images and
+50 000 validation images, of 32 × 32 resp. 64 × 64 pixels.
+
+Training We use the RMSProp optimizer [15], with a batch
+size of 30, minimizing Eq. (11) directly (no regularization).
+We train on 128 × 128 random crops, and apply random hori-
+zontal ﬂips. We start with a learning rate λ = 1·10−4 and de-
+cay it by a factor of 0.75 every 5 epochs. On ImageNet32/64,
+we increase the batch size to 120 and decay λ every epoch,
+due to the smaller images.
+
+Architecture Ablations We ﬁnd that adding Batch-
+Norm [17] slightly degrades performance. Furthermore, re-
+placing the stacked atrous convolutions A∗ with a single con-
+volution, slightly degrades performance as well. By stopping
+
+H×W , the last bottleneck has 5×H/8×W/8 dimensions, each quantized
+to L = 25 values. Encoding this with a uniform prior amounts to ≈4% of
+the total bitrate. For the RGB Shared baseline, we apply D(1) 4 times, as
+only one encoder is trained.
+
+10634
+
+Method
+
+32 × 32px
+
+320 × 320px
+
+[bpsp]
+
+ImageNet32 Learned
+
+1 L3C (Ours)
+=
+S
+B
+
+PixelCNN++ [35]
+
+0.0168 s
+47.4 s∗
+
+0.0291 s
+≈ 80 min‡
+
+0
+3
+=
+S
+B
+
+L3C (Ours)
+PixelCNN++
+
+0.000624 s
+11.3 s∗
+
+0.0213 s
+≈ 18 min‡
+
+PixelCNN [46]
+MS-PixelCNN [32]
+
+120 s†
+1.17 s†
+
+≈ 8 hours‡
+≈ 2 min‡
+
+Table 2: Sampling times for our method (L3C), compared to the
+PixelCNN literature. The results in the ﬁrst two rows were obtained
+with batch size (BS) 1, the other times with BS=30, since this is what
+[∗]: Times obtained by us with code released
+is reported in [32].
+of PixelCNN++ [35], on the same GPU we used to evaluate L3C
+(Titan X Pascal). [†]: times reported in [32], obtained on a Nvidia
+Quadro M4000 GPU (no code available). [‡]: To put the numbers
+into perspective, we compare our runtime with linearly interpolated
+runtimes for for the other approaches on 320 × 320 crops.
+
+gradients from propagating through the targets of our loss,
+we get signiﬁcantly worse performance – in fact, the opti-
+mizer does not manage to pull down the cross-entropy of any
+of the learned representations z(s) signiﬁcantly.
+
+We ﬁnd the choice of σq for Q has impacts on train-
+ing: [25] suggests setting it s.t. ˜Q resembles identity, which
+we found to be good starting point, but found it beneﬁcial to
+let σq be slightly smoother (this yields better gradients for the
+encoder). We use σq = 2.
+
+Additionally, we explored the impact of varying C (num-
+ber of channels of z(s)) and the number of levels L and found
+it more beneﬁcial to increase L instead of increasing C, i.e.,
+it is beneﬁcial for training to have a ﬁner quantization grid.
+
+Other Codecs We compare to FLIF and the lossless mode
+of WebP using the respective ofﬁcial implementations [39,
+47], for PNG we use the implementation of Pillow [30], and
+for the lossless mode of JPEG2000 we use the Kakadu imple-
+mentation [18]. See Sec. 2 for a description of these codecs.
+
+5. Results
+
+5.1. Compression
+
+Table 1 shows a comparison of our approach (L3C) and
+the learned baselines to the other codecs, on our testsets, in
+terms of bits per sub-pixel (bpsp)8 All of our methods outper-
+form the widely-used PNG, which is at least 43% larger on
+all datasets. We also outperform WebP and JPEG2000 every-
+where by a smaller margin of up to 7.5%. We note that FLIF
+still marginally outperforms our model but remind the reader
+of the many hand-engineered highly specialized techniques
+involved in FLIF (see Section 2). In contrast, we use a simple
+convolutional feed-forward neural network architecture. The
+
+X
+
+X
+
+X
+
+L3C (ours)
+PixelCNN [46]
+MS-PixelCNN [32]
+
+PNG
+JPEG2000
+WebP
+FLIF
+
+4.76
+3.83
+3.95
+
+6.42
+6.35
+5.28
+5.08
+
+Table 3: Comparing bits per sub-pixel (bpsp) on the 32 × 32 im-
+ages from ImageNet32 of our method (L3C) vs. PixelCNN-based
+approaches and classical approaches.
+
+RGB baseline with S = 3 learned predictors outperforms
+the RGB Shared baseline on all datasets, showing the impor-
+tance of learning a predictor for each scale. Using our main
+model (L3C), where we additionally learn the feature extrac-
+tors, we outperform both baselines: The outputs are at least
+12% larger everywhere, showing the beneﬁts of learning the
+representation.
+
+5.2. Comparison with PixelCNN
+
+While PixelCNN-based approaches are not designed for
+lossless image compression, they learn a probability distri-
+bution over pixels and optimize for the same log-likelihood
+objective. Since they thus can in principle be used inside a
+compression algorithm, we show a comparison here.
+
+Sampling Runtimes Table 2 shows a speed comparison to
+three PixelCNN-based approaches (see Sec. 2 for details on
+these approaches). We compare time spent when sampling
+from the model, to be able to compare to the PixelCNN liter-
+ature. Actual decoding times for L3C are given in Sec. 5.3.
+
+While the runtime for PixelCNN [46] and MS-
+PixelCNN [32] is taken from the table in [32], we can com-
+pare with L3C by assuming that PixelCNN++ is not slower
+than PixelCNN to get a conservative estimate9, and by con-
+sidering that MS-PixelCNN reports a 105× speedup over
+PixelCNN. When comparing on 320×320 crops, we thus ob-
+serve massive speedups compared to the original PixelCNN:
+>1.63 · 105× for batch size (BS) 1 and >5.31 · 104× for
+BS 30. We see that on 320 × 320 crops, L3C is at least
+5.06 · 102× faster than MS-PixelCNN, the fastest PixelCNN-
+type approach. Furthermore, Table 2 makes it obvious that
+the PixelCNN based approaches are not practical for lossless
+compression of high-resolution images.
+
+We emphasize that it is impossible to do a completely fair
+comparison with PixelCNN and MS-PixelCNN due to the un-
+availability of their code and the different hardware. Even if
+the same hardware was available to us, differences in frame-
+works/framework versions (PyTorch vs. Tensorﬂow) can not
+
+8We follow the likelihood-based generative modelling literature in mea-
+
+9PixelCNN++ is in fact around 3× faster than PixelCNN due to mod-
+
+suring bpsp; X bits per pixel (bpp) = X/3 bpsp, see also footnote 2.
+
+elling the joint directly, see Sec. 2.
+
+10635
+
+be accounted for. See also Sec. A.3 for notes on the inﬂuence
+of the batch size.
+
+Bitcost To put the runtimes reported in Table 2 into per-
+spective, we also evaluate the bitcost on ImageNet32, for
+which PixelCNN and MS-PixelCNN were trained, in Ta-
+ble 3. We observe our outputs to be 20.6% larger than MS-
+PixelCNN and 24.4% larger than the original PixelCNN, but
+smaller than all classical approaches. However, as shown
+above, this increase in bitcost is traded against orders of mag-
+nitude in speed. We obtain similar results for ImageNet64,
+see Sec. A.2.
+
+5.3. Encoding / Decoding Time
+
+To encode/decode images with L3C (and other methods
+outputting a probability distribution), a pass with an entropy
+coder is needed. We implemented a relatively simple pipeline
+to encode and decode images with L3C, which we describe
+in the supplementary material, in Section A.1. The results
+are shown in Tables 4 and A1. As noted in Section A.1, we
+did not optimize our code for speed, yet still obtain practi-
+cal runtimes. We also note that to use other likelihood-based
+methods for lossless compression, similar steps are required.
+While our encoding time is in the same order as for classical
+approaches, our decoder is slower than that of the other ap-
+proaches. This can be attributed to more optimized code and
+ofﬂoading complexity to the encoder – while in our approach,
+decoding essentially mirrors encoding. However, combining
+encoding and decoding time we are either faster (FLIF) or
+have better bitrate (PNG, WebP, JPEG2000).
+
+5.4. Sampling Representations
+
+We stress that we study image compression and not image
+generation. Nevertheless, our method produces models from
+which x and z(s) can be sampled. Therefore, we visualize
+the output when sampling part of the representations from
+our model in Fig. 3: the top left shows an image from the
+Open Images test set, when we store all scales (losslessly).
+When we store z(1), z(2), z(3) but not x and instead sample
+from p(x|f (1)), we only need 39.2% of the total bits with-
+out noticeably degrading visual quality. Sampling z(1) and x
+leads to some blur while reducing the number of stored bits to
+
+Codec
+
+Encoding [s] Decoding [s] [bpsp] GPU CPU
+
+L3C (Ours) 0.242
+
+0.374
+
+2.646 X X
+
+0.213
+
+PNG
+JPEG2000 1.48 · 10−2
+WebP
+FLIF
+
+0.157
+1.72
+
+6.09 · 10−5
+2.26 · 10−4
+7.12 · 10−2
+0.133
+
+3.850
+2.831
+2.728
+2.544
+
+X
+
+X
+
+X
+
+X
+
+Table 4: Encoding and Decoding times compared to classical ap-
+proaches, on 512 × 512 crops, as well as bpsp and required devices.
+
+4.061 bpsp
+
+stored: 0,1,2,3 1.211 bpsp
+
+stored: 1,2,3
+
+0.375 bpsp
+
+stored: 2,3 0.121 bpsp
+
+stored: 3
+
+Figure 3: Effect of generating representations instead of storing
+them, given different z(s) of a 512 × 512 image from the Open
+Images test set. Below each generated image, we show the required
+bitcost and which scales are stored.
+
+9.21% of the full bitcost. Finally, only storing z(3) (contain-
+ing 64 × 64 × 5 values from L and 2.85% of the full bitcost)
+and sampling z(2), z(1), and x produces signiﬁcant artifacts.
+However, the original image is still recognizable, showing the
+ability of our networks to learn a hierarchical representation
+capturing global image structure.
+
+6. Conclusion
+
+We proposed and evaluated a fully parallel hierarchical
+probabilistic model with auxiliary feature representations.
+Our L3C model outperforms PNG, JPEG2000 and WebP on
+all datasets. Furthermore, it signiﬁcantly outperforms the
+RGB Shared and RGB baselines which rely on predeﬁned
+heuristic feature representations, showing that learning the
+representations is crucial. Additionally, we observed that
+using PixelCNN-based methods for losslessly compressing
+full resolution images takes two to ﬁve orders of magnitude
+longer than L3C.
+
+To further improve L3C, future work could investigate
+weak forms of autoregression across pixels and/or dynamic
+adaptation of the model network to the current image. More-
+over, it would be interesting to explore domain-speciﬁc ap-
+plications, e.g., for medical image data.
+
+Acknowledgments The authors would like to thank Sergi Caelles for the
+insightful discussions and feedback. This work was partly supported by ETH
+General Fund (OK) and Nvidia through the hardware grant.
+
+10636
+
+References
+
+[1] E. Agustsson, F. Mentzer, M. Tschannen, L. Cavigelli, R. Tim-
+ofte, L. Benini, and L. V. Gool. Soft-to-Hard Vector Quantiza-
+tion for End-to-End Learning Compressible Representations.
+In NIPS, 2017. 1
+
+[2] E. Agustsson and R. Timofte. NTIRE 2017 Challenge on Sin-
+In CVPR
+
+gle Image Super-Resolution: Dataset and Study.
+Workshops, 2017. 6
+
+[3] E. Agustsson, M. Tschannen, F. Mentzer, R. Timofte,
+and L. Van Gool. Generative Adversarial Networks for
+Extreme Learned Image Compression.
+arXiv preprint
+arXiv:1804.02958, 2018. 1
+
+[4] J. Ball´e, V. Laparra, and E. P. Simoncelli. End-to-end Opti-
+
+mized Image Compression. ICLR, 2016. 1
+
+[5] J. Ball´e, D. Minnen, S. Singh, S. J. Hwang, and N. John-
+ston. Variational Image Compression with a Scale Hyperprior.
+ICLR, 2018. 2, 6
+
+[6] L.-C. Chen, G. Papandreou, F. Schroff, and H. Adam. Re-
+thinking Atrous Convolution for Semantic Image Segmenta-
+tion. arXiv preprint arXiv:1706.05587, 2017. 4
+
+[7] X. Chen, N. Mishra, M. Rohaninejad, and P. Abbeel. Pixel-
+In
+
+SNAIL: An Improved Autoregressive Generative Model.
+ICML, 2018. 2
+
+[8] P. Chrabaszcz, I. Loshchilov, and F. Hutter. A downsampled
+variant of ImageNet as an alternative to the CIFAR datasets.
+arXiv preprint arXiv:1707.08819, 2017. 6
+
+[9] T. M. Cover and J. A. Thomas. Elements of Information The-
+
+ory. John Wiley & Sons, 2012. 3
+
+[10] D.-T. Dang-Nguyen, C. Pasquini, V. Conotter, and G. Boato.
+RAISE: A Raw Images Dataset for Digital Image Forensics.
+In ACM MMSys. ACM, 2015. 6
+
+[11] P. Deutsch. DEFLATE compressed data format speciﬁcation
+
+version 1.3. Technical report, 1996. 2
+
+[12] L. Dinh, J. Sohl-Dickstein, and S. Bengio. Density estimation
+
+using Real NVP. ICLR, 2017. 3
+
+[13] J. Duda, K. Tahboub, N. J. Gadgil, and E. J. Delp. The use of
+asymmetric numeral systems as an accurate replacement for
+huffman coding. In PCS, 2015. 12
+
+[14] F. Giesen.
+
+Interleaved entropy coders.
+
+arXiv preprint
+
+arXiv:1402.3392, 2014. 12
+
+[15] G. Hinton, N. Srivastava, and K. Swersky. Neural Networks
+for Machine Learning Lecture 6a Overview of mini-batch gra-
+dient descent. 6
+
+[16] S. Ioffe. Batch Renormalization: Towards Reducing Mini-
+In NIPS,
+
+batch Dependence in Batch-Normalized Models.
+2017. 4
+
+[17] S. Ioffe and C. Szegedy. Batch Normalization: Accelerating
+Deep Network Training by Reducing Internal Covariate Shift.
+In ICML, 2015. 6
+
+[18] Kakadu
+
+JPEG2000
+
+implementation.
+
+http://
+
+kakadusoftware.com. 7
+
+[19] D. P. Kingma and M. Welling. Auto-Encoding Variational
+
+Bayes. In ICLR, 2014. 3
+
+[21] I. Krasin, T. Duerig, N. Alldrin, V. Ferrari, S. Abu-El-
+Haija, A. Kuznetsova, H. Rom, J. Uijlings, S. Popov,
+S. Kamali, M. Malloci, J. Pont-Tuset, A. Veit, S. Be-
+longie, V. Gomes, A. Gupta, C. Sun, G. Chechik,
+D. Cai, Z. Feng, D. Narayanan, and K. Murphy. Open-
+Images: A public dataset for large-scale multi-label and
+multi-class image classiﬁcation.
+Dataset available from
+https://storage.googleapis.com/openimages/web/index.html,
+2017. 6
+
+[22] M. Li, W. Zuo, S. Gu, D. Zhao, and D. Zhang. Learning Con-
+volutional Networks for Content-weighted Image Compres-
+sion. In CVPR, 2018. 2
+
+[23] B. Lim, S. Son, H. Kim, S. Nah, and K. M. Lee. Enhanced
+Deep Residual Networks for Single Image Super-Resolution.
+In CVPR Workshops, 2017. 4
+
+[24] D. Marpe, H. Schwarz, and T. Wiegand. Context-based adap-
+tive binary arithmetic coding in the h. 264/avc video compres-
+sion standard. IEEE Transactions on circuits and systems for
+video technology, 13(7):620–636, 2003. 2
+
+[25] F. Mentzer, E. Agustsson, M. Tschannen, R. Timofte, and
+L. Van Gool. Conditional Probability Models for Deep Image
+Compression. In CVPR, 2018. 2, 4, 7
+
+[26] B. Meyer and P. Tischer. TMW - a new method for lossless
+
+image compression. In PCS, 1997. 2
+
+[27] B. Meyer and P. E. Tischer. Glicbawls - Grey Level Image
+Compression by Adaptive Weighted Least Squares. In Data
+Compression Conference, 2001. 2
+
+[28] D. Minnen, J. Ball´e, and G. D. Toderici. Joint Autoregressive
+In
+
+and Hierarchical Priors for Learned Image Compression.
+NeurIPS. 2018. 2
+
+[29] N. Parmar, A. Vaswani, J. Uszkoreit, Ł. Kaiser, N. Shazeer,
+
+and A. Ku. Image Transformer. ICML, 2018. 2
+
+[30] Pillow Library for Python. https://python-pillow.
+
+org. 7
+
+[31] Portable Network Graphics (PNG).
+
+http://libpng.
+
+org/pub/png/libpng.html. 1, 2
+
+[32] S. Reed, A. Oord, N. Kalchbrenner, S. G. Colmenarejo,
+Z. Wang, Y. Chen, D. Belov, and N. Freitas. Parallel Multi-
+scale Autoregressive Density Estimation. In ICML, 2017. 1,
+2, 6, 7, 12
+
+[33] I. E. Richardson. H. 264 and MPEG-4 video compression:
+video coding for next-generation multimedia. John Wiley &
+Sons, 2004. 2
+
+[34] O. Rippel and L. Bourdev. Real-Time Adaptive Image Com-
+
+pression. In ICML, 2017. 1
+
+[35] T. Salimans, A. Karpathy, X. Chen, and D. P. Kingma. Pixel-
+CNN++: A PixelCNN Implementation with Discretized Lo-
+gistic Mixture Likelihood and Other Modiﬁcations.
+ICLR,
+2017. 1, 2, 4, 5, 7
+
+[36] C. E. Shannon. A Mathematical Theory of Communication.
+
+Bell System Technical Journal, 27(3):379–423, 1948. 3
+
+[37] W. Shi, J. Caballero, F. Husz´ar, J. Totz, A. P. Aitken,
+R. Bishop, D. Rueckert, and Z. Wang. Real-Time Single Im-
+age and Video Super-Resolution Using an Efﬁcient Sub-Pixel
+Convolutional Neural Network. CVPR, 2016. 4
+
+[20] A. Kolesnikov and C. H. Lampert. PixelCNN Models with
+In ICML,
+
+Auxiliary Variables for Natural Image Modeling.
+2017. 1, 2
+
+[38] A. Skodras, C. Christopoulos, and T. Ebrahimi. The JPEG
+2000 still image compression standard. IEEE Signal process-
+ing magazine, 18(5):36–58, 2001. 1, 2
+
+10637
+
+[39] J. Sneyers and P. Wuille. FLIF: Free lossless image format
+
+based on MANIAC compression. In ICIP, 2016. 1, 2, 7
+
+[40] L. Theis, A. v. d. Oord, and M. Bethge. A note on the evalua-
+
+tion of generative models. ICLR, 2016. 1, 3
+
+[41] L. Theis, W. Shi, A. Cunningham, and F. Huszar. Lossy Image
+Compression with Compressive Autoencoders. ICLR, 2017. 1
+[42] G. Toderici, D. Vincent, N. Johnston, S. J. Hwang, D. Minnen,
+J. Shor, and M. Covell. Full Resolution Image Compression
+with Recurrent Neural Networks. In CVPR, 2017. 1
+
+[43] R. Torfason, F. Mentzer, E. Agustsson, M. Tschannen, R. Tim-
+ofte, and L. Van Gool. Towards Image Understanding from
+Deep Compression without Decoding. ICLR, 2018. 13
+
+[44] M. Tschannen, E. Agustsson, and M. Lucic. Deep Genera-
+tive Models for Distribution-Preserving Lossy Compression.
+In NeurIPS. 2018. 1
+
+[45] A.
+
+van
+
+den Oord, N. Kalchbrenner, L. Espeholt,
+k. kavukcuoglu, O. Vinyals, and A. Graves. Conditional
+Image Generation with PixelCNN Decoders. In NIPS, 2016.
+1, 2
+
+[46] A. Van Oord, N. Kalchbrenner, and K. Kavukcuoglu. Pixel
+
+Recurrent Neural Networks. In ICML, 2016. 1, 2, 5, 6, 7, 12
+
+[47] WebP Image format. https://developers.google.
+
+com/speed/webp/. 1, 2, 7
+
+[48] M. J. Weinberger, J. J. Rissanen, and R. B. Arps. Applica-
+tions of Universal Context Modeling to Lossless Compression
+of Gray-Scale images. IEEE Transactions on Image Process-
+ing, 5(4):575–586, 1996. 2
+
+[49] I. H. Witten, R. M. Neal, and J. G. Cleary. Arithmetic
+coding for data compression. Communications of the ACM,
+30(6):520–540, 1987. 3
+
+[50] X. Wu, E. Barthel, and W. Zhang. Piecewise 2D autoregression
+
+for predictive image coding. In ICIP, 1998. 2
+
+10638
+
+

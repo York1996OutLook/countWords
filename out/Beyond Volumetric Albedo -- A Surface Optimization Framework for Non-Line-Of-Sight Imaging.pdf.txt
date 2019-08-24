@@ -1,0 +1,1392 @@
+— A Surface Optimization Framework for Non-Line-of-Sight Imaging
+
+Beyond Volumetric Albedo
+
+Chia-Yin Tsai, Aswin C. Sankaranarayanan, and Ioannis Gkioulekas
+
+Carnegie Mellon University
+
+Abstract
+
+Non-line-of-sight (NLOS) imaging is the problem of re-
+constructing properties of scenes occluded from a sensor,
+using measurements of light that indirectly travels from the
+occluded scene to the sensor through intermediate diffuse
+reﬂections. We introduce an analysis-by-synthesis frame-
+work that can reconstruct complex shape and reﬂectance of
+an NLOS object. Our framework deviates from prior work
+on NLOS reconstruction, by directly optimizing for a sur-
+face representation of the NLOS object, in place of com-
+monly employed volumetric representations. At the core
+of our framework is a new rendering formulation that ef-
+ﬁciently computes derivatives of radiometric measurements
+with respect to NLOS geometry and reﬂectance, while ac-
+curately modeling the underlying light transport physics.
+By coupling this with stochastic optimization and geome-
+try processing techniques, we are able to reconstruct NLOS
+surface at a level of detail signiﬁcantly exceeding what is
+possible with previous volumetric reconstruction methods.
+
+1. Introduction
+
+Non-line-of-sight (NLOS) imaging is an emerging tech-
+nology that concerns with using higher-order light transport
+in order to reconstruct properties of a scene that is outside
+the direct line of sight of a sensor. A common setting is the
+so-called “looking around the corner” problem [41, 77] (see
+Figure 1), where information about an NLOS object (ge-
+ometry, reﬂectance, motion, class label, and other proper-
+ties) is extracted from measurements of photons that bounce
+between a visible wall and the object. This technology
+has seen rapid advances in the past decade, as several ac-
+tive [68, 56, 40, 74, 13, 73, 81, 36, 42, 63, 48, 61, 50, 80]
+and passive [8, 66, 6, 10, 5] techniques have been introduced
+that can operate under progressively more challenging con-
+ditions (ambient lighting, real-time capture, and so on).
+
+We are focusing on the problem of shape reconstruction
+in the looking-around-the-corner setting using active illu-
+mination. Typically, active techniques use a controllable
+
+Figure 1. Looking around the corner: Non-line-of-sight (NLOS)
+imaging is the problem of reconstructing parts of a scene occluded
+from a sensor, by analyzing light that bounces multiple times be-
+tween visible and occluded surfaces. We develop an inverse ren-
+dering pipeline that uses an accurate radiometric image formation
+model to produce detailed NLOS surface reconstructions.
+
+source, such as a laser beam, to indirectly inject light into
+the NLOS scene, through a reﬂection on the visible wall.
+Then, they use time-resolved, or transient, intensity mea-
+surements [33] to reconstruct the NLOS scene.
+
+Most existing techniques perform 3D reconstruction us-
+ing an image formation model introduced by Velten et
+al. [77]. This model represents the NLOS scene as an
+albedo volume, where each voxel is an isotropic reﬂector
+with an associated albedo value. This representation allows
+approximately formulating transient light transport in the
+NLOS scene with only linear algebraic operations. In turn,
+this allows recovering the unknown albedo volume from the
+
+11545
+
+volumetricproposed methodground truthvisible surfaceNLOS sceneoccludersource and sensortransient measurements by solving a, potentially regular-
+ized, linear least-squares system [31, 29, 56, 30, 3, 48, 50].
+This mathematical tractability comes at the cost of phys-
+ical accuracy: In NLOS scenes consisting of opaque ob-
+jects, light transport is the result of discrete light-surface
+interactions at the object interfaces, rather than continuous
+light-volume interactions. Additionally, these interactions
+include effects such as normal-dependent shading and non-
+Lambertian reﬂectance, which are ignored by the albedo
+volume. On the other hand, instead of volumetric albedo,
+given a representation of the NLOS objects’ surface and
+reﬂectance, light transport can be modeled exactly using
+the rendering equation [35]. However, unlike the albedo
+volume model, evaluating this equation is only possible
+through computationally expensive Monte Carlo rendering
+operations [75, 64, 18]. This increased computational com-
+plexity has so far hindered the adoption of the rendering
+equation in NLOS reconstruction techniques.
+
+In this paper, we overcome the computational complex-
+ity and introduce a computational pipeline that reconstructs
+NLOS object shape, in the form of a triangular mesh, and
+complex reﬂectance, in the form of a microfacet BRDF,
+while accurately taking into account the underlying light
+transport physics. At the core of our pipeline is a differ-
+entiable formulation of the rendering equation in the NLOS
+setting. This formulation enables the use of Monte Carlo
+rendering to efﬁciently estimate derivatives of radiomet-
+ric measurements with respect to shape and reﬂectance pa-
+rameters. We combine an optimized differentiable render-
+ing implementation with stochastic optimization in an in-
+verse rendering framework [53], where we iteratively de-
+form an NLOS surface so as to minimize the difference be-
+tween measured and rendered light transients. We augment
+this surface optimization pipeline with geometric process-
+ing tools that help improve the quality of the resulting tri-
+angular mesh. Through experiments on synthetic and mea-
+sured data, we show that this pipeline can produce NLOS
+surface reconstructions at a level of detail comparable to
+what is achieved by albedo-volume methods using two or-
+ders of magnitude more measurements, while additionally
+recovering non-Lambertian reﬂectance. We will release
+our optimized implementation in order to encourage adop-
+tion of inverse rendering pipelines in NLOS imaging, either
+as stand-alone reconstruction tools or in conjunction with
+albedo-volume methods as post-processing procedures.
+
+2. Related Work
+
+Non-line-of-sight imaging refers to the broad problem of
+reconstructing properties of scenes that are normally oc-
+cluded from a sensor. Even though interest in this problem
+dates back several decades [24], it has recently attracted in-
+creased attention within computer vision and graphics, fol-
+lowing two seminal papers [41, 77] demonstrating the abil-
+
+ity to reconstruct shape in the looking around the corner
+setting (Figure 1). Most of the NLOS imaging techniques
+that have been introduced since then use active illumina-
+tions, with a few notable exceptions [8, 66, 6, 10, 5].
+
+We can broadly classify active NLOS imaging tech-
+niques into three categories. First are coherent illumination
+techniques, which take advantage of speckle statistics to re-
+cover information about the NLOS scene [68, 36, 7, 37].
+The second category includes techniques that use incoher-
+ent intensity measurements, under laser or ﬂash illumina-
+tion, to recover NLOS motion information [42], semantic
+labels [71], or in certain cases even geometry [81, 73].
+
+Most relevant to us is the third category of active tech-
+niques, which reconstruct NLOS geometry using transient
+intensity measurements [33]. This has been demonstrated
+using sensing technologies that include ultrafast photodi-
+odes [41], optical coherence tomography [80], streak cam-
+eras [77, 29], continuous-wave time-of-ﬂight cameras [31,
+34], and single-photon avalanche diodes (SPADs) [13, 56,
+30, 45, 3, 74, 63, 61, 50, 80]. Most of these techniques use
+a volumetric representation of the NLOS scene and an ap-
+proximate image formation model introduced by Velten et
+al. [77]. Our point of departure from this line of work is
+to show that, using a physically-accurate image formation
+model based on the rendering equation [35], we can recon-
+struct surfaces, rather than volumes, for the NLOS scene, at
+higher geometric detail. Compared to other techniques that
+reconstruct surface representations from the timestamps of
+speciﬁc events in transients [74, 80], we do so by taking into
+account the complete transient intensity information, which
+enables us to additionally reconstruct reﬂectance.
+
+Surface optimization is a classical approach for 3D recon-
+struction in computer vision, where it is commonly applied
+for stereo-based reconstruction [2, 21, 22, 25, 16, 69, 83,
+15, 82, 65, 44]. In a related context, surface optimization
+techniques are used in mesh editing applications for com-
+puter graphics [17, 54, 70, 20, 49]. At a high-level, both
+types of applications operate by ﬁrst deﬁning an objective
+function (or energy) as an integral on a surface. Then, they
+derive expressions for the derivatives of this surface integral
+with respect to some surface representations. Finally, these
+derivatives are used to create a ﬂow process that progres-
+sively deforms some initial surface, until the objective func-
+tion is minimized. The derivation of derivative expressions
+typically relies on tools from differential geometry, and has
+been demonstrated for both implicit (e.g., level sets [55])
+and parametric (e.g., triangular meshes [16]) surface rep-
+resentations. Similar surface integrals arise in the context
+of NLOS imaging through the rendering equation. There-
+fore, we take advantage of this mathematical machinery to
+perform surface optimization for NLOS reconstruction.
+
+Differentiable rendering has been introduced as a method-
+ology for recovering physical unknowns from image mea-
+
+1546
+
+surements, which can include direct-only [52] and global
+illumination effects (e.g., scattering [28, 27, 84, 46, 26, 38],
+or interreﬂections [51, 47, 4]). Typically, differentiable ren-
+dering is used to perform analysis-by-synthesis, also known
+as inverse rendering [53, 60, 59]. This refers to the search
+for values of physical parameters that, when used to syn-
+thesize images, can reproduce input image measurements.
+To efﬁciently perform this search through gradient-descent
+optimization, differentiable rendering is used to estimate
+derivatives of images with respect to the unknown parame-
+ters. In our setting, we devise differentiable rendering algo-
+rithms that enable surface optimization, and are tailored to
+the NLOS image formation model for increased efﬁciency.
+
+3. Problem setting
+
+We focus on the looking-around-the-corner imaging set-
+ting, which we describe in detail in this section. Along
+the line, we introduce relevant notation, and use this no-
+tation to write down expressions for the radiometric mea-
+surements captured under this setting as a function of prop-
+erties of the NLOS scene. These expressions are common-
+place in the physics-based rendering literature (see, for in-
+stance, [75, 64, 18]), but we describe them in detail as the
+necessary background for deriving the inverse rendering al-
+gorithm of Section 4. To help navigate this section, in Fig-
+ure 2, we visualize in two dimensions the looking-around-
+the-corner setting and some of our notation.
+
+We use a pulsed source l0 and a transient detector s0 to
+image a scene that consists of two distinct sets of surfaces:
+surfaces SLOS that are visible to both the source and detec-
+tor, and surfaces SNLOS that are occluded from both of them.
+We assume that there are no surfaces that are neither in SLOS
+nor in SNLOS. We additionally assume that the visible sur-
+face SLOS has Lambertian reﬂectance.
+
+We use the source to illuminate a point l on the visible
+surface SLOS. Likewise, we use the detector to image a point
+s on SLOS. We call the points l and s the virtual source
+and virtual detector respectively. This terminology stems
+from the fact that these points effectively act as an isotropic
+source and detector directly attached to SLOS, as they redi-
+rect light, through a diffuse reﬂection, from the source to
+the NLOS scene, and from the NLOS scene to the detector.
+
+3.1. Image formation model
+
+We restrict our attention to light effects from so-called
+three-bounce paths of the form l0 → l → x → s → s0
+where x ∈ SNLOS; that is, paths that, between the virtual
+source l and virtual detector s, have a single interaction with
+the NLOS surface at a point x ∈ SNLOS. We make this sim-
+pliﬁcation motivated from previous observations that pho-
+tons following higher-order paths are difﬁcult to detect with
+existing sensors [63]. We additionally ignore light follow-
+ing direct paths without interacting with the NLOS surface
+
+SNLOS, as this light component is typically removed using
+time-gating mechanisms [13]. Additionally, for each pair of
+virtual points l and s, we assume that we have calibrated our
+measurements so that we can neglect the radiometric and
+pathlength terms for the connections l0 → l and s → s0.
+
+Under these assumptions, we can use the path integral
+formulation of light transport [75] to write the intensity
+measured by the sensor s0 at time t as
+
+I (t; l, s) =ZSNLOS
+
+z
+
+W (x; t) f (x, ˆn (x))
+
+g(x, ˆn(x))
+
+}|
+
+{
+
+· v (x, l) v (x, s) dA (x) ,
+
+(1)
+
+where A (x) is the area measure on SNLOS, ˆn is the normal
+of a surface at a speciﬁc point, and W (x; t), f (x, ˆn (x)),
+v (x, s) will be discussed below. When considered as a
+function of all possible times t, virtual sources l, and vir-
+tual detectors s, I (t; l, s) is often referred to as the ﬁve-
+dimensional transient [13]. We note that, because of the
+three-bounce assumption, the usual path integral reduces to
+a single surface integral over the NLOS surface SNLOS.
+
+The radiometric throughput f in Equation (1) is the ra-
+
+diance that ﬂows through the path l → x → s,
+
+f (x, ˆn (x)) = fs (ˆn (x) , ˆωl (x) , ˆωs (x))
+
+·
+
+·
+
+h− ˆωl (x) , ˆn (l)i h ˆωl (x) , ˆn (x)i
+
+kx − lk2
+
+h− ˆωs (x) , ˆn (s)i h ˆωs (x) , ˆn (x)i
+
+kx − sk2
+
+,
+
+(2)
+
+where fs is the BRDF of SNLOS at point x, ˆωl (x) is the
+normalized vector parallel to l − x, and likewise for ˆωs (x).
+The temporal importance W models the mechanism by
+which the sensor selects paths of length within some spe-
+ciﬁc range for each measurement I (t; l, s)1,
+
+W (x, t) = rect(cid:18) τ (x) − t
+
+T
+
+(cid:19) ,
+
+(3)
+
+where rect is the unit rectangular function, T is the sensor’s
+temporal resolution, and τ is the length of path l → x → s,
+
+τ (x) = kx − lk + kx − sk .
+
+(4)
+
+Finally, the visibility function v is a binary indicator of
+
+occlusion between two points,
+
+v (x, y) =(1,
+
+0,
+
+if x, y are visible to each other,
+
+otherwise.
+
+(5)
+
+Comparison to albedo volume model.
+It is instruc-
+tive to compare the surface integral formulation of Equa-
+tion (1) with the albedo volume model of Velten et al. [77].
+
+1We treat geometric pathlength and time of ﬂight as equivalent, with
+the understanding that they relate to each other through the speed of light.
+
+1547
+
+Figure 2. Pipeline overview: (Left) 2D visualization and notation. (Middle) We sample points x to estimate the transient and its gradients
+with respect to reﬂectance π and vertices v of a triangular mesh. (Right) We use the computed gradients to evolve the surface.
+
+This model represents the NLOS scene as an albedo func-
+tion ρ (x), deﬁned on all points of a continuous three-
+dimensional volume, x ∈ VNLOS. Then, transient measure-
+ments are expressed as a volume integral,
+
+I (t; l, s) =ZVNLOS
+
+W (x; t) ρ (x)
+
+kx − lk2 kx − sk2 dV (x) ,
+
+(6)
+
+where V (x) is the standard measure on VNLOS. Compared
+to Equation (1), we note that the integrand of Equation (6)
+constrains the reﬂectance function fs to be Lambertian, and
+omits the normal-related shading terms and the visibility
+terms v. Recent extensions incorporate normal and visibil-
+ity effects through additional volumetric functions deﬁned
+everywhere on VNLOS [30]. However, the albedo, normal,
+and visibility volumetric functions are treated as indepen-
+dent of each other, even though they are in fact interwined
+as functions of the underlying NLOS surface SNLOS.
+
+Despite the lack of physical accuracy, the albedo vol-
+ume model is attractive because of its mathematical con-
+venience: Through a straightfoward discretization of the
+volume integral of Equation (6), forward evaluations of the
+model become simple matrix-vector multiplication opera-
+tions. Consequently, inverting the model to reconstruct the
+NLOS scene can be posed as a linear least-squares problem.
+By contrast, forward evaluations of the surface integral of
+Equation (1) rely on involved surface quadrature methods,
+or Monte Carlo rendering. In turn, this makes inverting the
+model for NLOS reconstruction non-trivial. We defer dis-
+cussion of Monte Carlo rendering until Section 4.2, after we
+ﬁrst develop our approach for performing this inversion.
+
+4. Analysis-by-synthesis optimization
+
+We can now formulate the NLOS reconstruction prob-
+lem. We are given a set of calibrated transient measure-
+
+mentsn ˜Im (t) , m = 1, . . . , Mo, corresponding to pairs of
+
+virtual points {(lm, sm) , m = 1, . . . , M }. We additionally
+adopt parametric forms SNLOS [v] and fs [π] for the NLOS
+surface and reﬂectance, respectively. Then, we recover
+the unknown parameters from the measurements through
+analysis-by-synthesis, also known as inverse rendering: We
+
+search for the parameter values that can be used to simulate
+transients that best match our measurements. Formally, we
+minimize the following loss function,
+
+E (v, π) =
+
+1
+
+2Xm,t(cid:13)(cid:13)(cid:13)
+
+˜Im (t) − I [v, π] (t; lm, sm)(cid:13)(cid:13)(cid:13)
+
+2
+
+.
+
+(7)
+
+We use the notation I [v, π] (t; l, s) to indicate that a ren-
+dered transient is a function, through Equation (1), of the
+surface and reﬂectance parameters v and π. While we use
+the L2 loss for convenience, our technique can be used
+to minimize arbitrary losses differentiable with respect to
+I [v, π] (t; l, s), including losses derived from the noise
+model of the underlying transient sensors [32].
+
+We aim to use gradient-descent optimization, in order to
+efﬁciently minimize the analysis-by-synthesis objective and
+recover the NLOS surface and reﬂectance parameters. Dif-
+ferentiating the loss function E (v, π) of Equation (7) with
+respect to surface and reﬂectance parameters, we obtain
+
+∂E
+∂y
+
+= −Xm,t(cid:16) ˜Im (t) − I (t; lm, sm)(cid:17) ∂I (t; lm, sm)
+
+∂y
+
+, (8)
+
+where y can be either v or π. Evaluating the derivatives
+requires computing not only the transients I, but also their
+derivatives ∂I/∂π and ∂I/∂v with respect to reﬂectance
+and surface parameters. This is challenging because I is
+not an analytical function of these parameters, but is only
+related to them through the surface integral of Equation (1).
+We overcome this obstacle using an approach based
+on differentiable rendering. We prove that the derivatives
+∂I/∂π and ∂I/∂v can be expressed as surface integrals
+analogous to that of Equation (1). This allows us to de-
+rive efﬁcient Monte Carlo rendering algorithms for stochas-
+tically approximating the reﬂectance and surface deriva-
+tives. We can, then, combine these stochastic estimates with
+stochastic gradient descent optimization [39] to minimize
+Equation (7). In the rest of this section, we ﬁrst describe our
+choices for NLOS suface and reﬂectance parameterization,
+then provide an overview of our approach differentiable ren-
+dering approach, deferring details to the supplement.
+
+1548
+
+4.1. Differentiating transients
+
+Surface parameterization. We represent the NLOS sur-
+face SNLOS as a triangular mesh with boundary, which we
+represent using two matrices: First, a 3 × V geometry ma-
+trix V providing the three-dimensional coordinates of its V
+vertices. Second, a 3 × T topology matrix T providing the
+integer vertex indices of its T triangles. We do not assign
+any normal or texture parameters to the vertices, and at ev-
+ery point on the mesh, we assume that the surface normal
+is equal to the corresponding triangle’s face normal. We
+use meshes instead of an implicit representation (e.g., level
+sets [55] or signed distance functions [14] to facilitate efﬁ-
+cient Monte Carlo rendering (see Section 4.2). On the other
+hand, this complicates optimization due to the need to han-
+dle the discrete topology matrix T . As is common in mesh
+optimization, we use differentiable rendering to minimize
+Equation (7) only with respect to mesh vertices. During
+this iterative minimization, we use standard geometry pro-
+cessing tools to improve the mesh topology (Section 5).
+Reﬂectance parameterization. We assume that the NLOS
+surface has a spatially-uniform BRDF, which we represent
+using the widely-adopted GGX microfacet BRDF, as de-
+scribed by Walter et al. [79]. For completeness, we provide
+in the supplement the full expression fs for GGX.
+Derivatives as surface integrals. We now state the main
+technical result of the paper, which allows us to derive
+expressions for the derivatives of the image formation
+model (1) with respect to surface geometry and reﬂectance.
+
+t
+n
+e
+i
+d
+a
+r
+g
+
+0.2
+
+0.1
+
+0
+
+-0.1
+
+700
+
+numerical gradient
+rendered gradient
+
+800
+
+900
+
+1000
+
+1100
+
+1200
+
+#bin
+
+Figure 3. Comparison of gradient estimation techniques: We
+estimate the derivative of a transient with respect to one coordinate
+of one NLOS surface vertex. We plot two estimates, one computed
+using the rendering algorithm of Section 4.2, and another using
+ﬁnite differences and antithetic variates [23]. We observe that the
+numerical gradient is signiﬁcantly noisier than the rendered one,
+despite being computed using twice as many path samples.
+
+surface (that is, on occluding contours [43]), and is common
+in computer vision and graphics problems [2, 67, 49]. De-
+launoy and Prados [16] show that differentiation is possible
+even without approximating the visibility terms v as con-
+stant. As we discuss in the supplement, we can similarly
+extend Proposition 1 to account for visibility. However, in
+practice we found that this complicates Monte Carlo render-
+ing without signiﬁcantly improving the optimization results.
+Surface regularization. We note that, when optimizing ge-
+ometry, we follow Delaunoy and Prados [16] and augment
+the loss function E (v, π) with a normal smoothing regu-
+larization term. We discuss this in the supplement.
+
+4.2. Stochastic estimation and optimization
+
+Proposition 1 The derivatives of a transient I (t; l, s) with
+respect to reﬂectance and mesh vertices can be written as:
+
+We can now describe our two core computational tools
+for efﬁciently minimizing the loss function of Equation (7).
+
+∂I
+∂v
+∂I
+∂π
+
+=ZSNLOS
+=ZSNLOS
+
+gs (x, ˆn (x)) v (x, l) v (x, s) dA (x) ,
+
+gr (x, ˆn (x)) v (x, l) v (x, s) dA (x) ,
+
+for appropriate functions gs and gr.
+
+(9)
+
+(10)
+
+Monte Carlo rendering.
+The surface integrals of
+Equations (1), (9), and (10) can be approximated us-
+ing Monte Carlo integration: We ﬁrst use any proba-
+bility distribution µ on SNLOS to sample a set of points
+{xj ∈ SNLOS, j = 1, . . . , J}. Then, we can form the re-
+spective unbiased and consistent estimates [23]:
+
+We provide the proof and detailed expressions for gs and
+gr in the supplement. In the case of reﬂectance, this simply
+involves changing the order of differentiation and integra-
+tion. However, in the case of mesh vertices, differentiating
+Equation (1) is complicated by the fact that the integration
+over surface is also a function of the mesh vertices. We
+tackle this by using recent results on analytically express-
+ing gradient ﬂows from mesh functionals as surface inte-
+grals [20, 19]. These results have also been used by De-
+launoy and Prados [16] for surface optimization in line-of-
+sight reconstruction problems (e.g., shape from shading).
+
+Our proof makes the approximation that the visibility
+terms v are independent of the mesh geometry. This ap-
+proximation is justiﬁed by the fact that the visibility terms
+have non-zero derivatives only on a zero-measure part of the
+
+J
+
+J
+
+hIi =
+
+Xj=1
+∂v(cid:29) =
+(cid:28) ∂I
+Xj=1
+∂π(cid:29) =
+(cid:28) ∂I
+Xj=1
+
+J
+
+g (xj, ˆn (xj)) v (xj, l) v (xj, s)
+
+,
+
+(11)
+
+µ (xj)
+
+gs (xj, ˆn (xj)) v (xj, l) v (xj, s)
+
+µ (xj)
+
+gr (xj, ˆn (xj)) v (xj, l) v (xj, s)
+
+µ (xj)
+
+,
+
+.
+
+(12)
+
+(13)
+
+In the supplement, we describe a stratiﬁed area sampling
+procedure, which greatly accelerates rendering.
+Stochastic gradient descent. Using these Monte Carlo
+estimates, we can approximately compute the derivatives
+of Equation (8). We can combine these stochastic deriva-
+
+1549
+
+(a) initial mesh
+
+(b) mesh after gradient descent 
+
+(c) EL TOPO
+
+(d) isotropic remeshing
+
+Figure 4. Geometry processing: We show an example of the geometric processing operations we use improve mesh topology. (a) Initial
+mesh. (b) Mesh after gradient descent steps, with self-intersections at several places (see inset). (c) Mesh evolution using El Topo, which
+helps reduce self-intersections. (d) Mesh after isotropic remeshing, which increases mesh detail while decreasing high frequency artifacts.
+
+tive estimates with stochastic gradient descent (SGD) algo-
+rithms to perform the analysis-by-synthesis optimization of
+Equation (7). We use Adam [39] to alternatingly optimize
+for reﬂectance and surface, and provide more details about
+our optimization procedure in the supplement.
+Comparison with numerical differentiation. The perfor-
+mance of SGD optimization critically depends on the abil-
+ity to compute unbiased gradient estimates of low variance.
+To highlight the importance of our differentiable rendering
+formulation in facilitating this optimization, we compare in
+Figure 3 rendered gradient estimates with estimates com-
+puted using a ﬁnite-difference approximation. We observe
+that the numerical gradients have signiﬁcantly higher vari-
+ance; therefore, using them with SGD would greatly slow
+down convergence. Alternatively, we could eliminate vari-
+ance in ﬁnite-difference estimation, by using a quadrature
+technique (e.g., ﬁnite elements) to compute the forward in-
+tegral (1). However, this could introduce strong bias, and
+therefore affect the physical accuracy of the result.
+
+5. Geometry processing operations
+
+As discussed in Section 4.1, we use stochastic gradient
+descent to optimize only the vertices of the mesh SNLOS, and
+not its topology. We instead improve the mesh topology by
+using, at various times during the analysis-by-synthesis op-
+timization, geometry processing tools, as shown in Figure 4.
+Robust surface evolution. As the mesh SNLOS evolves over
+multiple SGD iterations, triangle quality typically degrades.
+Motivated by other optimization-driven mesh editing algo-
+rithms [49], we instead evolve SNLOS using the pipeline of
+Brochu and Bridson [12], implemented in El Topo [11].
+Given initial vertices {vi, i = 1, . . . , V }, and associated
+displacements { dvi, i = 1, . . . , V }, El Topo performs two
+types of operations: First, it alters the displacement vec-
+tors and mesh topology, to produce a non-intersecting mesh.
+Second, it uses local topology operations to improve overall
+mesh quality. In our implementation, we accumulate dis-
+placement vectors dvi over multiple gradient-descent iter-
+ations, then use El Topo to evolve the mesh.
+Progressive reﬁnement and isotropic remeshing. As an
+additional means of regularization, we optimize the NLOS
+
+surface SNLOS in a coarse-to-ﬁne fashion. We start with a
+mesh of a relatively small number of vertices V and tri-
+angles T . Then, during the gradient-descent optimization
+of SNLOS, we progressively increase the number of vertices
+and triangles. We implement mesh reﬁnement by perform-
+ing isotropic remeshing operations [9] with increasing tar-
+get number of vertices. In addition to increasing the mesh
+detail, isotropic remeshing improves mesh quality and ﬁl-
+ters out high-frequency artifacts on the mesh surface.
+
+6. Experiments
+
+Implementation. Our framework has three major compo-
+nents: differentiable rendering, geometry processing, and
+stochastic gradient descent. For rendering, we have devel-
+oped a C++ implementation based on Embree [78] for fast
+CPU execution. For geometry processing, our C++ imple-
+mentation is built using the El Topo [11], CGAL [72] and
+libigl [57] libraries. Finally, both the rendering and geom-
+etry components are interfaced with Pytorch [58], which
+we use for stochastic gradient descent optimization with
+Adam [39]. Our implementation can scale up to optimiza-
+tion of meshes with more than 100, 000 vertices, using 4096
+transient measurements of 1200 temporal bins each. We
+run experiments on a 72-core Amazon EC2 c5.18xlarge in-
+stance, with a runtime of around two hours per scene. Our
+implementation and data are available online [1].
+Scanning conﬁguration.
+In all our experiments, we use
+a confocal scanning procedure, l = s [56]. The scanning
+points are on a 64 × 64 regular grid on the visible surface.
+Initialization. Except where speciﬁed otherwise, we ini-
+tialize using the light cone transform algorithm of O’Toole
+et al. [56]. We convert the resulting albedo volume to a sur-
+face by ﬁrst computing the maximum albedo voxel along
+the depth axis, then pruning albedo values below a thresh-
+old, and ﬁnally triangulating the remaining points.
+
+6.1. Synthetic experiments
+
+We use synthetic data to evaluate the ability of our
+method to reconstruct NLOS surface shape and reﬂectance.
+In our synthetic experiments, NLOS objects are placed at a
+distance of 0.4 m from a visible wall of size 0.5m × 0.5m.
+
+1550
+
+Figure 5. Surface reconstruction examples: (Top) Ground truth. (Middle) Reconstructions using the light cone transform [56]. (Bottom)
+Reconstructions from our method. We can reconstruct shapes with different surface characteristics, including strong non-convexities, large
+depth variations, and bas-relief details.
+
+Figure 6. Alternative initialization:
+(Left) Reconstruction us-
+ing space carving [74]. (Middle, right) Reconstruction from our
+method, shown in same scale (middle) and zoomed-in (right).
+
+We use Monte Carlo transient rendering [62] to synthesize
+data, to which we add noise [32]. In the supplement, we
+show additional simulations evaluating performance for dif-
+ferent numbers of measurements and amounts of noise.
+
+Shape reconstruction. Figures 1 and 5 show reconstruc-
+tions for a variety of NLOS shapes with known Lambertian
+reﬂectance. Our method reconstructs surface details that
+are completely missing from the initial volumetric recon-
+struction. A notable result is the soap bar, where we can
+reconstruct the relief letters (depth 2 transient bins). In the
+
+supplement, we use surface distance metrics to quantify the
+reconstruction improvements.
+Alternative initialization. Figure 6 shows an example
+where we initialize our optimization using the space carv-
+ing algorithm of Tsai et al. [74]. We observe that, despite
+the very crude initialization, our method still produces a re-
+construction of comparable detail to that produced from the
+more accurate volumetric initialization in Figure 1.
+Simultaneous shape and reﬂectance reconstruction. Fig-
+ure 7 shows simulated experiments for reconstructing both
+shape and reﬂectance. We experiment with a range of GGX
+α values, going from very smooth to very rough specular
+reﬂectance (Figure 7(b)-(c)). We observe that our algorithm
+successfully reconstructs a rough estimate of both shape and
+reﬂectance in all cases, but the reconstruction quality dete-
+riorates as the surface becomes more specular.
+
+6.2. Experiments with measured data
+
+We perform experiments using datasets from three real
+NLOS scenes, captured with SPAD-based transient imag-
+ing systems. The ﬁrst dataset is the diffuse ’S’ shape ob-
+
+1551
+
+-3
+
+10
+
+4
+
+3
+
+2
+
+1
+
+t
+n
+e
+i
+s
+n
+a
+r
+t
+ 
+
+d
+e
+r
+e
+d
+n
+e
+R
+
+0
+650
+
+0.1
+
+0.2
+
+0.3
+
+0.4
+
+(bin)
+
+700
+
+750
+
+800
+
+850
+
+900
+
+(a) Sample transient of different parameters
+
+(b) α = 0.1
+
+(c) α = 0.4
+
+𝜶 = 𝟎. 𝟓
+
+𝜶 = 𝟎. 𝟓
+
+𝜶 = 𝟎. 𝟓
+
+𝜶 = 𝟎. 𝟓
+
+𝜶 = 𝟎. 𝟏𝟏𝟕𝟒
+
+𝜶 = 𝟎. 𝟏𝟖𝟔𝟓
+
+𝜶 = 𝟎. 𝟐𝟖𝟏𝟕
+
+𝜶 = 𝟎. 𝟑𝟕𝟕𝟑
+
+(d) α = 0.1
+
+(e) α = 0.2
+
+(f) α = 0.3
+
+(g) α = 0.4
+
+Figure 7. Reconstruction of both shape and reﬂectance: (a) We
+render transients for different GGX α values to visualize the effect
+of reﬂectance on NLOS measurements. (b, c) We also visualize the
+reﬂectance by rendering the scene under ambient light. (d - g) We
+show optimization results for different α values, with the initial
+shape and α at the top, and the optimized results at the bottom.
+
+ject from [56]. As shown in Figure 8, our recovered shape
+closely resembles the ground truth geometry and is overall
+ﬂatter than the volumetric reconstruction.
+
+We additionally show reconstructions for two datasets
+captured with our own implementation of the SPAD setup of
+O’Toole et al. [56], for two NLOS objects of greater surface
+complexity. The ﬁrst object is a diffuse horse bust with ﬁne
+geometric details. As shown in Figure 8, our recovered re-
+sult reproduces the ﬂat and curved surface areas better. The
+second object is a planar scene with a 6mm tall (5 transient
+bins) relief in the shape of two digits. Our recovered result
+better differentiates the digits from the background surface.
+
+7. Discussion
+
+We discuss some limitations of our NLOS surface opti-
+mization framework. Since we do reconstruction by opti-
+mizing a very non-linear loss function, our ﬁnal result can
+be strongly dependent on the initialization. Our experi-
+ments indicate that the quality of the initialization strongly
+affects the extent of the NLOS object that is recovered, but
+has a small impact on reconstruction detail. We hope to ad-
+dress the former issue by incorporating boundary evolution
+techniques into our optimization pipeline. Additionally, our
+pipeline performs worse as the reﬂectance of the NLOS ob-
+ject becomes more specular. We believe this is primarily
+caused by the area sampling procedure we use for render-
+ing, which becomes very inefﬁcient for highly-specular re-
+ﬂectance. We can potentially improve performance in such
+cases by considering multiple importance sampling tech-
+niques [76]. Finally, our results show a difference in per-
+
+(a) scene
+
+(b) initialization
+
+(c) optimized shape
+
+Figure 8. NLOS surface reconstruction using SPAD measure-
+ments: (Top) Diffuse object from [56]. (Middle) A diffuse horse
+statue. (Bottom) Digit relief on a planar object. In our experiment,
+we cover the digits with white paper, to increase SNR.
+
+formance between synthetic and real data. The noise sensi-
+tivity experiments in the supplement indicate that the differ-
+ence is primarily due to inaccurate modeling of SPAD sen-
+sors (Poisson noise, pile-up, jitter [32]). We expect that we
+can close the performance gab by changing the loss function
+of Equation (7) to account for these effects.
+
+Despite these limitations, our experiments demonstrate
+that our surface optimization framework signiﬁcantly im-
+proves the quality of reconstruction possible in NLOS set-
+tings. Because it is based on the rendering equation, our
+framework can be used to process not only transients,
+but all types of radiometric measurements: steady-state,
+continuous-wave time-of-ﬂight, and so on. Therefore, we
+hope it can serve as a platform for exploring NLOS imag-
+ing schemes that use, independently or in combinations, al-
+ternative radiometric sensors, transient or otherwise. Addi-
+tionally, our framework can be used to empirically investi-
+gate fundamental resolution limits inherent in each of these
+sensing modalities, without concern about information loss
+from approximations to the image formation model. Such
+empirical investigations can complement existing theoreti-
+cal results [34] on resolution limits, or even provide insights
+that will eventually lead to such results.
+Acknowledgments. This work was supported by DARPA
+REVEAL (HR0011-16-C-0025, HR0011-16-C-0028) and
+NSF Expeditions (CCF-1730147) grants. CYT gratefully
+acknowledges support from the Bertucci Graduate Fellow-
+ship and the Google PhD Fellowship.
+
+1552
+
+References
+
+[1] NLOS surface optimization with differentiable rendering,
+2019. https://github.com/cmu-ci-lab/nlos_
+surface_optimization. 6
+
+[2] Ben Appleton and Hugues Talbot. Globally minimal surfaces
+by continuous maximal ﬂows. IEEE transactions on pattern
+analysis and machine intelligence, 28(1):106–118, 2006. 2,
+5
+
+[3] Victor Arellano, Diego Gutierrez, and Adrian Jarabo. Fast
+back-projection for non-line of sight reconstruction. Optics
+Express, 25(10):11574–11583, 2017. 2
+
+[4] Dejan Azinovi´c, Tzu-Mao Li, Anton Kaplanyan, and
+Matthias Nießner. Inverse path tracing for joint material and
+lighting estimation. CVPR, 2019. 3
+
+[5] Manel Baradad, Vickie Ye, Adam B Yedidia, Fr´edo Durand,
+William T Freeman, Gregory W Wornell, and Antonio Tor-
+ralba. Inferring light ﬁelds from shadows. In CVPR, 2018.
+1, 2
+
+[6] Mufeed Batarseh, Sergey V Sukhov, Zhiqin Shen, Heath
+Gemar, Reza Rezvani, and Aristide Dogariu. Passive sensing
+around the corner using spatial coherence. Nature communi-
+cations, 9(1):3629, 2018. 1, 2
+
+[7] Jacopo Bertolotti, Elbert G van Putten, Christian Blum,
+Ad Lagendijk, Willem L Vos, and Allard P Mosk. Non-
+invasive imaging through opaque scattering layers. Nature,
+491(7423):232, 2012. 2
+
+[8] Jeremy Boger-Lombard and Ori Katz. Non line-of-sight lo-
+calization by passive optical time-of-ﬂight. ArXiv e-prints,
+Aug. 2018. 1, 2
+
+[9] Mario Botsch and Leif Kobbelt. A remeshing approach to
+multiresolution modeling.
+In Proceedings of the 2004 Eu-
+rographics/ACM SIGGRAPH symposium on Geometry pro-
+cessing, pages 185–192, 2004. 6
+
+[10] Katherine L Bouman, Vickie Ye, Adam B Yedidia, Fr´edo
+Durand, Gregory W Wornell, Antonio Torralba, and
+William T Freeman. Turning corners into cameras: Prin-
+ciples and methods. In ICCV, 2017. 1, 2
+
+[11] Tyson Brochu and Robert Bridson.
+
+El
+
+topo, 2009.
+
+https://www.cs.ubc.ca/labs/imager/tr/
+2009/eltopo/eltopo.html. 6
+
+[12] Tyson Brochu and Robert Bridson. Robust topological oper-
+ations for dynamic explicit surfaces. SIAM Journal on Sci-
+entiﬁc Computing, 31(4):2472–2493, 2009. 6
+
+[13] Mauro Buttafava, Jessica Zeman, Alberto Tosi, Kevin Eli-
+ceiri, and Andreas Velten. Non-line-of-sight imaging using
+a time-gated single photon avalanche diode. Optics Express,
+23(16):20997–21011, 2015. 1, 2, 3
+
+[14] Brian Curless and Marc Levoy. A volumetric method for
+building complex models from range images. In Proceedings
+of the 23rd annual conference on Computer graphics and
+interactive techniques, pages 303–312, 1996. 5
+
+[15] Ama¨el Delaunoy and Marc Pollefeys. Photometric bundle
+In CVPR,
+
+adjustment for dense multi-view 3d modeling.
+2014. 2
+
+[16] Ama¨el Delaunoy and Emmanuel Prados. Gradient ﬂows for
+optimizing triangular mesh-based surfaces: Applications to
+
+3d reconstruction problems dealing with visibility.
+95(2):100–123, 2011. 2, 5
+
+IJCV,
+
+[17] Mathieu Desbrun, Mark Meyer, Peter Schr¨oder, and Alan H
+Implicit fairing of irregular meshes using diffu-
+Barr.
+sion and curvature ﬂow.
+In Proceedings of the 26th an-
+nual conference on Computer graphics and interactive tech-
+niques, pages 317–324. ACM Press/Addison-Wesley Pub-
+lishing Co., 1999. 2
+
+[18] Philip Dutr´e, Kavita Bala, and Philippe Bekaert. Advanced
+
+global illumination. AK Peters, Ltd., 2006. 2, 3
+
+[19] Gerhard Dziuk and Charles M Elliott.
+
+Finite elements
+IMA journal of numerical analysis,
+
+on evolving surfaces.
+27(2):262–292, 2007. 5
+
+[20] Ilya Eckstein, Jean-Philippe Pons, Yiying Tong, Chung
+Chieh Jay Kuo, and Mathieu Desbrun. Generalized surface
+ﬂows for mesh processing. In Proceedings of the ﬁfth Eu-
+rographics symposium on Geometry processing, pages 183–
+192. Eurographics Association, 2007. 2, 5
+
+[21] Olivier Faugeras and Renaud Keriven. Complete dense stere-
+ovision using level set methods. In European conference on
+computer vision, pages 379–393. Springer, 1998. 2
+
+[22] Olivier Faugeras and Renaud Keriven. Variational princi-
+ples, surface evolution, PDE’s, level set methods and the
+stereo problem. IEEE, 2002. 2
+
+[23] George Fishman. Monte Carlo: concepts, algorithms, and
+
+applications. Springer Science & Business Media, 1996. 5
+
+[24] Isaac Freund.
+
+Looking through walls and around cor-
+ners. Physica A: Statistical Mechanics and its Applications,
+168(1):49–65, 1990. 2
+
+[25] Pau Gargallo, Emmanuel Prados, and Peter Sturm. Mini-
+mizing the reprojection error in surface reconstruction from
+images. In ICCV, 2007. 2
+
+[26] Adam Geva, Yoav Y Schechner, Yonatan Chernyak, and Ra-
+jiv Gupta. X-ray computed tomography through scatter. In
+ECCV, 2018. 3
+
+[27] Ioannis Gkioulekas, Anat Levin, and Todd Zickler. An eval-
+uation of computational imaging techniques for heteroge-
+neous inverse scattering. ECCV, 2016. 3
+
+[28] Ioannis Gkioulekas, Shuang Zhao, Kavita Bala, Todd Zick-
+ler, and Todd Levin. Inverse volume rendering with material
+dictionaries. SIGGRAPH Asia, 2013. 3
+
+[29] Otkrist Gupta, Thomas Willwacher, Andreas Velten, Ashok
+Veeraraghavan, and Ramesh Raskar. Reconstruction of hid-
+den 3d shapes using diffuse reﬂections. Optics express,
+20(17):19096–19108, 2012. 2
+
+[30] Felix Heide, Matthew O’Toole, Kai Zhang, David Lindell,
+Steven Diamond, and Gordon Wetzstein. Non-line-of-sight
+imaging with partial occluders and surface normals. ACM
+Transactions on Graphics (ToG), 2019. 2, 4
+
+[31] Felix Heide, Lei Xiao, Wolfgang Heidrich, and Matthias
+Hullin. Diffuse mirrors: 3d reconstruction from diffuse indi-
+rect illumination using inexpensive time-of-ﬂight sensors. In
+CVPR, 2014. 2
+
+[32] Quercus Hernandez, Diego Gutierrez, and Adrian Jarabo.
+A computational model of a single-photon avalanche
+diode sensor
+arXiv, preprint
+arXiv:1703.02635, 2017. 4, 7, 8
+
+imaging.
+
+transient
+
+for
+
+1553
+
+[33] Adrian Jarabo, Belen Masia, Julio Marco, and Diego Gutier-
+rez. Recent advances in transient imaging: A computer
+graphics and vision perspective. Visual Informatics, 1(1):65–
+79, 2017. 1, 2
+
+[34] Achuta Kadambi, Hang Zhao, Boxin Shi, and Ramesh
+Raskar. Occluded imaging with time-of-ﬂight sensors. ACM
+TOG, 35(2):15, 2016. 2, 8
+
+[51] Stephen Lombardi and Ko Nishino. Radiometric scene de-
+composition: Scene reﬂectance, illumination, and geometry
+from rgb-d images. In 3D Vision (3DV), 2016 Fourth Inter-
+national Conference on, pages 305–313. IEEE, 2016. 3
+
+[52] Matthew M Loper and Michael J Black. Opendr: An approx-
+
+imate differentiable renderer. In ECCV, 2014. 3
+
+[53] Stephen R Marschner. Inverse rendering in computer graph-
+
+[35] James T Kajiya. The rendering equation. In ACM Siggraph
+
+ics, phd thesis. Ithaca, NY, USA, 1998. 2, 3
+
+Computer Graphics, volume 20, pages 143–150, 1986. 2
+
+[36] Ori Katz, Pierre Heidmann, Mathias Fink, and Sylvain Gi-
+gan. Non-invasive single-shot imaging through scattering
+layers and around corners via speckle correlations. Nature
+photonics, 8(10):784, 2014. 1, 2
+
+[37] Ori Katz, Eran Small, and Yaron Silberberg. Looking around
+corners and through thin turbid layers in real time with
+scattered incoherent light. Nature photonics, 6(8):549–553,
+2012. 2
+
+[38] Pramook Khungurn, Daniel Schroeder, Shuang Zhao, Kavita
+Bala, and Steve Marschner. Matching real fabrics with
+micro-appearance models. ACM TOG, 35(1):1:1–1:26, 2015.
+3
+
+[39] Diederik Kingma and Jimmy Ba. Adam: A method for
+
+stochastic optimization. ICLR, 2015. 4, 6
+
+[40] Ahmed Kirmani, Tyler Hutchison, James Davis, and Ramesh
+Raskar. Looking around the corner using transient imaging.
+In ICCV, 2009. 1
+
+[41] Ahmed Kirmani, Tyler Hutchison, James Davis, and Ramesh
+Raskar. Looking around the corner using ultrafast transient
+imaging. IJCV, 95(1):13–28, 2011. 1, 2
+
+[42] Jonathan Klein, Christoph Peters, Jaime Mart´ın, Martin Lau-
+renzis, and Matthias B Hullin. Tracking objects outside the
+line of sight using 2d intensity images. Scientiﬁc reports, 6,
+2016. 1, 2
+
+[43] Jan J Koenderink. What does the occluding contour tell us
+
+about solid shape? Perception, 13(3):321–330, 1984. 5
+
+[44] Kalin Kolev and Daniel Cremers. Integration of multiview
+stereo and silhouettes via convex functionals on convex do-
+mains. In ECCV, 2008. 2
+
+[45] Marco La Manna, Fiona Kine, Eric Breitbach, Jonathan
+Jackson, Talha Sultan, and Andreas Velten. Error back-
+projection algorithms for non-line-of-sight imaging.
+IEEE
+transactions on pattern analysis and machine intelligence,
+2018. 2
+
+[46] Aviad Levis, Yoav Y Schechner, Amit Aides, and An-
+thony B. Davis. Airborne three-dimensional cloud tomog-
+raphy. ICCV, 2015. 3
+
+[47] Tzu-Mao Li, Miika Aittala, Fr´edo Durand, and Jaakko Lehti-
+nen. Differentiable monte carlo ray tracing through edge
+sampling. In SIGGRAPH Asia 2018 Technical Papers, page
+222. ACM, 2018. 3
+
+[48] David Lindell, Gordon Wetzstein, and Vladlen Koltun.
+
+Acoustic non-line-of-sight imaging. In CVPR, 2019. 1, 2
+
+[49] Hsueh-Ti Derek Liu, Michael Tao, and Alec Jacobson. Pa-
+parazzi: Surface editing by way of multi-view image pro-
+cessing. ACM TOG, 2018. 2, 5, 6
+
+[50] Xiaochun Liu, Sebastian Bauer, and Andreas Velten. Anal-
+ysis of feature visibility in non-line-of-sight measurements.
+In CVPR, 2019. 1, 2
+
+[54] Mark Meyer, Mathieu Desbrun, Peter Schr¨oder, and Alan H
+Barr. Discrete differential-geometry operators for triangu-
+lated 2-manifolds.
+In Visualization and mathematics III,
+pages 35–57. Springer, 2003. 2
+
+[55] Stanley Osher and Ronald Fedkiw. Level set methods and
+dynamic implicit surfaces, volume 153. Springer Science &
+Business Media, 2006. 2, 5
+
+[56] Matthew O’Toole, David B Lindell, and Gordon Wetzstein.
+Confocal non-line-of-sight imaging based on the light-cone
+transform. Nature, 555(7696):338, 2018. 1, 2, 6, 7, 8
+
+[57] Daniele Panozzo and Alec Jacobson. LIBIGL: A C++ library
+for geometry processing without a mesh data structure. SGP
+2014 Graduate School, 2014. 6
+
+[58] Adam Paszke, Soumith Chintala, Ronan Collobert, Koray
+Kavukcuoglu, Clement Farabet, Samy Bengio, Iain Melvin,
+Jason Weston, and Johnny Mariethoz. Pytorch: Tensors and
+dynamic neural networks in python with strong gpu acceler-
+ation, may 2017. 6
+
+[59] Gustavo Patow and Xavier Pueyo. A survey of inverse ren-
+dering problems. In Computer graphics forum, volume 22,
+pages 663–687. Wiley Online Library, 2003. 3
+
+[60] Gustavo Patow and Xavier Pueyo. A survey of inverse sur-
+face design from light transport behavior speciﬁcation.
+In
+Computer Graphics Forum, volume 24, pages 773–789. Wi-
+ley Online Library, 2005. 3
+
+[61] Adithya Pediredla, Akshat Dave, and Ashok Veeraraghavan.
+Snlos: Non-line-of-sight scanning through temporal focus-
+ing. International Conference on Computational Photogra-
+phy, 2019. 1, 2
+
+[62] Adithya Pediredla, Ashok Veeraraghavan, and Ioannis
+Gkioulekas. Elliptic path sampling for time-gated rendering.
+ACM Transactions on Graphics (TOG), 2019. 7
+
+[63] Adithya K. Pediredla, Mauro Buttafava, Alberto Tosi, Oliver
+Cossairt, and Ashok Veeraraghavan. Reconstructing rooms
+using photon echoes: A plane based model and reconstruc-
+tion algorithm for looking around the corner. In ICCP, 2017.
+1, 2, 3
+
+[64] Matt Pharr, Wenzel Jakob, and Greg Humphreys. Physically
+based rendering: From theory to implementation. Morgan
+Kaufmann, 2016. 2, 3
+
+[65] Jean-Philippe Pons, Renaud Keriven, and Olivier Faugeras.
+Modelling dynamic scenes by registering multi-view image
+sequences. In CVPR, 2005. 2
+
+[66] Charles Saunders, John Murray-Bruce, and Vivek K Goyal.
+Computational periscopy with an ordinary digital camera.
+Nature, 565(7740):472, 2019. 1, 2
+
+[67] Steven M Seitz, Brian Curless, James Diebel, Daniel
+Scharstein, and Richard Szeliski. A comparison and eval-
+uation of multi-view stereo reconstruction algorithms.
+In
+CVPR, 2006. 5
+
+1554
+
+with known illumination conditions. IJCV, 86(2):192–210,
+2010. 2
+
+[84] Shuang Zhao, Lifan Wu, Fr´edo Durand, and Ravi Ra-
+mamoorthi. Downsampling scattering parameters for ren-
+dering anisotropic media. ACM TOG, 35(6):166:1–166:11,
+2016. 3
+
+[68] Brandon M. Smith, Matthew O’Toole, and Mohit Gupta.
+Tracking multiple objects outside the line of sight using
+speckle imaging. In CVPR, 2018. 1, 2
+
+[69] Jan Erik Solem and Niels Chr. A geometric formulation of
+gradient descent for variational problems with moving sur-
+faces. In Scale-Space, pages 419–430. Springer, 2005. 2
+
+[70] Olga Sorkine, Daniel Cohen-Or, Yaron Lipman, Marc Alexa,
+Christian R¨ossl, and H-P Seidel. Laplacian surface editing.
+In Proceedings of the 2004 Eurographics/ACM SIGGRAPH
+symposium on Geometry processing, pages 175–184. ACM,
+2004. 2
+
+[71] Matthew Tancik, Guy Satat, and Ramesh Raskar. Flash
+photography for data-driven hidden scene recovery. arXiv
+preprint arXiv:1810.11710, 2018. 2
+
+[72] The CGAL Project. CGAL User and Reference Manual.
+
+CGAL Editorial Board, 4.13 edition, 2018. 6
+
+[73] Christos Thrampoulidis, Gal Shulkind, Feiu Xu, William T
+Freeman, Jeffrey H Shapiro, Antonio Torralba, Franco N C
+Wong, and Gregory W Wornell. Exploiting occlusion in non-
+line-of-sight active imaging. IEEE Transactions on Compu-
+tational Imaging, 4(3):419–431, 2018. 1, 2
+
+[74] Chia-Yin Tsai, Kiriakos N. Kutulakos, Srinivasa G.
+Narasimhan, and Aswin C. Sankaranarayanan. The geom-
+etry of ﬁrst-returning photons for non-line-of-sight imaging.
+In CVPR, 2017. 1, 2, 7
+
+[75] Eric Veach. Robust monte carlo methods for light transport
+
+simulation. Stanford University Stanford, 1998. 2, 3
+
+[76] Eric Veach and Leonidas J Guibas. Optimally combining
+sampling techniques for monte carlo rendering. In Proceed-
+ings of the 22nd annual conference on Computer graphics
+and interactive techniques, pages 419–428. ACM, 1995. 8
+
+[77] Andreas Velten, Thomas Willwacher, Otkrist Gupta, Ashok
+Veeraraghavan, Moungi G Bawendi, and Ramesh Raskar.
+Recovering three-dimensional shape around a corner using
+ultrafast time-of-ﬂight imaging. Nature Comm., 3:745, 2012.
+1, 2, 3
+
+[78] Ingo Wald, Sven Woop, Carsten Benthin, Gregory S John-
+son, and Manfred Ernst. Embree: a kernel framework for
+efﬁcient cpu ray tracing. ACM TOG, 33(4):143, 2014. 6
+
+[79] Bruce Walter, Stephen R Marschner, Hongsong Li, and Ken-
+neth E Torrance. Microfacet models for refraction through
+rough surfaces.
+In Proceedings of the 18th Eurographics
+conference on Rendering Techniques, pages 195–206. Euro-
+graphics Association, 2007. 5
+
+[80] Shumian Xin, Sotiris Nousias, Kyriakos N. Kutulakos,
+Aswin C. Sankaranarayanan, Srinivasa G. Narasimhan, and
+Ioannis Gkioulekas. A theory of fermat paths for non-line-
+of-sight shape reconstruction. In CVPR, 2019. 1, 2
+
+[81] Feihu Xu, Gal Shulkind, Christos Thrampoulidis, Jeffrey H
+Shapiro, Antonio Torralba, Franco NC Wong, and Gre-
+gory W Wornell. Revealing hidden scenes by photon-
+efﬁcient occlusion-based opportunistic active imaging. Op-
+tics express, 26(8):9945–9962, 2018. 1, 2
+
+[82] Anthony Yezzi and Stefano Soatto. Stereoscopic segmenta-
+
+tion. IJCV, 53(1):31–43, 2003. 2
+
+[83] Kuk-Jin Yoon, Emmanuel Prados, and Peter Sturm. Joint
+estimation of shape and reﬂectance using multiple images
+
+1555
+
+

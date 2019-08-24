@@ -1,0 +1,1931 @@
+D2-Net: A Trainable CNN for Joint Description and Detection of Local Features
+
+Mihai Dusmanu1
+
+2
+
+3
+
+,
+
+,
+
+Ignacio Rocco1
+
+2
+
+,
+
+Tomas Pajdla4
+
+Marc Pollefeys3
+
+5
+
+,
+
+Josef Sivic1
+
+2
+
+,
+
+,
+
+4
+
+Akihiko Torii6
+
+Torsten Sattler7
+
+1DI, ENS 2Inria
+5Microsoft
+
+3Department of Computer Science, ETH Zurich 4CIIRC, CTU in Prague
+6Tokyo Institute of Technology 7Chalmers University of Technology
+
+Abstract
+
+In this work we address the problem of ﬁnding reliable
+pixel-level correspondences under difﬁcult imaging condi-
+tions. We propose an approach where a single convolu-
+tional neural network plays a dual role: It is simultane-
+ously a dense feature descriptor and a feature detector.
+By postponing the detection to a later stage, the obtained
+keypoints are more stable than their traditional counter-
+parts based on early detection of low-level structures. We
+show that this model can be trained using pixel correspon-
+dences extracted from readily available large-scale SfM re-
+constructions, without any further annotations. The pro-
+posed method obtains state-of-the-art performance on both
+the difﬁcult Aachen Day-Night localization dataset and the
+InLoc indoor localization benchmark, as well as competi-
+tive performance on other benchmarks for image matching
+and 3D reconstruction.
+
+1. Introduction
+
+Establishing pixel-level correspondences between im-
+ages is one of the fundamental computer vision problems,
+with applications in 3D computer vision, video compres-
+sion, tracking, image retrieval, and visual localization.
+
+Sparse local features [6–8, 13, 14, 19, 29, 31–33, 49, 54,
+55,59,64] are a popular approach to correspondence estima-
+tion. These methods follow a detect-then-describe approach
+that ﬁrst applies a feature detector [7,13,19,29,31,33,49,64]
+to identify a set of keypoints or interest points. The detec-
+tor then provides image patches extracted around the key-
+points to the following feature description stage [6–8, 14,
+29, 32, 54, 55, 59, 64]. The output of this stage is a compact
+representation for each patch. Sparse local features offer
+a set of advantages: Correspondences can be matched efﬁ-
+
+1D´epartement d’informatique de l’ENS, ´Ecole normale sup´erieure,
+
+CNRS, PSL Research University, 75005
+
+4Czech Institute of Informatics, Robotics, and Cybernetics, Czech
+
+Technical University in Prague
+
+Figure 1: Examples of matches obtained by the D2-Net
+method. The proposed method can ﬁnd image correspondences
+even under signiﬁcant appearance differences caused by strong
+changes in illumination such as day-to-night, changes in depiction
+style or under image degradation caused by motion blur.
+
+ciently via (approximate) nearest neighbor search [36] and
+the Euclidean distance. Sparse features offer a memory ef-
+ﬁcient representation and thus enable approaches such as
+Structure-from-Motion (SfM) [20, 52] or visual localization
+[25, 46, 57] to scale. The keypoint detector typically con-
+siders low-level image information such as corners [19] or
+blob-like structures [29, 31]. As such, local features can
+
+8092
+
+often be accurately localized in an image, which is an im-
+portant property for 3D reconstruction [17, 52].
+
+Sparse local features have been applied successfully un-
+der a wide range of imaging conditions. However, they typ-
+ically perform poorly under extreme appearance changes,
+e.g., between day and night [69] or seasons [45], or in
+weakly textured scenes [58]. Recent results indicate that
+a major reason for this observed drop in performance is the
+lack of repeatability in the keypoint detector: While local
+descriptors consider larger patches and potentially encode
+higher-level structures, the keypoint detector only consid-
+ers small image regions. As a result, the detections are
+unstable under strong appearance changes. This is due to
+the fact that the low-level information used by the detec-
+tors is often signiﬁcantly more affected by changes in low-
+level image statistics such as pixel intensities. Neverthe-
+less, it has been observed that local descriptors can still be
+matched successfully even if keypoints cannot be detected
+reliably [45, 58, 61, 69]. Thus, approaches that forego the
+detection stage and instead densely extract descriptors per-
+form much better in challenging conditions. Yet, this gain
+in robustness comes at the price of higher matching times
+and memory consumption.
+
+In this paper, we aim at obtaining the best of both worlds,
+i.e., a sparse set of features that are robust under challenging
+conditions and efﬁcient to match and to store. To this end,
+we propose a describe-and-detect approach to sparse local
+feature detection and description: Rather than performing
+feature detection early on based on low-level information,
+we propose to postpone the detection stage. We ﬁrst com-
+pute a set of feature maps via a Deep Convolutional Neural
+Network (CNN). These feature maps are then used to com-
+pute the descriptors (as slices through all maps at a speciﬁc
+pixel position) and to detect keypoints (as local maxima of
+the feature maps). As a result, the feature detector is tightly
+coupled with the feature descriptor. Detections thereby
+correspond to pixels with locally distinct descriptors that
+should be well-suited for matching. At the same time, us-
+ing feature maps from deeper layers of a CNN enables us to
+base both feature detection and description on higher-level
+information [67]. Experiments show that our approach re-
+quires signiﬁcantly less memory than dense methods. At
+the same time, it performs comparably well or even better
+under challenging conditions (c.f . Fig. 1) such as day-night
+illumination changes [45] and weakly textured scenes [58].
+Our approach already achieves state-of-the-art performance
+without any training. It can be improved further by ﬁne-
+tuning on a large dataset of landmark scenes [26].
+
+Naturally, our approach has some drawbacks too: Com-
+pared to classical sparse features, our approach is less efﬁ-
+cient due to the need to densely extract descriptors. Still,
+this stage can be done at a reasonable efﬁciency via a single
+forward pass through a CNN. Detection based on higher-
+
+(a) detect-then-describe
+
+(b) detect-and-describe
+
+Figure 2: Comparison between different approaches for fea-
+ture detection and description. Pipeline (a) corresponds to dif-
+ferent variants of the two-stage detect-then-describe approach. In
+contrast, our proposed pipeline (b) uses a single CNN which ex-
+tracts dense features that serve as both descriptors and detectors.
+
+level information inherently leads to more robust but less
+accurate keypoints – yet, we show that our approach is still
+accurate enough for visual localization and SfM.
+
+2. Related Work
+
+Local features. The most common approach to sparse fea-
+ture extraction – the detect-then-describe approach – ﬁrst
+performs feature detection [7, 19, 29, 31, 33] and then ex-
+tracts a feature descriptor [7, 9, 24, 29, 44] from a patch
+centered around each keypoint. The keypoint detector is
+typically responsible for providing robustness or invariance
+against effects such as scale, rotation, or viewpoint changes
+by normalizing the patch accordingly. However, some of
+these responsibilities might also be delegated to the descrip-
+tor [66]. Fig. 2a illustrates the common variations of this
+pipeline, from using hand-crafted detectors [7,19,29,31,33]
+and descriptors [7,9,24,29,44], replacing either the descrip-
+tor [6, 54, 55] or detector [49, 68] with a learned alternative,
+or learning both the detector and descriptor [38, 64]. For ef-
+ﬁciency, the feature detector often considers only small im-
+age regions [64] and typically focuses on low-level struc-
+tures such as corners [19] or blobs [29]. The descriptor
+then captures higher level information in a larger patch
+around the keypoint. In contrast, this paper proposes a sin-
+gle branch describe-and-detect approach to sparse feature
+extraction, as shown in Fig. 2b. As a result, our approach
+is able to detect keypoints belonging to higher-level struc-
+tures and locally unique descriptors. The work closest to
+our approach is SuperPoint [13] as it also shares a deep rep-
+resentation between detection and description. However,
+they rely on different decoder branches which are trained
+independently with speciﬁc losses. On the contrary, our
+method shares all parameters between detection and de-
+scription and uses a joint formulation that simultaneously
+optimizes for both tasks. Our experiments demonstrate that
+our describe-and-detect strategy performs signiﬁcantly bet-
+
+8093
+
+//ter under challenging conditions, e.g., when matching day-
+time and night-time images, than the previous approaches.
+
+Dense descriptor extraction and matching. An alterna-
+tive to the detect-then-describe approach is to forego the
+detection stage and perform the description stage densely
+across the whole image [10, 15, 48, 52].
+In practice, this
+approach has shown to lead to better matching results
+than sparse feature matching [45, 58, 69], particularly un-
+der strong variations in illumination [69]. This identiﬁes
+the detection stage is a signiﬁcant weakness in detect-then-
+describe methods, which has motivated our approach.
+
+Image retrieval. The task of image retrieval [3, 18, 37,
+40, 60, 61] also deals with ﬁnding correspondences between
+images in challenging situations with strong illumination or
+viewpoint changes. Several of these methods start by dense
+descriptor extraction [3, 37, 60, 61] and later aggregate these
+descriptors into a compact image-level descriptor for re-
+trieval. Works most related to our approach are [37,60]: [37]
+develops an approach similar to ours, where an attention
+module is added on top of the dense description stage to
+perform keypoint selection. However, their method is de-
+signed to produce only a few reliable keypoints as to reduce
+the false positive matching rate during retrieval. Our experi-
+ments demonstrate that our approach performs signiﬁcantly
+better for matching and camera localization; [60] implic-
+itly detects a set of keypoints as the global maxima of all
+feature maps, before pooling this information into a global
+image descriptor. [60] has inspired us to detect features as
+local maxima of feature maps.
+
+Object detection. The proposed describe-and-detect ap-
+proach is also conceptually similar to modern approaches
+used in object detection [28, 41, 42]. These methods also
+start by a dense feature extraction step, which is followed
+by the scoring of a set of region proposals. A non-maximal-
+suppression stage is then performed to select only the most
+locally-salient proposals with respect to a classiﬁcation
+score. Although these methods share conceptual similari-
+ties, they target a very different task and cannot be applied
+directly to obtain pixel-wise image correspondences.
+
+This work builds on these previous ideas and proposes a
+method to perform joint detection and descriptions of key-
+points, presented next.
+
+the input image I to obtain a 3D tensor F = F(I), F ∈
+Rh×w×n, where h×w is the spatial resolution of the feature
+maps and n the number of channels.
+
+3.1. Feature Description
+
+As in other previous work [37, 43, 58], the most straight-
+forward interpretation of the 3D tensor F is as a dense set
+of descriptor vectors d:
+
+dij = Fij:, d ∈ Rn ,
+
+(1)
+
+with i = 1, . . . , h and j = 1, . . . , w. These descriptor vec-
+tors can be readily compared between images to establish
+correspondences using the Euclidean distance. During the
+training stage, these descriptors will be adjusted such that
+the same points in the scene produce similar descriptors,
+even when the images contain strong appearance changes.
+In practice, we apply an L2 normalization on the descriptors
+prior to comparing them: ˆdij = dij/kdijk2.
+
+3.2. Feature Detection
+
+A different interpretation of the 3D tensor F is as a col-
+
+lection of 2D responses D [60]:
+
+Dk = F::k, Dk ∈ Rh×w ,
+
+(2)
+
+where k = 1, . . . , n. In this interpretation, the feature ex-
+traction function F can be thought of as n different feature
+detector functions Dk, each producing a 2D response map
+Dk. These detection response maps are analogous to the
+Difference-of-Gaussians (DoG) response maps obtained in
+Scale Invariant Feature Transform (SIFT) [29] or to the cor-
+nerness score maps obtained in Harris’ corner detector [19].
+In our work, these raw scores are post-processed to select
+only a subset of locations as the output keypoints. This pro-
+cess is described next.
+
+Hard feature detection.
+In traditional feature detectors
+such as DoG, the detection map would be sparsiﬁed by per-
+forming a spatial non-local-maximum suppression. How-
+ever, in our approach, contrary to traditional feature detec-
+tors, there exist multiple detection maps Dk (k = 1, . . . , n),
+and a detection can take place on any of them. Therefore,
+for a point (i, j) to be detected, we require:
+
+3. Joint Detection and Description Pipeline
+
+(i, j) is a detection ⇐⇒ Dk
+
+ij is a local max. in Dk ,
+
+Contrary to the classical detect-then-describe ap-
+proaches, which use a two-stage pipeline, we propose to
+perform dense feature extraction to obtain a representation
+that is simultaneously a detector and a descriptor. Because
+both detector and descriptor share the underlying represen-
+tation, we refer to our approach as D2. Our approach is
+illustrated in Fig. 3.
+
+The ﬁrst step of the method is to apply a CNN F on
+
+with k = arg max
+
+t
+
+Dt
+
+ij .
+
+(3)
+
+Intuitively, for each pixel (i, j), this corresponds to select-
+ing the most preeminent detector Dk (channel selection),
+and then verifying whether there is a local-maximum at po-
+sition (i, j) on that particular detector’s response map Dk.
+
+Soft feature detection. During training, the hard detection
+procedure described above is softened to be amenable for
+
+8094
+
+Figure 3: Proposed detect-and-describe (D2) network. A feature extraction CNN F is used to extract feature maps that play a dual role:
+(i) local descriptors dij are simply obtained by traversing all the n feature maps Dk at a spatial position (i, j); (ii) detections are obtained
+by performing a non-local-maximum suppression on a feature map followed by a non-maximum suppression across each descriptor - during
+training, keypoint detection scores sij are computed from a soft local-maximum score α and a ratio-to-maximum score per descriptor β.
+
+back-propagation. First, we deﬁne a soft local-max. score
+
+from the lower resolution feature maps to the higher resolu-
+tion ones, in the following way:
+
+αk
+
+ij =
+
+exp(cid:0)Dk
+ij(cid:1)
+
+P(i′,j ′)∈N (i,j) exp(cid:16)Dk
+
+i′j ′(cid:17)
+
+,
+
+(4)
+
+˜F ρ = F ρ + Xγ<ρ
+
+F γ .
+
+(8)
+
+where N (i, j) is the set of 9 neighbours of the pixel (i, j)
+(including itself). Then, we deﬁne the soft channel selec-
+tion, which computes a ratio-to-max. per descriptor that
+emulates channel-wise non-maximum suppression:
+
+ij = Dk
+βk
+
+ij(cid:14)max
+
+t
+
+Dt
+
+ij .
+
+(5)
+
+Next, in order to take both criteria into account, we maxi-
+mize the product of both scores across all feature maps k to
+obtain a single score map:
+
+Note that the feature maps F ρ have different resolutions. To
+enable the summation in (8), feature maps F γ are resized to
+the resolution of F ρ using bilinear interpolation.
+
+Detections are obtained by applying the post-processing
+described above to the fused feature maps ˜F ρ. In order to
+prevent re-detecting features, we use the following response
+gating mechanism: Starting at the coarsest scale, we mark
+the detected positions; these masks are upsampled (nearest
+neighbor) to the resolutions of the next scales; detections
+falling into marked regions are then ignored.
+
+γij = max
+
+ijβk
+
+k (cid:0)αk
+
+ij(cid:1) .
+
+(6)
+
+4. Jointly optimizing detection and description
+
+Finally, the soft detection score sij at a pixel (i, j) is ob-
+tained by performing an image-level normalization:
+
+This section describes the loss, the dataset used for train-
+
+ing, and provides implementation details.
+
+sij = γij(cid:30) X(i′,j ′)
+
+γi′j ′
+
+.
+
+4.1. Training loss
+
+(7)
+
+Multiscale Detection. Although CNN descriptors have a
+certain degree of scale invariance due to pre-training with
+data augmentations, they are not inherently invariant to
+scale changes and the matching tends to fail in cases with a
+signiﬁcant difference in viewpoint.
+
+In order to obtain features that are more robust to scale
+changes, we propose to use an image pyramid [2], as typi-
+cally done in hand-crafted local feature detectors [27,29,31]
+or even for some object detectors [16]. This is only per-
+formed during test time.
+
+Given the input image I, an image pyramid I ρ contain-
+ing three different resolutions ρ = 0.5, 1, 2 (corresponding
+to half resolution, input resolution, and double resolution)
+is constructed and used to extract feature maps F ρ at each
+resolution. Then, the larger image structures are propagated
+
+In order to train the proposed model, which uses a single
+CNN F for both detection and description, we require an
+appropriate loss L that jointly optimizes the detection and
+description objectives.
+In the case of detection, we want
+keypoints to be repeatable under changes in viewpoint or
+illumination. In the case of description, we want descriptors
+to be distinctive, so that they are not mismatched. To this
+end, we propose an extension to the triplet margin ranking
+loss, which has been successfully used for descriptor learn-
+ing [6, 34], to also account for the detection stage. We will
+ﬁrst review the triplet margin ranking loss, and then present
+our extended version for joint detection and description.
+
+Given a pair of images (I1, I2) and a correspondence
+c : A ↔ B between them (where A ∈ I1, B ∈ I2),
+our version of the triplet margin ranking loss seeks to mini-
+(1)
+mize the distance of the corresponding descriptors ˆd
+A and
+(2)
+ˆd
+B , while maximizing the distance to other confounding
+
+8095
+
+featureextractionsoft detection scoresoft-NMSratio-to-maxjoint detection and descriptionsoft detection modulelocal descriptor(2)
+N2
+
+(1)
+N1
+
+or ˆd
+
+descriptors ˆd
+in either image, which might ex-
+ist due to similarly looking image structures. To this end,
+we deﬁne the positive descriptor distance p(c) between the
+corresponding descriptors as:
+
+p(c) = kˆd
+
+(1)
+
+A − ˆd
+
+(2)
+B k2 ,
+
+(9)
+
+The negative distance n(c), which accounts for the most
+(2)
+confounding descriptor for either ˆd
+B , is deﬁned as:
+n(c) = min(cid:16)kˆd
+
+B k2(cid:17) ,
+
+N2k2, kˆd
+
+A or ˆd
+
+N1 − ˆd
+
+A − ˆd
+
+(10)
+
+(2)
+
+(1)
+
+(1)
+
+(2)
+
+(1)
+
+where the negative samples d
+are the hardest
+negatives that lie outside of a square local neighbourhood
+of the correct correspondence:
+
+and d
+
+(1)
+N1
+
+(2)
+N2
+
+N1 = arg min
+
+P ∈I1
+
+kˆd
+
+(1)
+
+P − ˆd
+
+(2)
+B k2 s.t. kP − Ak∞ > K , (11)
+
+and similarly for N2. The triplet margin ranking loss for a
+margin M can be then deﬁned as:
+
+m(c) = max(cid:0)0, M + p(c)2 − n(c)2(cid:1) .
+
+(12)
+
+Intuitively, this triplet margin ranking loss seeks to enforce
+the distinctiveness of descriptors by penalizing any con-
+founding descriptor that would lead to a wrong match as-
+signment. In order to additionally seek for the repeatability
+of detections, an detection term is added to the triplet mar-
+gin ranking loss in the following way:
+
+m(p(c), n(c)) ,
+
+(13)
+
+L(I1, I2) = Xc∈C
+and s(2)
+
+s(1)
+c s(2)
+
+c
+
+q s(2)
+
+q
+
+Pq∈C s(1)
+
+c
+
+where s(1)
+are the soft detection scores (7) at points
+A and B in I1 and I2, respectively, and C is the set of all
+correspondences between I1 and I2.
+
+c
+
+The proposed loss produces a weighted average of the
+margin terms m over all matches based on their detection
+scores. Thus, in order for the loss to be minimized, the most
+distinctive correspondences (with a lower margin term) will
+get higher relative scores and vice-versa - correspondences
+with higher relative scores are encouraged to have a similar
+descriptors distinctive from the rest.
+
+4.2. Training Data
+
+To generate training data on the level of pixel-wise corre-
+spondences, we used the MegaDepth dataset [26] consisting
+of 196 different scenes reconstructed from 1,070,468 inter-
+net photos using COLMAP [50, 53]. The authors provide
+camera intrinsics / extrinsics and depth maps from Multi-
+View Stereo for 102,681 images.
+
+In order to extract the correspondences, we ﬁrst consid-
+ered all pairs of images with at least 50% overlap in the
+
+sparse SfM point cloud. For each pair, all points of the sec-
+ond image with depth information were projected into the
+ﬁrst image. A depth-check with respect to the depth map
+of the ﬁrst image was run to remove occluded pixels. In
+the end, we obtained 327,036 image pairs. This dataset was
+split in a validation dataset with 18,149 image pairs (from
+78 scenes, each with less than 500 image pairs) and a train-
+ing dataset from the remaining 118 scenes.
+
+4.3. Implementation details
+
+The VGG16 architecture [56], pretrained on Ima-
+geNet [12] and truncated after the conv4 3 layer, was used
+to initialize the feature extraction network F .
+
+Training. The last layer of the dense feature extractor
+(conv4 3) was ﬁne-tuned for 50 epochs using Adam [23]
+with an initial learning rate of 10−3, which was further di-
+vided by 2 every 10 epochs. A ﬁxed number (100) of ran-
+dom image pairs from each scene are used for training at
+every epoch in order to compensate the scene imbalance
+present in the dataset. For each pair, we selected a ran-
+dom 256 × 256 crop centered around one correspondence.
+We use a batch size of 1 and make sure that the training
+pairs present at least 128 correspondences in order to obtain
+meaningful gradients.
+
+Testing. At test time, in order to increase the resolution
+of the feature maps, the last pooling layer (pool3) from F
+with a stride of 2 is replaced by an average pooling layer
+with a stride of 1. Then, the subsequent convolutional lay-
+ers (conv4 1 to conv4 3) are replaced with dilated con-
+volutions [21] with a rate of 2, so that their receptive ﬁeld
+remains unchanged. With these modiﬁcations, the obtained
+feature maps have a resolution of one fourth of the input
+resolution, which allows for more tentative keypoints and a
+better localization. The position of the detected keypoints is
+improved using a local reﬁnement at feature map level fol-
+lowing the approach used in SIFT [29]. The descriptors are
+then bilinearly interpolated at the reﬁned positions.
+
+Our implementation will be available at https://
+
+github.com/mihaidusmanu/d2-net.
+
+5. Experimental Evaluation
+
+The main motivation behind our work was to develop a
+local features approach that is able to better handle chal-
+lenging conditions. Firstly, we evaluate our method on a
+standard image matching task based on sequences with il-
+lumination or viewpoint changes. Then, we present the
+results of our method in two more complex computer vi-
+sion pipelines: 3D reconstruction and visual localization.
+In particular, the visual localization task is evaluated under
+extremely challenging conditions such as registering night-
+time images against 3D models generated from day-time
+
+8096
+
+Method
+
+# Features # Matches
+
+Hes. det. + RootSIFT
+HAN + HN++ [34, 35]
+LF-Net [38]
+SuperPoint [13]
+DELF [37]
+D2 SS (ours)
+D2 MS (ours)
+D2 SS Trained (ours)
+D2 MS Trained (ours)
+
+6
+
+.
+
+3
+
+.
+
+0
+
+.
+
+1
+
+.
+
+4
+
+.
+
+3
+
+.
+
+4
+
+.
+
+6
+
+.
+
+8
+
+.
+
+7K
+9K
+5K
+7K
+6K
+0K
+9K
+0K
+3K
+
+2
+
+.
+
+2
+
+.
+
+0
+
+.
+
+0
+
+.
+
+1
+
+.
+
+1
+
+.
+
+1
+
+.
+
+2
+
+.
+
+2
+
+.
+
+8K
+0K
+2K
+9K
+9K
+2K
+7K
+5K
+8K
+
+Figure 4: Evaluation on HPatches [5] image pairs. For each method, the mean matching accuracy (MMA) as a function of the matching
+threshold (in pixels) is shown. We also report the mean number of detected features and the mean number of mutual nearest neighbor
+matches. Our approach achieves the best overall performance after a threshold of 6.5px, both using a single (SS) and multiple (MS) scales.
+
+imagery [45, 47] and localizing images in challenging in-
+door scenes [58] dominated by weakly textured surfaces and
+repetitive structures. Qualitative examples of the results of
+our method are presented in Fig. 1. Please see the supple-
+mentary material for additional qualitative examples.
+
+5.1. Image Matching
+
+In a ﬁrst experiment, we consider a standard image
+matching scenario where given two images we would like
+to extract and match features between them. For this exper-
+iment, we use the sequences of full images provided by the
+HPatches dataset [5]. Out of the 116 available sequences
+collected from various datasets [1, 5, 11, 22, 32, 62, 65], we
+selected 108.1 Each sequence consists of 6 images of pro-
+gressively larger illumination (52 sequences without view-
+point changes) or viewpoint changes (56 sequences without
+illumination changes). For each sequence, we match the
+ﬁrst against all other images, resulting in 540 pairs.
+
+Evaluation protocol. For each image pair, we match the
+features extracted by each method using nearest neighbor
+search, accepting only mutual nearest neighbors. A match is
+considered correct if its reprojection error, estimated using
+the homographies provided by the dataset, is below a given
+matching threshold. We vary the threshold and record the
+mean matching accuracy (MMA) [32] over all pairs, i.e., the
+average percentage of correct matches per image pair.
+
+As baselines for the classical detect-then-describe strat-
+egy, we use RootSIFT [4, 29] with the Hessian Afﬁne key-
+point detector [31], a variant using a learned shape estimator
+(HesAffNet [35] - HAN) and descriptor (HardNet++ [34] -
+HN++2), and an end-to-end trainable variant (LF-Net [38]).
+We also compare against SuperPoint [13] and DELF [37],
+which are conceptually more similar to our approach.
+
+Results. Fig. 4 shows results for illumination and view-
+point changes, as well as mean accuracy over both condi-
+tions. For each method, we also report the mean number
+of detected features and the mean number of mutual nearest
+
+1We left out sequences with an image resolution beyond 1200 × 1600
+
+pixels as not all methods were able to handle this resolution.
+
+2HardNet++ was trained on the HPatches dataset [5].
+
+neighbor matches per image. As can be seen, our method
+achieves the best overall performance for matching thresh-
+olds of 6.5 pixels or more.
+
+DELF does not reﬁne its keypoint positions - thus, de-
+tecting the same pixel positions at feature map level yields
+perfect accuracy for strict thresholds. Even though power-
+ful for the illumination sequences, the downsides of their
+method when used as a local feature extractor can be seen
+in the viewpoint sequences. For LF-Net, increasing the
+number of keypoints to more than the default value (500)
+worsened the results. However, [38] does not enforce that
+matches are mutual nearest neighbors and we suspect that
+their method is not suited for this type of matching.
+
+As can be expected, our method performs worse
+than detect-then-describe approaches for stricter matching
+thresholds: The latter use detectors ﬁring at low-level blob-
+like structures, which are inherently better localized than
+the higher-level features used by our approach. At the same
+time, our features are also detected at the lower resolution
+of the CNN features.
+
+We suspect that the inferior performance for the se-
+quences with viewpoint changes is due to a major bias in
+our training dataset - roughly 90% of image pairs have a
+change in viewpoint lower than 20◦ (measured as the angle
+between the principal axes of the two cameras).
+
+The proposed pipeline for multiscale detection improves
+the viewpoint robustness of our descriptors, but it also adds
+more confounding descriptors that negatively affect the ro-
+bustness to illumination changes.
+
+5.2. 3D Reconstruction
+
+In a second experiment, we evaluate the performance of
+our proposed describe-and-detect approach in the context
+of 3D reconstruction. This task requires well-localized fea-
+tures and might thus be challenging for our method.
+
+For evaluation, we use three medium-scale internet-
+collected datasets with a signiﬁcant number of different
+cameras and conditions (Madrid Metropolis, Gendarmen-
+markt and Tower of London [63]) from a recent local fea-
+ture evaluation benchmark [51]. All three datasets are small
+enough to allow exhaustive image matching, thus avoiding
+
+8097
+
+123456789100.00.20.40.60.81.0MMAOverall12345678910threshold [px]Illumination12345678910Viewpointthe need for using image retrieval.
+
+Evaluation protocol. We follow the protocol deﬁned
+by [51] and ﬁrst run SfM [50], followed by Multi-View
+Stereo (MVS) [53]. For the SfM models, we report the
+number of images and 3D points, the mean track lengths
+of the 3D points, and the mean reprojection error. For the
+MVS models, we report the number of dense points. Except
+for the reprojection error, larger numbers are better. We use
+RootSIFT [4, 29] (the best perfoming method according to
+the benchmark’s website) and GeoDesc [30], a state-of-the-
+art trained descriptor3 as baselines. Both follow the detect-
+then-describe approach to local features.
+
+Results. Tab. 1 shows the results of our experiment. Over-
+all, the results show that our approach performs on par
+with state-of-the-art local features on this task. This shows
+that, even though our features are less accurately localized
+compared to detect-then-describe approaches, they are suf-
+ﬁciently accurate for the task of SfM as our approach is still
+able to register a comparable number of images.
+
+Our method reconstructs fewer 3D points due to the
+strong ratio test ﬁltering [29] of the matches that is per-
+formed in the 3D reconstruction pipeline. While this ﬁl-
+tering is extremely important to remove incorrect matches
+and prevent incorrect registrations, we noticed that for our
+method it also removes an important number of correct
+matches (20%–25%)4, as the loss used for training our
+method does not take this type of ﬁltering into account.
+
+5.3. Localization under Challenging Conditions
+
+The previous experiments showed that our approach per-
+forms comparable with the state-of-the-art in standard ap-
+plications. In a ﬁnal experiment, we show that our approach
+sets the state-of-the-art for sparse features under two very
+challenging conditions: Localizing images under severe il-
+lumination changes and in complex indoor scenes.
+
+Day-Night Visual Localization. We evaluate our approach
+on the Aachen Day-Night dataset [45, 47] in a local recon-
+struction task [45]: For each of the 98 night-time images
+contained in the dataset, up to 20 relevant day-time im-
+ages with known camera poses are given. After exhaustive
+feature matching between the day-time images in each set,
+their known poses are used to triangulate the 3D structure
+of the scenes. Finally, these resulting 3D models are used
+to localize the night-time query images. This task was pro-
+posed in [45] to evaluate the perfomance of local features in
+the context of long-term localization without the need for a
+speciﬁc localization pipeline.
+
+We use the code and evaluation protocol from [45] and
+report the percentage of night-time queries localized within
+
+3In contrast to [30], we use the ratio test for matching with the threshold
+
+suggested by the authors - 0
+
+89.
+
+.
+
+4Please see the supplementary material for additional details.
+
+Dataset
+
+Method
+
+#Reg. # Sparse. Track Reproj. # Dense
+Images Points Length Error
+Points
+
+Madrid
+RootSIFT [4, 29]
+Metropolis
+GeoDesc [30]
+1344 images D2 MS (ours)
+
+D2 MS trained (ours)
+
+Gendarmen- RootSIFT [4, 29]
+markt
+GeoDesc [30]
+1463 images D2 MS (ours)
+
+D2 MS trained (ours)
+
+Tower of
+RootSIFT [4, 29]
+London
+GeoDesc [30]
+1576 images D2 MS (ours)
+
+D2 MS trained (ours)
+
+500
+495
+501
+495
+
+1035
+1004
+1053
+965
+
+804
+776
+785
+708
+
+116K
+144K
+84K
+144K
+
+338K
+441K
+250K
+310K
+
+239K
+341K
+180K
+287K
+
+6.32 0.60px 1.82M
+5.97 0.65px 1.56M
+6.33 1.28px 1.46M
+6.39 1.35px 1.46M
+
+5.52 0.69px 4.23M
+5.14 0.73px 3.88M
+5.08 1.19px 3.49M
+5.55 1.28px 3.15M
+
+7.76 0.61px 3.05M
+6.71 0.63px 2.73M
+5.32 1.24px 2.73M
+5.20 1.34px 2.86M
+
+Table 1: Evaluation on the Local Feature Evaluation Bench-
+mark [51]. Each method is used for the 3D reconstruction of each
+scene and different statistics are reported. Overall, our method
+obtains a comparable performance with respect to SIFT and its
+trainable counterparts, despite using less well-localized keypoints.
+
+a given error bound on the estimated camera position and
+orientation. We compare against upright RootSIFT descrip-
+tors extracted from DoG keypoints [29], HardNet++ de-
+scriptors with HesAffNet features [34, 35], DELF [37], Su-
+perPoint [13] and DenseSfM [45]. DenseSfM densely ex-
+tracts CNN features using VGG16, followed by dense hier-
+archical matching (conv4 then conv3).
+
+For all methods with a threshold controlling the num-
+ber of detected features (i.e. HAN + HN++, DELF, and
+SuperPoint), we employed the following tuning methodol-
+ogy: Starting from the default value, we increased and de-
+creased the threshold gradually stopping as soon as the re-
+sults started declining. Stricter localization thresholds were
+considered more important than looser ones. We reported
+the best results each method was able to achieve.
+
+As can be seen from Fig. 5, our approach performs better
+than all baselines, especially for strict accuracy thresholds
+for the estimated pose. Our sparse feature approach even
+outperforms DenseSfM, even though the later is using sig-
+niﬁcantly more features (and thus time and memory). The
+results clearly validate our describe-and-detect approach as
+it signiﬁcantly outperforms detect-then-describe methods in
+this highly challenging scenario. The results also show that
+the lower keypoint accuracy of our approach does not pre-
+vent it from being used for applications aiming at estimating
+accurate camera poses.
+
+Indoor Visual Localization. We also evaluate our ap-
+proach on the InLoc dataset [58], a recently proposed
+benchmark dataset for large-scale indoor localization. The
+dataset is challenging due to its sheer size (∼10k database
+images covering two buildings), strong differences in view-
+point and / or illumination between the database and query
+images, and changes in the scene over time.
+
+For this experiment, we integrated our features into two
+variants of the pipeline proposed in [58], using the code re-
+leased by the authors. The ﬁrst variant, Direct Pose Es-
+
+8098
+
+Method
+
+# Features 0
+
+.
+
+5m, 2◦ 1
+
+.
+
+0m, 5◦ 5
+
+0m, 10◦ 10m, 25◦
+
+.
+
+Correctly localized queries (%)
+
+7
+
+.
+
+Upright RootSIFT [29]
+DenseSfM [45]
+HAN + HN++ [34, 35]
+SuperPoint [13]
+DELF [37]
+D2 SS (ours)
+D2 MS (ours)
+D2 SS Trained (ours)
+D2 MS Trained (ours)
+
+11
+
+3K
+
+.
+
+5K / 30K
+11
+
+6
+
+.
+
+.
+
+5K
+6K
+11K
+7K
+
+11
+
+14
+
+19
+
+4K
+5K
+3K
+
+.
+
+.
+
+.
+
+36
+
+7
+
+.
+
+39
+
+8
+
+.
+
+39
+
+8
+
+.
+
+42
+
+8
+
+.
+
+38
+
+8
+
+.
+
+41
+
+8
+
+.
+
+43
+
+9
+
+.
+
+44
+
+44
+
+9
+
+9
+
+.
+
+.
+
+54
+
+1
+
+.
+
+60
+
+2
+
+.
+
+61
+
+2
+
+.
+
+57
+
+1
+
+.
+
+62
+
+2
+
+.
+
+66
+
+3
+
+.
+
+67
+
+3
+
+.
+
+66
+
+3
+
+.
+
+64
+
+3
+
+.
+
+72
+
+5
+
+.
+
+84
+
+7
+
+.
+
+77
+
+6
+
+.
+
+75
+
+5
+
+.
+
+85
+
+7
+
+.
+
+85
+
+7
+
+.
+
+87
+
+8
+
+.
+
+88
+
+88
+
+8
+
+8
+
+.
+
+.
+
+81
+
+6
+
+.
+
+99
+
+0
+
+.
+
+88
+
+8
+
+.
+
+86
+
+7
+
+.
+
+98
+
+0
+
+.
+
+98
+
+0
+
+.
+
+99
+
+0
+
+.
+
+100
+
+100
+
+Figure 5: Evaluation on the Aachen Day-Night dataset [45, 47]. We report the percentage of images registered within given error
+thresholds. Our approach improves upon state-of-the art methods by a signiﬁcant margin under strict pose thresholds.
+
+Method
+
+Localized queries (%)
+0
+
+25m 0
+
+5m 1
+
+0m
+
+.
+
+.
+
+.
+
+Direct PE - Aff. RootSIFT [4, 29, 31]
+Direct PE - D2 MS (ours)
+
+18
+
+.
+
+5 26
+
+4 30
+
+4
+
+.
+
+.
+
+27
+
+.
+
+7 40
+
+4 48
+
+6
+
+.
+
+.
+
+Sparse PE - Aff. RootSIFT – 5MB
+Sparse PE - D2 MS (ours) – 120MB
+Dense PE [58] – 350MB
+
+21
+
+.
+
+3 32
+
+2 44
+
+1
+
+.
+
+.
+
+35
+
+35
+
+.
+
+.
+
+0 48
+
+6 62
+
+6
+
+.
+
+.
+
+0 46
+
+2 58
+
+1
+
+.
+
+.
+
+Sparse PE - Aff. RootSIFT + Dense PV 29
+Sparse PE - D2 MS + Dense PV (ours)
+38
+Dense PE + Dense PV (= InLoc) [58]
+
+41
+
+5 42
+
+0 54
+
+6 54
+
+1 65
+
+5
+
+.
+
+4
+
+.
+
+.
+
+.
+
+.
+
+.
+
+0 56
+
+5 69
+
+9
+
+.
+
+.
+
+.
+
+InLoc + D2 MS (ours)
+
+43
+
+.
+
+2 61
+
+1 74
+
+2
+
+.
+
+.
+
+Table 2: Evaluation on the InLoc dataset [58]. Our method out-
+performs SIFT by a large margin in both Direct PE and Sparse PE
+setups. It also outperforms the dense matching Dense PE method
+when used alone, while requiring less memory during pose esti-
+mation. By a combined approach of D2 and InLoc we obtained a
+new state-of-the art on this dataset.
+
+timation (PE), matches features between the query im-
+age and the top-ranked database image found by image re-
+trieval [3] and uses these matches for pose estimation. In the
+second variant, Sparse PE, the query is matched against the
+top-100 retrieved images, and a spatial veriﬁcation [39] step
+is used to reject outliers matches. The query camera pose
+is then estimated using the database image with the largest
+number of veriﬁed matches.
+
+Tab. 2 compares our approach with baselines from [58]:
+The original Direct / Sparse PE pipelines are based on
+afﬁne covariant features with RootSIFT descriptors [4, 29,
+31]. Dense PE matches densely extracted CNN descrip-
+tors between the images (using guided matching from the
+conv5 to the conv3 layer in a VGG16 network). As
+in [58], we report the percentage of query images localized
+within varying thresholds on their position error, consider-
+ing only images with an orientation error of 10◦ or less. We
+also report the average memory usage of features per image.
+As can be seen, our approach outperforms both baselines.
+
+In addition to Dense PE, the InLoc method proposed
+in [58] also veriﬁes its estimated poses using dense informa-
+tion (Dense Pose Veriﬁcation (PV)): A synthetic image is
+rendered from the estimated pose and then compared to the
+
+query image using densely extracted SIFT descriptors. A
+similarity score is computed based on this comparison and
+used to re-rank the top-10 images after Dense PE. Only this
+baseline outperforms our sparse feature approach, albeit at
+a higher computational cost. Combining our approach with
+Dense PV also improves performance, but not to the level
+of InLoc. This is not surprising, given that InLoc is able
+to leverage dense data. Still, our results show that sparse
+methods can perform close to this strong baseline.
+
+Finally, by combining our method and InLoc, we were
+able to achieve a new state of the art — we employed a pose
+selection algorithm using the Dense PV scores for the top
+10 images of each method. In the end, 182 Dense PE poses
+and 174 Sparse PE (using D2 MS) poses were selected.
+
+6. Conclusions
+
+We have proposed a novel approach to local feature ex-
+traction using a describe-and-detect methodology. The de-
+tection is not done on low-level image structures but post-
+poned until more reliable information is available, and done
+jointly with the image description. We have shown that our
+method surpasses the state-of-the-art in camera localization
+under challenging conditions such as day-night changes and
+indoor scenes. Moreover, even though our features are less
+well-localized compared to classical feature detectors, they
+are also suitable for 3D reconstruction.
+
+An obvious direction for future work is to increase the
+accuracy at which our keypoints are detected. This could
+for example be done by increasing the spatial resolution of
+the CNN feature maps or by regressing more accurate pixel
+positions. Integrating a ratio test-like objective into our loss
+could help to improve the performance of our approach in
+applications such as SfM.
+
+Acknowledgements This work was partially supported by JSPS
+KAKENHI Grant Numbers 15H05313, 16KK0002, EU-H2020
+project LADIO No. 731970, ERC grant LEAP No. 336845,
+CIFAR Learning in Machines & Brains program. The ERDF
+supported J. Sivic under project IMPACT (CZ.02.1.01/0.0/0.0/15
+003/0000468) and T. Pajdla under project Robotics for Industry
+4.0 (CZ.02.1.01/0.0/0.0/15 003/0000470).
+
+8099
+
+02.557.510Distance threshold [m]50%60%70%80%90%100%correctly localized queries01020Orientation threshold [deg]Upright RootSIFTDELFHesAffNet + HardNet++D2SSD2SS TrainedDenseSfMSuperPointReferences
+
+[1] Henrik Aanæs, Anders Lindbjerg Dahl, and Kim Steenstrup
+IJCV, 97(1):18–35,
+
+Interesting interest points.
+
+Pedersen.
+2012. 6
+
+[2] Edward H. Adelson, Charles H. Anderson, James R. Bergen,
+Peter J. Burt, and Joan M. Ogden. Pyramid methods in image
+processing. RCA engineer, 29(6):33–41, 1984. 4
+
+[3] Relja Arandjelovic, Petr Gronat, Akihiko Torii, Tomas Pa-
+jdla, and Josef Sivic. NetVLAD: CNN architecture for
+weakly supervised place recognition. In Proc. CVPR, 2016.
+3, 8
+
+[4] Relja Arandjelovic and Andrew Zisserman. Three things ev-
+In Proc.
+
+eryone should know to improve object retrieval.
+CVPR, 2012. 6, 7, 8
+
+[5] Vassileios Balntas, Karel Lenc, Andrea Vedaldi, and Krys-
+tian Mikolajczyk. HPatches: A benchmark and evaluation of
+handcrafted and learned local descriptors. In Proc. CVPR,
+2017. 6
+
+[6] Vassileios Balntas, Edgar Riba, Daniel Ponsa, and Krystian
+Mikolajczyk. Learning local feature descriptors with triplets
+and shallow convolutional neural networks. In Proc. BMVC.,
+2016. 1, 2, 4
+
+[7] Herbert Bay, Tinne Tuytelaars, and Luc Van Gool. SURF:
+
+Speeded Up Robust Features. In Proc. ECCV, 2006. 1, 2
+
+[8] Matthew Brown, Gang Hua, and Simon Winder. Discrim-
+inative Learning of Local Image Descriptors. IEEE PAMI,
+33(1):43–57, 2011. 1
+
+[9] Michael Calonder, Vincent Lepetit, Christoph Strecha, and
+Pascal Fua. BRIEF: Binary robust independent elementary
+features. In Proc. ECCV, 2010. 2
+
+[10] Christopher B. Choy, JunYoung Gwak, Silvio Savarese, and
+Manmohan Chandraker. Universal Correspondence Net-
+work. In NIPS, 2016. 3
+
+[11] Kai Cordes, Bodo Rosenhahn, and J¨orn Ostermann. Increas-
+ing the accuracy of feature evaluation benchmarks using dif-
+ferential evolution. In IEEE Symposium on Differential Evo-
+lution (SDE), 2011. 6
+
+[12] Jia Deng, Wei Dong, Richard Socher, Li-Jia Li, Kai Li,
+and Li Fei-Fei. ImageNet: A large-scale hierarchical image
+database. In Proc. CVPR, 2009. 5
+
+[13] Daniel DeTone, Tomasz Malisiewicz, and Andrew Rabi-
+novich. SuperPoint: Self-Supervised Interest Point Detec-
+tion and Description. In CVPR Workshops, 2018. 1, 2, 6, 7,
+8
+
+[14] Jingming Dong and Stefano Soatto. Domain-size pooling in
+
+local descriptors: DSP-SIFT. In Proc. CVPR, 2015. 1
+
+[15] Mohammed E. Fathy, Quoc-Huy Tran, M. Zeeshan Zia, Paul
+Vernaza, and Manmohan Chandraker. Hierarchical Metric
+Learning and Matching for 2D and 3D Geometric Corre-
+spondences. In Proc. ECCV, 2018. 3
+
+[16] Pedro F. Felzenszwalb, Ross B. Girshick, David McAllester,
+and Deva Ramanan. Object detection with discriminatively
+trained part-based models.
+IEEE PAMI, 32(9):1627–1645,
+2010. 4
+
+[17] Yasutaka Furukawa and Jean Ponce. Accurate, dense, and
+robust multiview stereopsis. IEEE PAMI, 32(8):1362–1376,
+2010. 2
+
+[18] Albert Gordo, Jon Almaz´an, Jerome Revaud, and Diane Lar-
+lus. End-to-End Learning of Deep Visual Representations
+for Image Retrieval. IJCV, 124(2):237–254, 2017. 3
+
+[19] Chris Harris and Mike Stephens. A combined corner and
+In Proceedings of the Alvey Vision Confer-
+
+edge detector.
+ence, 1988. 1, 2, 3
+
+[20] Jared Heinly, Johannes L. Sch¨onberger, Enrique Dunn, and
+Jan-Michael Frahm. Reconstructing the World* in Six Days
+*(As Captured by the Yahoo 100 Million Image Dataset). In
+Proc. CVPR, 2015. 1
+
+[21] Matthias Holschneider, Richard Kronland-Martinet, Jean
+Morlet, and Ph Tchamitchian. A real-time algorithm for
+signal analysis with the help of the wavelet transform.
+In
+Wavelets, Time Frequency Methods and Phase Space, pages
+286–297. 1990. 5
+
+[22] Nathan Jacobs, Nathaniel Roman, and Robert Pless. Con-
+sistent temporal variations in many outdoor scenes. In Proc.
+CVPR, 2007. 6
+
+[23] Diederik P. Kingma and Jimmy Ba. Adam: A method for
+
+stochastic optimization. In Proc. ICLR, 2015. 5
+
+[24] Stefan Leutenegger, Margarita Chli, and Roland Siegwart.
+BRISK: Binary robust invariant scalable keypoints. In Proc.
+ICCV, 2011. 2
+
+[25] Yunpeng Li, Noah Snavely, Dan Huttenlocher, and Pascal
+Fua. Worldwide Pose Estimation using 3D Point Clouds. In
+Proc. ECCV, 2012. 1
+
+[26] Zhengqi Li and Noah Snavely. MegaDepth: Learning single-
+view depth prediction from internet photos. In Proc. CVPR,
+2018. 2, 5
+
+[27] Tony Lindeberg. Scale-space theory: A basic tool for analyz-
+ing structures at different scales. Journal of applied statistics,
+21(1-2):225–270, 1994. 4
+
+[28] Wei Liu, Dragomir Anguelov, Dumitru Erhan, Christian
+Szegedy, Scott Reed, Cheng-Yang Fu, and Alexander C.
+Berg. SSD: Single shot multibox detector. In Proc. ECCV,
+2016. 3
+
+[29] David G. Lowe. Distinctive image features from scale-
+invariant keypoints. IJCV, 60(2):91–110, 2004. 1, 2, 3, 4,
+5, 6, 7, 8
+
+[30] Zixin Luo, Tianwei Shen, Lei Zhou, Siyu Zhu, Runze Zhang,
+Yao Yao, Tian Fang, and Long Quan. GeoDesc: Learning lo-
+cal descriptors by integrating geometry constraints. In Proc.
+ECCV, 2018. 7
+
+[31] Krystian Mikolajczyk and Cordelia Schmid. Scale & afﬁne
+invariant interest point detectors. IJCV, 60(1):63–86, 2004.
+1, 2, 4, 6, 8
+
+[32] Krystian Mikolajczyk and Cordelia Schmid. A performance
+IEEE PAMI, 27(10):1615–
+
+evaluation of local descriptors.
+1630, 2005. 1, 6
+
+[33] Krystian Mikolajczyk, Tinne Tuytelaars, Cordelia Schmid,
+Andrew Zisserman, Jiri Matas, Frederik Schaffalitzky, Timor
+Kadir, and Luc Van Gool. A comparison of afﬁne region
+detectors. IJCV, 65(1):43–72, 2005. 1, 2
+
+[34] Anastasiya Mishchuk, Dmytro Mishkin, Filip Radenovic,
+and Jiri Matas. Working hard to know your neighbor’s mar-
+gins: Local descriptor learning loss. In NIPS, 2017. 4, 6, 7,
+8
+
+8100
+
+[35] Dmytro Mishkin, Filip Radenovi´c, and Jiˇri Matas. Repeata-
+bility Is Not Enough: Learning Discriminative Afﬁne Re-
+gions via Discriminability. In Proc. ECCV, 2018. 6, 7, 8
+
+[52] Johannes L. Sch¨onberger, Marc Pollefeys, Andreas Geiger,
+and Torsten Sattler. Semantic Visual Localization. In Proc.
+CVPR, 2018. 1, 2, 3
+
+[36] Marius Muja and David G. Lowe. Scalable Nearest Neigh-
+IEEE PAMI,
+
+bor Algorithms for High Dimensional Data.
+36:2227–2240, 2014. 1
+
+[37] Hyeonwoo Noh, Andre Araujo, Jack Sim, Tobias Weyand,
+and Bohyung Han. Largescale image retrieval with attentive
+deep local features. In Proc. ICCV, 2017. 3, 6, 7, 8
+
+[38] Yuki Ono, Eduard Trulls, Pascal Fua, and Kwang Moo Yi.
+LF-Net: Learning local features from images. In Advances
+in Neural Information Processing Systems, 2019. 2, 6
+
+[39] James Philbin, Ondrej Chum, Michael Isard, Josef Sivic, and
+Andrew Zisserman. Object retrieval with large vocabularies
+and fast spatial matching. In Proc. CVPR, 2007. 8
+
+[40] Filip Radenovi´c, Giorgos Tolias, and Ondrej Chum. Fine-
+tuning CNN Image Retrieval with No Human Annotation.
+IEEE PAMI, 2018. 3
+
+[41] Joseph Redmon, Santosh Divvala, Ross Girshick, and Ali
+Farhadi. You Only Look Once: Uniﬁed, real-time object
+detection. In Proc. CVPR, 2016. 3
+
+[42] Shaoqing Ren, Kaiming He, Ross Girshick, and Jian Sun.
+Faster R-CNN: Towards real-time object detection with re-
+gion proposal networks. In NIPS, 2015. 3
+
+[43] Ignacio Rocco, Relja Arandjelovic, and Josef Sivic. Convo-
+lutional neural network architecture for geometric matching.
+In Proc. CVPR, 2017. 3
+
+[44] Ethan Rublee, Vincent Rabaud, Kurt Konolige, and Gary
+Bradski. ORB: An efﬁcient alternative to SIFT or SURF.
+In Proc. ICCV, 2011. 2
+
+[45] Torsten Sattler, Will Maddern, Carl Toft, Akihiko Torii,
+Lars Hammarstrand, Erik Stenborg, Daniel Safari, Masatoshi
+Okutomi, Marc Pollefeys, Josef Sivic, Fredrik Kahl, and
+Tomas Pajdla. Benchmarking 6DoF outdoor visual localiza-
+tion in changing conditions. In Proc. CVPR, 2018. 2, 3, 6, 7,
+8
+
+[46] Torsten Sattler, Akihiko Torii, Josef Sivic, Marc Pollefeys,
+Hajime Taira, Masatoshi Okutomi, and Tomas Pajdla. Are
+Large-Scale 3D Models Really Necessary for Accurate Vi-
+sual Localization? In Proc. CVPR, 2017. 1
+
+[47] Torsten Sattler, Tobias Weyand, Bastian Leibe, and Leif
+Kobbelt. Image retrieval for image-based localization revis-
+ited. In Proc. BMVC., 2012. 6, 7, 8
+
+[48] Nikolay Savinov, Lubor Ladicky, and Marc Pollefeys.
+Matching neural paths: transfer from recognition to corre-
+spondence search. In NIPS, 2017. 3
+
+[49] Nikolay Savinov, Akihito Seki, Lubor Ladicky, Torsten Sat-
+tler, and Marc Pollefeys. Quad-networks: unsupervised
+learning to rank for interest point detection. In Proc. CVPR,
+2017. 1, 2
+
+[50] Johannes Lutz Sch¨onberger and Jan-Michael Frahm.
+Structure-from-motion revisited. In Proc. CVPR, 2016. 5,
+7
+
+[51] Johannes L. Sch¨onberger, Hans Hardmeier, Torsten Sattler,
+and Marc Pollefeys. Comparative evaluation of hand-crafted
+and learned local features. In Proc. CVPR, 2017. 6, 7
+
+[53] Johannes Lutz Sch¨onberger, Enliang Zheng, Marc Pollefeys,
+and Jan-Michael Frahm. Pixelwise view selection for un-
+structured multi-view stereo. In Proc. ECCV, 2016. 5, 7
+
+[54] Edgar Simo-Serra, Eduard Trulls, Luis Ferraz,
+
+Iasonas
+Kokkinos, Pascal Fua, and Francesc Moreno-Noguer. Dis-
+criminative Learning of Deep Convolutional Feature Point
+Descriptors. In Proc. ICCV, 2015. 1, 2
+
+[55] Karen Simonyan, Andrea Vedaldi, and Andrew Zisserman.
+Learning Local Feature Descriptors Using Convex Optimi-
+sation. IEEE PAMI, 36(8):1573–1585, 2014. 1, 2
+
+[56] Karen Simonyan and Andrew Zisserman. Very deep convo-
+lutional networks for large-scale image recognition. In Proc.
+ICLR, 2015. 5
+
+[57] Linus Sv¨arm, Olof Enqvist, Fredrik Kahl, and Magnus Os-
+karsson. City-Scale Localization for Cameras with Known
+Vertical Direction. IEEE PAMI, 39(7):1455–1461, 2017. 1
+
+[58] Hajime Taira, Masatoshi Okutomi, Torsten Sattler, Mircea
+Cimpoi, Marc Pollefeys, Josef Sivic, Tomas Pajdla, and Ak-
+ihiko Torii.
+InLoc: Indoor visual localization with dense
+matching and view synthesis. In Proc. CVPR, 2018. 2, 3,
+6, 7, 8
+
+[59] Engin Tola, Vincent Lepetit, and Pascal Fua. DAISY: An
+Efﬁcient Dense Descriptor Applied to Wide-Baseline Stereo.
+IEEE PAMI, 32(5):815–830, 2010. 1
+
+[60] Giorgos Tolias, Ronan Sicre, and Herv´e J´egou. Particular
+object retrieval with integral max-pooling of cnn activations.
+In Proc. ICLR, 2016. 3
+
+[61] Akihiko Torii, Relja Arandjelovic, Josef Sivic, Masatoshi
+Okutomi, and Tomas Pajdla. 24/7 Place Recognition by View
+Synthesis. In Proc. CVPR, 2015. 2, 3
+
+[62] Vassilios Vonikakis, Dimitris Chrysostomou, Rigas Kousk-
+ouridas, and Antonios Gasteratos.
+Improving the robust-
+ness in feature detection by local contrast enhancement.
+In IEEE International Conference on Imaging Systems and
+Techniques (IST), 2012. 6
+
+[63] Kyle Wilson and Noah Snavely. Robust global translations
+
+with 1dsfm. In Proc. ECCV, 2014. 6
+
+[64] Kwang Moo Yi, Eduard Trulls, Vincent Lepetit, and Pascal
+In Proc.
+
+Fua. LIFT: Learned invariant feature transform.
+ECCV, 2016. 1, 2
+
+[65] Guoshen Yu and Jean-Michel Morel. ASIFT: An algorithm
+for fully afﬁne invariant comparison. Image Processing On
+Line, 1:11–38, 2011. 6
+
+[66] Amir R. Zamir, Tilman Wekel, Pulkit Agrawal, Colin Wei,
+Jitendra Malik, and Silvio Savarese. Generic 3D Represen-
+tation via Pose Estimation and Matching.
+In Proc. ECCV,
+2016. 2
+
+[67] Matthew D. Zeiler and Rob Fergus. Visualizing and under-
+
+standing convolutional networks. In Proc. ECCV, 2014. 2
+
+[68] Linguang Zhang and Szymon Rusinkiewicz. Learning to De-
+
+tect Features in Texture Images. In Proc. CVPR, 2018. 2
+
+[69] Hao Zhou, Torsten Sattler, and David W. Jacobs. Evaluating
+In ECCV Work-
+
+Local Features for Day-Night Matching.
+shops, 2016. 2, 3
+
+8101
+
+

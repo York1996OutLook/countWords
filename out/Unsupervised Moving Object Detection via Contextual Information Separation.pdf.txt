@@ -1,0 +1,1267 @@
+Unsupervised Moving Object Detection via
+
+Contextual Information Separation
+
+Yanchao Yang*
+
+UCLA Vision Lab
+
+Antonio Loquercio*
+University of Zurich
+
+Davide Scaramuzza
+University of Zurich
+
+Stefano Soatto
+
+UCLA Vision Lab
+
+Abstract
+
+We propose an adversarial contextual model for detect-
+ing moving objects in images. A deep neural network is
+trained to predict the optical ﬂow in a region using infor-
+mation from everywhere else but that region (context), while
+another network attempts to make such context as uninfor-
+mative as possible. The result is a model where hypotheses
+naturally compete with no need for explicit regularization
+or hyper-parameter tuning. Although our method requires
+no supervision whatsoever, it outperforms several methods
+that are pre-trained on large annotated datasets. Our model
+can be thought of as a generalization of classical varia-
+tional generative region-based segmentation, but in a way
+that avoids explicit regularization or solution of partial dif-
+ferential equations at run-time. We publicly release all our
+code and trained networks.1
+
+1. Introduction
+
+Consider Fig. 1: Even relatively simple objects, when
+moving in the scene, cause complex discontinuous changes
+in the image. Being able to rapidly detect independently
+moving objects in a wide variety of scenes from images is
+functional to the survival of animals and autonomous vehi-
+cles alike. We wish to endow artiﬁcial systems with simi-
+lar capabilities, without the need to pre-condition or learn
+similar-looking backgrounds. This problem relates to mo-
+tion segmentation, foreground/background separation, vi-
+sual attention, video object segmentation as we discuss in
+Sect. 3. For now, we use the words “object” or “foreground”
+informally2 to mean (possibly multiple) connected regions
+of the image domain, to be distinguished from their sur-
+rounding, which we call “background” or “context,” accord-
+ing to some criterion.
+
+Since objects exist in the scene, not in the image, a
+method to infer them from the latter rests on an operational
+
+1http://rpg.ifi.uzh.ch/unsupervised_detection.html
+*These two authors contributed equally.
+
+Correspondence to
+
+yanchao.yang@cs.ucla.edu and loquercio@ifi.uzh.ch
+2The precise meaning of these terms will be formalized in Sect. 2.
+
+Figure 1: An encounter between a hawk and a drone (top). The
+latter will not survive without being aware of the attack. Detecting
+moving objects is crucial to the survival of animal and artiﬁcial
+systems alike. Note that the optical ﬂow (middle row) is quite di-
+verse within the region where the hawk projects: It changes both
+in space and time. Grouping this into a moving object (bottom
+row) is our goal in this work. Note the object is detected by our
+algorithm across multiple scales, partial occlusions from the view-
+point, and complex boundaries.
+
+deﬁnition based on measurable image correlates. We call
+moving objects regions of the image whose motion can-
+not be explained by that of their surroundings.
+In other
+words, the motion of the background is uninformative of
+the motion of the foreground and vice-versa. The “informa-
+tion separation” can be quantiﬁed by the information reduc-
+tion rate (IRR) between the two as deﬁned in Sect. 2. This
+naturally translates into an adversarial inference criterion
+that has close connections with classical variational region-
+based segmentation, but with a twist: Instead of learning a
+generative model of a region that explains the image in that
+region as well as possible, our approach yields a model that
+tries to explain it as poorly as possible using measurements
+from everywhere else but that region.
+
+In generative model-based segmentation, one can always
+explain the image with a trivial model, the image itself. To
+avoid that, one has to impose model complexity bounds,
+bottlenecks or regularization. Our model does not have ac-
+cess to trivial solutions, as it is forced to predict a region
+without looking at it. What we learn instead is a contex-
+tual adversarial model, without the need for explicit reg-
+ularization, where foreground and background hypotheses
+
+879
+
+compete to explain the data with no pre-training nor (hy-
+per)parameter selection. In this sense, our approach relates
+to adversarial learning and self-supervision as discussed in
+Sect. 3.
+
+The result is a completely unsupervised method, un-
+like many recent approaches that are called unsupervised
+but still require supervised pre-training on massive labeled
+datasets and can perform poorly in contexts that are not well
+represented in the training set. Despite the complete lack of
+supervision, our method performs competitively even com-
+pared with those that use supervised pre-training (Sect. 4).
+
+Summary of Contributions
+
+Our method captures the desirable features of variational
+region-based segmentation: Robustness, lack of thresholds
+or tunable parameters, no need for training. However,
+it does not require solving a partial differential equation
+(PDE) at run-time, nor to pick regularizers or Lagrange
+multipliers, nor to restrict the model to one that is simple-
+enough to be tractable analytically.
+It also exploits the
+power of modern deep learning methods: It uses deep neu-
+ral networks as the model class, optimizes it efﬁciently with
+stochastic gradient descent (SGD), and can be computed ef-
+ﬁciently at run time. However, it requires no supervision
+whatsoever.
+
+While our approach has close relations to both classical
+region-based variational segmentation and generative mod-
+els, as well as modern deep learning-based self-supervision,
+discussed in detail in Sect. 3, to the best of our knowledge,
+it is the ﬁrst adversarial contextual model to detect moving
+objects in images. It achieves better or similar performance
+compare to unsupervised methods on the three most com-
+mon benchmarks, and it even edges out methods that rely
+on supervised pre-training, as described in Sect. 4. On one
+of the considered benchmarks, it outperforms all methods
+using supervision, which illustrates the generalizability of
+our approach. In Sect. 5 we describe typical failure modes
+and discuss limitations of our method.
+
+2. Method
+
+We call “moving object(s)” or “foreground” any region
+of an image whose motion is unexplainable from the con-
+text. A “region of an image” Ω is a compact and multiply-
+connected subset of the domain of the image, discretized
+into a lattice D. “Context” or “background” is the comple-
+ment of the foreground in the image domain, Ωc “ DzΩ.
+Given a measured image I and/or its optical ﬂow to the next
+(or previous) image u, foreground and background are un-
+certain, and therefore treated as random variables. A ran-
+dom variable u1 is “unexplainable” from (or “uninformed”
+by) another u2 if their mutual information Ipu1; u2q is zero,
+that is if their joint distribution equals the product of the
+marginals, P pu1, u2q “ P pu1qP pu2q.
+
+More speciﬁcally, the optical ﬂow u : D1 Ñ R2 maps
+the domain of an image I1 : D1 Ñ R3
+` onto the domain D2
+of I2, so that if xi P D1, then xi ` ui P D2, where ui “
+upxiq up to a discretization into the lattice and cropping of
+the boundary. Ideally, if the brightness constancy constraint
+equation that deﬁnes optical ﬂow was satisﬁed, we would
+have I1 “ I2 ˝ u point-wise.
+
+If we consider the ﬂow at two locations i, j, we can for-
+malize the notion of foreground as a region Ω that is unin-
+formed by the background:
+
+#Ipui, uj|Iq ą 0, i, j P Ω
+
+Ipui, uj|Iq “ 0, i P Ω, j P DzΩ.
+
+(1)
+
+As one would expect, based on this deﬁnition, if the domain
+of an object is included in another, then they inform each
+other (see appendix [40]).
+
+2.1. Loss function
+
+We now operationalize the deﬁnition of foreground into
+a criterion to infer it. We use the information reduction rate
+(IRR) γ, which takes two subsets x, y Ă D as input and
+returns a non-negative scalar:
+
+γpx|y; Iq “
+
+Ipux, uy|Iq
+
+Hpux|Iq
+
+“ 1 ´
+
+Hpux|uy, Iq
+
+Hpux|Iq
+
+(2)
+
+where H denotes (Shannon) entropy.
+It is zero when the
+two variables are independent, but the normalization pre-
+vents the trivial solution (empty set).3 As proven in the ap-
+pendix [40], objects as we deﬁned them are the regions that
+minimize the following loss function
+
+LpΩ; Iq “ γpΩ|Ωc; Iq ` γpΩc|Ω; Iq.
+
+(3)
+
+Note that L does not have a complexity term, or regular-
+izer, as one would expect in most region-based segmenta-
+tion methods. This is a key strength of our approach, that
+involves no modeling hyperparameters, as we elaborate on
+in Sect. 3.
+
+Tame as it may look, (3) is intractable in general. For
+simplicity we indicate the ﬂow inside the region(s) Ω (fore-
+ground) with uin “ tui, i P Ωu, and similarly for uout, the
+ﬂow in the background Ωc. The only term that matters in
+the IRR is the ratio Hpuin|uout, Iq{Hpuin|Iq, which is
+
+ş log P puin|uout, IqdP puin|uout, Iq
+
+ş log P puin|IqdP puin|Iq
+
+(4)
+
+that measures the information transfer from the background
+to the foreground. This is minimized when knowledge of
+
+3A small constant 0 ă ǫ ! 1 is added to the denominator to avoid
+singularities, and whenever x ‰ H, Hpux|Iq " ǫ, thus we will omit ǫ
+from now on.
+
+880
+
+Figure 2: During training, our method entails two modules. One is the generator (G) which produces a mask of the object by looking at
+the image and the associated optical ﬂow. The other module is the inpainter (I) which tries to inpaint back the optical ﬂow masked out by
+the corresponding mask. Both modules employ the encoder-decoder structure with skip connections. However, the inpainter (I) is equipped
+with two separate encoding branches. See Sect. 4.1 for network details.
+
+t
+
+Let me 
+have a try 
+
+t+1 
+
+Now I 
+know how 
+to do it! 
+
+foreground path 
+
+background path 
+
+foreground path 
+
+background path 
+
+Part of the  
+dog/background 
+is observed. 
+Easy! 
+
+ 
+Have no clue 
+where the 
+dog/bkgd moves. 
+Difficult… 
+
+Good 
+
+reconstruction! 
+
+Bad 
+
+reconstruction! 
+
+Figure 3: The two diagrams illustrate the learning process of the mask generator (G), after the inpainter (I) has learned how to accurately
+inpaint a masked ﬂow. The upper diagram shows a poorly trained mask generator which does not precisely detect the object. Due to the
+imprecise detection, the inpainter can observe part of the object’s ﬂow, and perform an accurate reconstruction. At the same time, the
+inpainter partially observes the background’s ﬂow in the complementary mask. Consequently, it can precisely predict missing parts of the
+background’s ﬂow. In contrast, the lower diagram shows a fully trained mask generator which can precisely tell apart the object from the
+background. In this case, the inpainter observes the ﬂow only outside the object and has no information to predict the ﬂow inside it. At
+initialization time the inpainter does not know the conditionals to inpaint masked ﬂows. Therefore, we propose to train both the generator
+and the inpainter jointly in an adversarial manner (see Sect. 2).
+
+the background ﬂow is sufﬁcient to predict the foreground.
+To enable computation, we have to make draconian, yet
+common, assumptions on the underlying probability model,
+namely that
+
+mean given the image and the complementary observation.
+Here we assume φpΩ, H, Iq “ 0, since given a single image
+the most probable guess of the ﬂow is zeros. With these
+assumptions, (4) can be simpliﬁed, to
+
+}x}2
+
+σ2 ˙
+
+P puin “ x|Iq 9 expˆ´
+P puin “ x|uout “ y, Iq 9 expˆ´
+˙
+where φpΩ, y, Iq “ ş uindP puin|uout, Iq is the conditional
+
+}x ´ φpΩ, y, Iq}2
+
+(5)
+
+σ2
+
+881
+
+ş }uin ´ φpΩ, uout, Iq}2dP puin|uout, Iq
+
+«
+
+i“1 }ui
+
+ş }uin}2dP puin|Iq
+řN
+
+« řN
+
+in ´ φpΩ, ui
+in}2
+i“1 }ui
+
+out, Iq}2
+
+(6)
+
+where N “ |D| is the cardinality of D, or the number of
+ﬂow samples available. Finally, our loss (3) to be minimized
+can be approximated as
+
+This loss has interesting connections to classical region-
+based segmentation, but with a twist as we discuss next.
+
+out, Iq}2
+
+3. Related Work
+
+To understand the relation of our approach to classical
+methods, consider the simplest model for region-based seg-
+mentation [8]
+
+.
+
+(7)
+
+in ´ φpΩ, ui
+i“1 }ui
+
+in}2 ` ǫ
+
+i“1 }ui
+
+LpΩ; Iq “ 1 ´ řN
+řN
+` 1 ´ řN
+řN
+
+i“1 }ui
+
+out ´ φpΩc, ui
+out}2 ` ǫ
+i“1 }ui
+
+in, Iq}2
+
+In order to minimize this loss, we have to choose a repre-
+sentation for the unknown region Ω and for the function φ.
+
+2.2. Function class
+
+The region Ω that minimizes (7) belongs to the power
+set of D, that is the set of all possible subsets of the image
+domain, which has exponential complexity.4 We represent
+it with the indicator function
+
+χ : D Ñ t0, 1u
+
+i
+
+ÞÑ 1 if i P Ω; 0 otherwise
+
+so that the ﬂow inside the region Ω can be written as ui
+χui, and outside as ui
+
+out “ p1 ´ χqui.
+
+(8)
+
+in “
+
+Similarly, the function φ is non-linear, non-local, and
+high-dimensional, as it has to predict the ﬂow in a region
+of the image of varying size and shape, given the ﬂow in a
+different region. In other words, φ has to capture the context
+of a region to recover its ﬂow.
+
+Characteristically for the ages, we choose both φ and χ
+to be in the parametric function class of deep convolutional
+neural networks, as shown in Fig. 2, the speciﬁcs of which
+are in Sect. 4.1. We indicate the parameters with w, and the
+corresponding functions φw1 and χw2 . Accordingly, after
+discarding the constants, the negative loss (7) can be written
+as a function of the parameters
+
+}χw2pui ´ φw1pχw2 , ui
+
+out, Iqq}2
+
+Lpw1, w2; Iq “ ři
+
+}p1 ´ χw2qpui ´ φw1p1 ´ χw2 , ui
+
+}ui
+
+in}2
+
+ři
+
+in, Iq}2
+
+(9)
+
+` ři
+
+}ui
+
+out}2
+
+ři
+
+φw1 is called the inpainter network, and must be chosen to
+minimize the loss above. At the same time, the region Ω,
+represented by the parameters w2 of its indicator function
+χw2 called mask generator network, should be chosen so
+that uout is as uninformative as possible of uin, and there-
+fore the same loss is maximized with respect to w2. This
+naturally gives rise to a minimax problem:
+
+ˆw “ arg min
+w1
+
+max
+w2
+
+Lpw1, w2; Iq.
+
+(10)
+
+4In the continuum, it belongs to the inﬁnite-dimensional set of compact
+
+and multiply-connected regions of the unit square.
+
+|uoutpxq ´ co|2dx
+
+LpΩ, ci, coq “żΩ
+
+|uinpxq ´ ci|2dx `żΩc
+
+(11)
+typically combined with a regularizing term, for instance
+the length of the boundary of Ω. This is a convex inﬁnite-
+dimensional optimization problem that can be solved by nu-
+merically integrating a partial differential equation (PDE).
+The result enjoys signiﬁcant robustness to noise, provided
+the underlying scene has piecewise constant radiance and
+is measured by image irradiance, to which it is related
+by a simple “signal-plus-noise” model. Not many scenes
+of interest have piecewise constant radiance, although this
+method has enjoyed a long career in medical image anal-
+ysis.
+If we enrich the model by replacing the constants
+ci with smooth functions, φipxq, we obtain the celebrated
+Mumford-Shah functional [25], also optimized by inte-
+grating a PDE. Since smooth functions are an inﬁnite-
+dimensional space, regularization is needed, which opens
+the Pandora box of regularization criteria, not to mention
+hyperparameters: Too much regularization and details are
+missed; too little and the model gets stuck in noise-induced
+minima. A modern version of this program would replace
+φpxq with a parametrized model φwpxq, for instance a deep
+neural network with weights w pre-trained on a dataset D.
+In this case, the loss is a function of w, with natural model
+complexity bounds. Evaluating φw at a point inside, x P Ω,
+requires knowledge of the entire function u inside Ω, which
+we indicate with φwpx, uinq:
+
+|uoutpxq´φwpx, uoutq|2dx.
+
+żΩ
+
+|uinpxq´φwpx, uinq|2dx`żΩc
+
+(12)
+Here, a network can just map φwpx, uinq “ uin providing
+a trivial solution, avoided by introducing (architectural or
+information) bottlenecks, akin to explicit regularizers. We
+turn the table around and use the outside to predict the inside
+and vice-versa:
+
+|uoutpxq´φwpx, uinq|2dx
+
+żΩ
+
+|uinpxq´φwpx, uoutq|2dx`żΩc
+
+(13)
+After normalization and discretization, this leads to our loss
+function (7). The two regions compete: for one to grow, the
+other has to shrink. In this sense, our approach relates to
+region competition methods, and speciﬁcally Motion Com-
+petition [12], but also to adversarial training, since we can
+
+882
+
+think of φ as the “discriminator” presented in a classiﬁca-
+tion problem (GAN [1]), reﬂected in the loss function we
+use. This also relates to what is called “self-supervised
+learning,” a misnomer since there is no supervision, just
+a loss function that does not involve externally annotated
+data. Several variants of our approach can be constructed by
+using different norms, or correspondingly different models
+for the joint and marginal distributions (5).
+
+More broadly, the ability to detect independently moving
+objects is primal, so there is a long history of motion-based
+segmentation, or moving object detection. Early attempts
+to explicitly model occlusions include the layer model [38]
+with piecewise afﬁne regions, with computational complex-
+ity improvements using graph-based methods [30] and vari-
+ational inference [11, 6, 32, 43] to jointly optimize for mo-
+tion estimation and segmentation; [26] use of long-term
+temporal consistency and color constancy, making however
+the optimization more difﬁcult and sensitive to parameter
+choices. Similar ideas were applied to motion detection in
+crowds [5], trafﬁc monitoring [4] and medical image anal-
+ysis [14]. Our work also related to the literature on visual
+attention [16, 7].
+
+More recent data-driven methods [36, 35, 9, 31] learn
+discriminative spatio-temporal features and differ mainly
+for the type of inputs and architectures. Inputs can be ei-
+ther image pairs [31, 9] or image plus dense optical ﬂow
+[36, 35]. Architectures can be either time-independent [35],
+or with recurrent memory [36, 31]. Overall, those methods
+outperform traditional ones on benchmark datasets [26, 29],
+but at the cost of requiring a large amount of labeled training
+data and with evidence of poor generalization to previously
+unseen data.
+
+It must be noted that, unlike in Machine Learning at
+large, it is customary in video object segmentation to call
+“unsupervised” methods that do rely on massive amounts
+of manually annotated data, so long as they do not require
+manual annotation at run-time. We adopt the broader use of
+the term where unsupervised means that there is no super-
+vision of any kind both at training and test time.
+
+Like classical variational methods, our approach does
+not need any annotated training data. However, like modern
+learning methods, our approach learns a contextual model,
+which would be impossible to engineer given the complex-
+ity of image formation and scene dynamics.
+
+4. Experiments
+
+We compare our approach to a set of state-of-the-art
+baselines on the task of video object segmentation to evalu-
+ate the accuracy of detection. We ﬁrst present experiments
+on a controlled toy-example, where the assumptions of our
+model are perfectly satisﬁed. The aim of this experiment is
+to get a sense of the capabilities of the presented approach in
+ideal conditions. In the second set of experiments, we evalu-
+
+ate the effectiveness of the proposed model on three public,
+widely used datasets: Densely Annotated VIdeo Segmen-
+tation (DAVIS) [29], Freiburg-Berkeley Motion Segmenta-
+tion (FBMS59) [26], and SegTrackV2 [37]. Provided the
+high degree of appearance and resolution differences be-
+tween them, these datasets represent a challenging bench-
+mark for any moving object segmentation method. While
+the DAVIS dataset has always a single object per scene,
+FBMS and SegTrackV2 scenes can contain multiple objects
+per frame. We show that our method not only outperforms
+the unsupervised approaches, but even edges out other su-
+pervised algorithms that, in contrast to ours, have access
+to a large amount of labeled data with precise manual seg-
+mentation at training time. For quantitative evaluation, we
+employ the most common metric for video object segmen-
+tation , i.e. the mean Jaccard score, a.k.a. intersection-over-
+union score, J . Given space constraints, we add additional
+evaluation metrics in the appendix [40].
+
+4.1. Implementation and Networks Details
+
+Generator, G: Depicted on the left of Fig. 3, the gener-
+ator architecture is a shrunk version of SegNet [2]. Its en-
+coder part consists of 5 convolutional layers each followed
+by batch normalization, reducing the input image to 1
+4 of its
+original dimensions. The encoder is followed by a set of 4
+atrous convolutions with increasing radius (2,4,8,16). The
+decoder part consists of 5 convolutional layers, that, with
+upsampling, generate an output with the same size of the
+input image. As in SegNet [2], a ﬁnal softmax layer gen-
+erates the probabilities for each pixel to be foreground or
+background. The generator input consists of an RGB image
+It and the optical ﬂow ut:t`δT between It and It`δT , to in-
+troduce more variations in the optical ﬂows conditioned on
+image It. At training time, δT is randomly sampled from
+the uniform distribution U “ r´5, 5s, with δT ‰ 0. The op-
+tical ﬂow ut:t`δT is generated with the pretrained PWC net-
+work [33], given its state-of-the-art accuracy and efﬁciency.
+The generator network has a total of 3.4M parameters.
+
+Inpainter, I: We adapt the architecture of CPN [41] to
+build our inpainter network. Its structure is depicted on the
+right of Fig. 3. The input to this network consists of the in-
+put image It and the ﬂow masked according to the generator
+output, χu, the latter concatenated with χ, to make the in-
+painter aware of the region to look for context. Differently
+from the CPN, these two branches are balanced, and have
+the same number of parameters. The encoded features are
+then concatenated and passed to the CPN decoder, that out-
+puts an optical ﬂow ˆu “ φpχ, p1 ´ χqu, Itq of the same size
+of the input image, whose inside is going to be used for the
+difference between uin and the recovered ﬂow inside. Sim-
+ilarly, we can run the same procedure for the complement
+part. Our inpainter network has a total of 1.5M parameters.
+At test time, only the generator G is used. Given It
+
+883
+
+DAVIS [29]
+
+FBMS59 [26]
+
+SegTrackV2 [37]
+
+J Ò
+
+92.5
+
+88.5
+
+92.1
+
+Table 1: Performance under ideal conditions: When the
+assumptions made by our model are fully satisﬁed, our ap-
+proach can successfully detect moving objects.. Indeed, our
+model reaches near maximum Jaccard score in all consid-
+ered datasets.
+
+and ut:t`δT , it outputs a probability for each pixel to be
+foreground or background, PtpδT q. To encourage temporal
+consistency, we compute the temporal average:
+
+Pt “
+
+δT “5
+
+ÿδT “´5,‰0
+
+PtpδT q
+
+(14)
+
+The ﬁnal mask χ is generated with a CRF [21] post-
+processing step on the ﬁnal Pt. More details about the post-
+processing can be found in the appendix.
+
+4.2. Experiments in Ideal Conditions
+
+the foreground and of
+
+Our method relies on basic, fundamental assumptions:
+The optical ﬂow of
+the back-
+ground are independent. To get a sense of the capa-
+bilities of our approach in ideal conditions, we artiﬁ-
+cially produce datasets where this assumption is fully sat-
+isﬁed. The datasets are generated as a modiﬁcation of
+DAVIS2016 [29], FMBS [26], and SegTrackV2 [37]. While
+images are kept unchanged, ground truth masks are used to
+artiﬁcially perturb the optical ﬂow generated by PWC [33]
+such that foreground and background are statistically inde-
+pendent. More speciﬁcally, a different (constant) optical
+ﬂow ﬁeld is sampled from a uniform distribution indepen-
+dently at each frame, and associated to the foreground and
+the background, respectively. More details about the gener-
+ation of those datasets and the visual results can be found
+in the Appendix. As it is possible to observe in Table 1,
+our method reaches very high performance in all consid-
+ered datasets. This conﬁrms the validity of our algorithm
+and that our loss function (10) is a valid and tractable ap-
+proximation of the functional (3).
+
+4.3. Performance on Video Object Segmentation
+
+As previously stated, we use the term Unsupervised with
+a different meaning with respect to its deﬁnition in liter-
+ature of video object segmentation. In our deﬁnition and
+for what follows, the supervision refers to the algorithm’s
+usage of ground truth object annotations at training time.
+In contrast, the literature usually deﬁnes methods as semi-
+supervised, if at test time they assume the ground-truth seg-
+mentation of the ﬁrst frame to be known [3, 24]. This could
+be posed as tracking problem [42] since the detection of the
+
+target is human generated. Instead, here we focus on mov-
+ing object detection and thus we compare our approach to
+the methods that are usually referred to as “unsupervised” in
+the video object segmentation domain. However we make
+further differentiation on whether the ground truth object
+segmentation is needed (supervised) or not (truly unsuper-
+vised) during training.
+
+In this section we compare our method with other 8
+methods that represent the state of the art for moving ob-
+ject segmentation. For comparison, we use the same metric
+deﬁned above, which is the Jaccard score J between the
+real and predicted masks.
+
+Table 2 shows
+
+the performance of our method
+and the baseline methods on three popular datasets,
+DAVIS2016 [29], FBMS59 [26] and SegTrackV2 [37]. Our
+approach is top-two in each of the considered datasets, and
+even outperforms baselines that need a large amount of la-
+belled data at training time, i.e. FSEG [17].
+
+As can be observed in Table 2, unsupervised baselines
+typically perform well in one dataset but signiﬁcantly worse
+in others. For example, despite being the best performing
+unsupervised method on DAVIS2016, the performance of
+ARP [20] drops signiﬁcantly in the FBMS59 [26] and Seg-
+TrackV2 [26] datasets. ARP outperforms our method by
+6.5% on DAVIS, however, our method outperforms ARP by
+6.3% and 8.4%, on FBMS59 and SegTrackV2 respectively.
+Similarly, NLC [15] and SAGE [39] are extremely competi-
+tive in the Segtrack and FBMS59 benchmarks, respectively,
+but not in others. NLC outperforms us on SegTrackV2 by
+8.4%, however we outperform NLC by 29.8% and 24.7%,
+on DAVIS and FBMS respectively.
+
+It has been established that being second-best in multi-
+ple benchmarks is more indicative of robust performance
+than being best in one [27]. Indeed, existing unsupervised
+approaches for moving object segmentation are typically
+highly-engineered pipeline methods which are tuned on one
+dataset but do not necessarily generalize to others. Also,
+consisting of several computationally intensive steps, ex-
+tant unsupervised methods are generally orders of magni-
+tude slower than our method (Table 3).
+
+Interestingly, a similar pattern is observable for super-
+vised methods. And this is particularly evident on the
+SegTrackV2 dataset [37], which is particularly challenging
+since several frames have very low resolution and are mo-
+tion blurred. Indeed, supervised methods have difﬁculties
+with the covariate shift due to changes in the distribution be-
+tween training and testing data. Generally, supervised meth-
+ods alleviate this problem by pre-training on image segmen-
+tation datasets, but this solution clearly does not scale to ev-
+ery possible case. In contrast, our method can be ﬁnetuned
+on any data without the need for the latter to be annotated.
+As a result, our approach outperforms the majority of un-
+supervised methods as well as all the supervised ones, in
+
+884
+
+PDB [31]
+
+FSEG [17]
+
+LVO [36]
+
+ARP [20]
+
+FTS [28]
+
+NLC [15]
+
+SAGE [39]
+
+CUT [18]
+
+Ours
+
+DAVIS2016 [29] J Ò
+
+FBMS59 [26] J Ò
+
+SegTrackV2 [37] J Ò
+
+DNN-Based
+
+Pre-Training Required
+
+77.2
+74.0
+60.9
+Yes
+Yes
+
+70.7
+68.4
+61.4
+Yes
+Yes
+
+75.9
+65.1
+57.3
+Yes
+Yes
+
+76.2
+59.8
+57.2
+No
+No
+
+55.8
+47.7
+47.8
+No
+No
+
+55.1
+51.5
+67.2
+No
+No
+
+42.6
+61.2
+57.6
+No
+No
+
+55.2
+57.2
+54.3
+No
+No
+
+71.5
+63.6
+62.0
+Yes
+No
+
+Table 2: Moving Object Segmentation Benchmarks: We compare our approach with 8 different baselines on the task
+In order to do so, we use three popular datasets, i.e. DAVIS2016 [29], FBMS59 [26],
+of moving object segmentation.
+and SegTrackV2 [37]. Methods in blue require ground truth annotations at training time and are pre-trained on image
+segmentation datasets.
+In contrast, methods in red are unsupervised and not require any ground-truth annotation. Our
+approach is top-two in all the considered benchmarks, comparing to the other unsupervised methods. Bold indicates best
+among all methods, while Bold Red and red represent the best and second best for unsupervised methods, respectively.
+
+terms of segmentation quality and training efﬁciency.
+
+4.4. Qualitative experiments and Failure Cases
+
+In Fig. 4 we show a qualitative comparison of the detec-
+tion generated by our and others’ methods on the DAVIS
+dataset. Our algorithm can segment precisely the moving
+object regardless of cluttered background, occlusions, or
+large depth discontinuities. The typical failure case of our
+method is the detection of objects whose motion is due to
+the primary object. An example is given in the last row of
+Fig. 4, where the water moved by the surfer is also classiﬁed
+as foreground by our algorithm.
+
+4.5. Training and Runtime Analysis
+
+The generator and inpainter network’s parameters are
+trained at the same time by minimizing the functional (10).
+The optimization time is approximately 6 hours on a sin-
+gle GPU Nvidia Titan XP 1080i. Since both our generator
+and inpainter networks are relatively small, we can afford
+very fast training/ﬁnetuning times. This stands in contrast
+to larger modules, e.g. PDB [31], that require up to 40 hrs
+of training.
+
+At test time, predictions Pt (deﬁned in eq. 14) are gen-
+erated at 3.15 FPS, or with an average time of 320ms per
+frame, including the time to compute optical ﬂow with
+PWC [33]. Excluding the time to generate optical ﬂow, our
+model can generate predictions at 10.2 FPS, or 98ms per
+frame. All previous timings do not include the CRF post-
+processing step. Table 3 compares the inference time of our
+method with respect to other unsupervised methods. Since
+our method at test time requires only a pass through a rela-
+tively shallow network, it is orders of magnitude faster than
+other unsupervised approaches.
+
+5. Discussion
+
+Our deﬁnition of objects and the resulting inference cri-
+terion are related to generative model-based segmentation
+and region-based methods popular in the nineties. However,
+
+there is an important difference: Instead of using the evi-
+dence inside a region to infer a model of that region which is
+as accurate as possible, we use evidence everywhere else but
+that region to infer a model within the region, and we seek
+the model to be as bad as possible. This relation, explored
+in detail in Sect. 3, forces learning a contextual model of the
+image, which is not otherwise the outcome of a generative
+model in region-based segmentation. For instance, if we
+choose a rich enough model class, we can trivially model
+the appearance of an object inside an image region as the
+image itself. This is not an option in our model: We can
+only predict the inside of a region by looking outside of it.
+This frees us from having to impose modeling assumptions
+to avoid trivial solutions, but requires a much richer class of
+function to harvest contextual information.
+
+This naturally gives rise to an adversarial (min-max) op-
+timization: An inpainter network, as a discriminator, tries
+to hallucinate the ﬂow inside from the outside, with the re-
+construction error as a quality measure of the generator net-
+work, which tries to force the inpainter network to do the
+lousiest possible job.
+
+The strengths of our approach relate to its ability to
+learn complex relations between foreground and back-
+ground without any annotation. This is made possible by
+using modern deep neural network architectures like Seg-
+Net [2] and CPN [41] as function approximators.
+
+Not using ground-truth annotations can be seen as a
+strength but also a limitation: If massive datasets are avail-
+able, why not use them? In part because even massive is
+not large enough: We have shown that models trained on
+large amount of data still suffer performance drops when-
+ever tested on a new benchmark signiﬁcantly different from
+the training ones. Moreover, our method does not require
+any pre-training on large image segmentation datasets, and
+it can adapt to any new data, since it does not require any su-
+pervision. This adaptation ability is not only important for
+computer vision tasks, but can also beneﬁt other applica-
+tions, e.g. robotic navigation [23, 13] or manipulation [19].
+Another limitation of our approach is that, for the task of
+
+885
+
+ARP [20]
+
+FTS [28]
+
+NLC [15]
+
+SAGE [39]
+
+CUT [18]
+
+Ours
+
+Runtime(s)
+DNN-based
+
+74.5
+No
+
+0.5
+No
+
+11.0
+No
+
+0.88
+No
+
+103.0
+
+No
+
+0.098
+Yes
+
+Table 3: Run-time analysis: Our method is not only effective (top-two in each considered dataset), but also orders of
+magnitude faster than other unsupervised methods. All timings are indicated without optical ﬂow computation.
+
+GT
+
+SFL[10]
+
+LMP[35]
+
+PDB[31]
+
+CVOS[34]
+
+FTS[28]
+
+ELM[22]
+
+Ours
+
+Figure 4: Qualitative Results: We qualitatively compare the performance of our approach with several state-of-the-art
+baselines as well as the Ground-Truth (GT) mask. Our prediction are robust to background clutter, large depth discontinuities
+and occlusions. The last row shows a typical failure case of our method, i.e. objects which are moved by the primary objects
+are detected as foreground (water is moved by the surfer in this case).
+
+motion-based segmentation, we require the optical ﬂow be-
+tween subsequent frames. One could argue that optical ﬂow
+is costly, local, and error-prone. However, our method is
+general and could be applied to other statistics than optical
+ﬂow. Such extensions are part of our future work agenda.
+In addition, our approach does not fully exploit the inten-
+sity image, although we use it as a conditioning factor for
+the inpainter network. An optical ﬂow or an image can be
+ambiguous in some cases, but the combination of the two is
+rarely insufﬁcient for recognition [43]. Again, our frame-
+work allows in theory exploitation of both, and in future
+work we intend to expand in this direction.
+
+Acknowledgments
+
+Yanchao Yang and Stefano Soatto would like to thank the
+support from ARO W911NF-17-1-0304 and ONR N00014-
+17-1-2072. Antonio Loquercio and Davide Scaramuzza are
+supported by the Swiss National Center of Competence Re-
+search Robotics (NCCR), through the Swiss National Sci-
+ence Foundation, and the SNSF-ERC starting grant.
+
+References
+
+[1] M. Arjovsky, S. Chintala, and L. Bottou. Wasserstein gan.
+
+arXiv preprint arXiv:1701.07875, 2017. 5
+
+[2] V. Badrinarayanan, A. Kendall, and R. Cipolla. SegNet: A
+deep convolutional encoder-decoder architecture for image
+
+886
+
+segmentation.
+IEEE Transactions on Pattern Analysis and
+Machine Intelligence (PAMI), 39(12):2481–2495, 2017. 5, 7
+[3] L. Bao, B. Wu, and W. Liu. Cnn in mrf: Video object seg-
+mentation via inference in a cnn-based higher-order spatio-
+temporal mrf. In IEEE Conference on Computer Vision and
+Pattern Recognition (CVPR), 2018. 6
+
+[4] D. Beymer, P. McLauchlan, B. Coifman, and J. Malik. A
+real-time computer vision system for measuring trafﬁc pa-
+rameters. In IEEE Conference on Computer Vision and Pat-
+tern Recognition (CVPR), 1997. 5
+
+[5] G. Brostow and R. Cipolla. Unsupervised bayesian detec-
+tion of independent motion in crowds. In IEEE Conference
+on Computer Vision and Pattern Recognition (CVPR). IEEE,
+2006. 5
+
+[6] T. Brox, A. Bruhn, and J. Weickert. Variational motion seg-
+mentation with level sets. In IEEE European Conference on
+Computer Vision (ECCV), pages 471–483. 2006. 5
+
+[7] Z. Bylinskii, E. M. DeGennaro, R. Rajalingham, H. Ruda,
+J. Zhang, and J. K. Tsotsos. Towards the quantitative evalu-
+ation of visual attention models. Vision research, 116:258–
+268, 2015. 5
+
+[8] T. F. Chan and L. A. Vese. Active contours without edges.
+IEEE TRANSACTIONS ON IMAGE PROCESSING, 10(2),
+2001. 4
+
+[9] J. Cheng, Y.-H. Tsai, S. Wang, and M.-H. Yang. SegFlow:
+Joint learning for video object segmentation and optical
+ﬂow. In IEEE International Conference on Computer Vision
+(ICCV), 2017. 5
+
+[10] J. Cheng, Y.-H. Tsai, S. Wang, and M.-H. Yang. SegFlow:
+Joint learning for video object segmentation and optical
+ﬂow. In IEEE International Conference on Computer Vision
+(ICCV), 2017. 8
+
+[11] D. Cremers and S. Soatto. Motion competition: A vari-
+ational approach to piecewise parametric motion segmen-
+tation.
+IEEE International Journal of Computer Vision,
+62(3):249–265, 2004. 5
+
+[12] D. Cremers and S. Soatto. Motion competition: A varia-
+tional approach to piecewise parametric motion segmenta-
+tion. International Journal of Computer Vision, 62(3):249–
+265, 2005. 4
+
+[13] P. Drews, G. Williams, B. Goldfain, E. A. Theodorou, and
+J. M. Rehg. Aggressive deep driving: Combining convo-
+lutional neural networks and model predictive control.
+In
+Conference on Robot Learning (CoRL), 2017. 7
+
+[14] A. Elnakib, G. Gimelfarb, J. S. Suri, and A. El-Baz. Med-
+ical image segmentation: a brief survey. In Multi Modality
+State-of-the-Art Medical Image Segmentation and Registra-
+tion Methodologies, pages 1–39. Springer, 2011. 5
+
+[15] A. Faktor and M. Irani. Video object segmentation by non-
+local consensus voting. In British Machine Vision Confer-
+ence (BMVC). British Machine Vision Association, 2014. 6,
+7, 8
+
+[16] L. Itti and C. Koch. A saliency-based search mechanism for
+overt and covert shifts of visual attention. Vision research,
+40(10-12):1489–1506, 2000. 5
+
+[17] S. D. Jain, B. Xiong, and K. Grauman. FusionSeg: Learning
+to combine motion and appearance for fully automatic seg-
+mentation of generic objects in videos. In IEEE Conference
+
+on Computer Vision and Pattern Recognition (CVPR), 2017.
+6, 7
+
+[18] M. Keuper, B. Andres, and T. Brox. Motion trajectory seg-
+In IEEE Interna-
+
+mentation via minimum cost multicuts.
+tional Conference on Computer Vision (ICCV), 2015. 7, 8
+
+[19] O. Khatib. Real-time obstacle avoidance for manipulators
+and mobile robots. In Proceedings. 1985 IEEE International
+Conference on Robotics and Automation, volume 2, pages
+500–505. IEEE, 1985. 7
+
+[20] Y. J. Koh and C.-S. Kim. Primary object segmentation in
+videos based on region augmentation and reduction. In IEEE
+Conference on Computer Vision and Pattern Recognition
+(CVPR), 2017. 6, 7, 8
+
+[21] P. Kr¨ahenb¨uhl and V. Koltun. Efﬁcient inference in fully
+connected crfs with gaussian edge potentials. In Advances
+in neural information processing systems, pages 109–117,
+2011. 6
+
+[22] D. Lao and G. Sundaramoorthi. Extending layered models
+to 3d motion. In IEEE European Conference on Computer
+Vision (ECCV), 2018. 8
+
+[23] A. Loquercio, A. I. Maqueda, C. R. D. Blanco, and D. Scara-
+muzza. Dronet: Learning to ﬂy by driving. IEEE Robotics
+and Automation Letters, 3(2):1088–1095, 2018. 7
+
+[24] K.-K. Maninis, S. Caelles, Y. Chen, J. Pont-Tuset, L. Leal-
+Taix´e, D. Cremers, and L. Van Gool. Video object segmen-
+tation without temporal information. IEEE Transactions on
+Pattern Analysis and Machine Intelligence (TPAMI), 2018. 6
+[25] D. Mumford and J. Shah. Optimal approximations by
+piecewise smooth functions and associated variational prob-
+lems. Communications on pure and applied mathematics,
+42(5):577–685, 1989. 4
+
+[26] P. Ochs, J. Malik, and T. Brox. Segmentation of moving ob-
+jects by long term video analysis. IEEE Transactions on Pat-
+tern Analysis and Machine Intelligence (PAMI), 36(6):1187–
+1200, 2014. 5, 6, 7
+
+[27] Y. Pang and H. Ling. Finding the best from the second bests-
+inhibiting subjective bias in evaluation of visual tracking al-
+gorithms. In Proceedings of the IEEE International Confer-
+ence on Computer Vision, pages 2784–2791, 2013. 6
+
+[28] A. Papazoglou and V. Ferrari. Fast object segmentation in
+unconstrained video. In IEEE International Conference on
+Computer Vision (ICCV), 2013. 7, 8
+
+[29] F. Perazzi, J. Pont-Tuset, B. McWilliams, L. V. Gool,
+M. Gross, and A. Sorkine-Hornung. A benchmark dataset
+and evaluation methodology for video object segmentation.
+In IEEE Conference on Computer Vision and Pattern Recog-
+nition (CVPR), 2016. 5, 6, 7
+
+[30] J. Shi and J. Malik. Motion segmentation and tracking us-
+ing normalized cuts. In IEEE International Conference on
+Computer Vision (ICCV), 1998. 5
+
+[31] H. Song, W. Wang, S. Zhao, J. Shen, and K.-M. Lam. Pyra-
+mid dilated deeper ConvLSTM for video salient object de-
+tection. In IEEE European Conference on Computer Vision
+(ECCV), 2018. 5, 7, 8
+
+[32] D. Sun, J. Wulff, E. B. Sudderth, H. Pﬁster, and M. J. Black.
+A fully-connected layered model of foreground and back-
+ground ﬂow. In IEEE Conference on Computer Vision and
+Pattern Recognition (CVPR), 2013. 5
+
+887
+
+[33] D. Sun, X. Yang, M.-Y. Liu, and J. Kautz. Pwc-net: Cnns
+for optical ﬂow using pyramid, warping, and cost volume. In
+IEEE Conference on Computer Vision and Pattern Recogni-
+tion (CVPR), 2018. 5, 6, 7
+
+[34] B. Taylor, V. Karasev, and S. Soatto. Causal video ob-
+ject segmentation from persistence of occlusions.
+In 2015
+IEEE Conference on Computer Vision and Pattern Recogni-
+tion (CVPR). IEEE, jun 2015. 8
+
+[35] P. Tokmakov, K. Alahari, and C. Schmid. Learning motion
+patterns in videos. In IEEE Conference on Computer Vision
+and Pattern Recognition (CVPR), 2017. 5, 8
+
+[36] P. Tokmakov, K. Alahari, and C. Schmid. Learning video
+object segmentation with visual memory. In IEEE Interna-
+tional Conference on Computer Vision (ICCV), 2017. 5, 7
+
+[37] D. Tsai, M. Flagg, and J. Rehg. Motion coherent tracking
+with multi-label MRF optimization. In British Machine Vi-
+sion Conference (BMVC) 2010. British Machine Vision As-
+sociation, 2010. 5, 6, 7
+
+[38] J. Wang and E. Adelson. Representing moving images with
+layers. IEEE Transactions on Image Processing, 3(5):625–
+638, 1994. 5
+
+[39] W. Wang, J. Shen, and F. Porikli. Saliency-aware geodesic
+video object segmentation.
+In IEEE Conference on Com-
+puter Vision and Pattern Recognition (CVPR), 2015. 6, 7,
+8
+
+[40] Y. Yang, A. Loquercio, D. Scaramuzza, and S. Soatto. Unsu-
+pervised moving object detection via contextual information
+separation. arXiv preprint arXiv:1901.03360, 2019. 2, 5
+
+[41] Y. Yang and S. Soatto. Conditional prior networks for op-
+In Proceedings of the European Conference on
+
+tical ﬂow.
+Computer Vision (ECCV), pages 271–287, 2018. 5, 7
+
+[42] Y. Yang and G. Sundaramoorthi. Shape tracking with occlu-
+sions via coarse-to-ﬁne region-based sobolev descent. IEEE
+transactions on pattern analysis and machine intelligence,
+37(5):1053–1066, 2015. 6
+
+[43] Y. Yang, G. Sundaramoorthi, and S. Soatto. Self-occlusions
+and disocclusions in causal video object segmentation.
+In
+Proceedings of the IEEE International Conference on Com-
+puter Vision, pages 4408–4416, 2015. 5, 8
+
+888
+
+

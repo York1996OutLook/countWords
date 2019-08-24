@@ -1,0 +1,1509 @@
+The Domain Transform Solver
+
+Department of Computer Science, The University of North Carolina at Chapel Hill
+
+Akash Bapat and Jan-Michael Frahm
+
+{akash,jmf}@cs.unc.edu
+
+Abstract
+
+We present a novel framework for edge-aware optimiza-
+tion that is an order of magnitude faster than the state of
+the art while maintaining comparable results. Our key in-
+sight is that the optimization can be formulated by lever-
+aging properties of the domain transform [17], a method
+for edge-aware ﬁltering that deﬁnes a distance-preserving
+1D mapping of the input space. This enables our method
+to improve performance for a wide variety of problems in-
+cluding stereo, depth super-resolution, render from defocus,
+colorization, and especially high-resolution depth ﬁltering,
+while keeping the computational complexity linear in the
+number of pixels. Our method is highly parallelizable and
+adaptable, and it has demonstrable linear scalability with
+respect to image resolutions. We provide a comprehensive
+evaluation of our method w.r.t speed and accuracy for a va-
+riety of tasks.
+
+1. Introduction
+
+Edge-aware optimization is a widely utilized tool in
+computer vision. It has been applied to a large variety of
+tasks, including semantic segmentation [21], stereo [5], col-
+orization [22], and optical ﬂow [32]. Edge-awareness is
+motivated by the intuition that similar-looking pixels of-
+ten have similar properties. For this reason, a wide va-
+riety of edge-aware ﬁltering algorithms have been devel-
+oped, including the bilateral ﬁlter [37], anisotropic diffu-
+sion [29], and edge-avoiding wavelets [14], all of which
+identify similar-looking pixels. However, using such ﬁlters
+in optimization frameworks typically leads to computation-
+ally expensive algorithms. While high-level groupings like
+super-pixels can be used to compensate for this sluggish-
+ness [25], the color-space clusterings of such approaches
+are not guaranteed to respect the semantics of the underly-
+ing domain, often leading to artifacts.
+
+We propose a general optimization framework that di-
+rectly operates in the pixel space while maintaining dis-
+tances in the combined color and pixel space with an edge-
+aware regularizer. The framework can be applied for a va-
+
+(a) Colorization result
+
+(b) Noisy depthmap vs. our 16x
+
+upsampled smooth result
+
+(c) Color image
+
+(d) Target image
+
+(e) Our result
+
+Figure 1: Our domain transform solver can tackle a vari-
+ety of problems, including (a) colorization, (b) depth super-
+resolution using the color image as reference, and (c-e)
+depth map reﬁnement. The second row shows a color im-
+age from the Middlebury dataset [33] with an initialization
+(target) obtained from MC-CNN [44], which is then reﬁned
+in an edge-aware sense to obtain our result (e).
+
+riety of optimization problems, as we demonstrate in Fig. 1
+and Sec. 3. Our method achieves competitive accuracy in
+applications like stereo optimization (Sec. 4.1), rendering
+from defocus (Sec. 4.2), depth super-resolution (Sec. 4.3),
+and high resolution depth ﬁltering for multi-view stereo
+(Sec. 5). While being extremely fast, our framework ex-
+cels in two aspects that are not jointly achieved by any
+prior edge-aware optimization algorithms: 1) With increas-
+ing image resolution, as well as a growing number of im-
+age dimensions/channels, our method scales linearly and is
+more than twice as fast as existing parallel methods. 2) Our
+approach is independent of blur kernel sizes. Considering
+the increasingly high resolutions of cameras in consumer
+devices such as smartphones, and the desire for on-device
+computing for tasks like automatic photo enhancement, our
+contributions are poised to enable crucial advances for up-
+
+16014
+
+coming technologies. To foster broad use of our framework,
+we will release the source code upon publication.
+
+The remainder of the paper is organized as follows:
+Sec. 2 describes the related approaches for edge-aware ﬁl-
+tering and optimization. Sec. 3 derives our domain trans-
+form solver (DTS) optimization framework and highlights
+its similarities as well as dissimilarities with previous work.
+We also illustrate how our framework can be leveraged for
+various vision tasks like stereo, depth super-resolution, col-
+orization, high-resolution ﬁltering, and synthetic defocus,
+in Sec. 4. In Sec. 5, we provide a quantitative evaluation as
+well as validation of the timing performance. Finally, we
+conclude in Sec. 6 and provide some future directions for
+expanding our framework.
+
+2. Related Work
+
+We brieﬂy review the most relevant prior work related
+to edge-based ﬁltering and optimization, namely: bilateral
+ﬁlters and their variants, optimizations leveraging superpix-
+els, machine learning for edge-aware ﬁltering, the domain
+transform and its ﬁltering applications, and bilateral solvers.
+We consider an algorithm a ﬁltering technique when a ﬁlter
+is applied on the input image to produce an output image.
+On the other hand, we consider an algorithm a solver when
+it uses one or more input images and optimizes towards a
+goal deﬁned by a cost/loss function.
+
+Bilateral ﬁlters The bilateral ﬁlter was introduced by
+Tomasi and Manduchi [37] and is one of the initial edge-
+aware blurring techniques. The major bottleneck for bi-
+lateral ﬁltering is that it is costly to compute, especially
+for large blur windows. For N pixels in an image, ﬁlter
+radius r in each dimension, and d dimensions, its com-
+plexity is O(N rd) [30]. Since its invention, there have
+been multiple approaches proposed to speed up the bi-
+lateral ﬁlter [38, 1, 8, 41, 12]: Durand and Dorsey ap-
+proximate the bilateral ﬁlter by a piece-wise linear func-
+tion [11]. Pham and van Vliet proposed to use two 1-D bi-
+lateral kernels, reducing the complexity to O(N rd) [30].
+Paris and Durand treat the image as a 5-D function of
+color and pixel space and then apply 1-D blur kernels in
+this high-dimensional space [27], leading to complexity of
+i=3(Di/r)), where the N/r2 term is due
+to the 2-D pixel space and the remainder is the contribution
+of dimensions i = 3 . . . d, each with size Di, e.g. D = 255
+for an 8-bit grayscale image [28]. Note that this is still ex-
+ponential in the dimensionality [1]. These approximations
+decouple the 2-D adaptive bilateral kernel into a 1-D kernel,
+reducing the computational cost signiﬁcantly.
+
+O(N + N/r2 ×Qd
+
+When used as a post-processing step, the bilateral ﬁlter
+removes noise in homogeneous regions but is sensitive to
+artifacts such as salt and pepper noise [45]. Our method
+emphasizes edge-aware concepts in the same spirit as bi-
+lateral ﬁlters, and our formulation yields a generalized op-
+
+timization framework that is efﬁcient and accurate. When
+using robust cost functions, our method remains resistant to
+outliers.
+
+Machine learning for edge-awareness Porikli [31]
+achieves independence to kernel sizes, but is inaccurate for
+low color variances. To remedy this, Yan et al. [42] use
+support vector machines (SVM) to mimic a bilateral ﬁlter
+by using the exponential of spatial and color distances as
+feature vectors to represent each pixel. Their approach sup-
+ports varying intra-image color variance while remaining
+efﬁcient. Traditionally, conditional random ﬁelds (CRFs)
+are used for enforcing pair-wise pixel smoothness via the
+Potts potential. For efﬁciency, superpixels are used to re-
+duce the number of optimization variables in the CRF [6].
+Unfortunately, this leads to a loss in resolution, as an en-
+tire superpixel is assigned one estimate; e.g., in stereo, this
+leads to fronto-parallel depths. Alternatively, Kr¨ahenb¨uhl
+and Koltun [21] proposed to use the permutohedral lat-
+tice data structure [1], which is typically used in fast bi-
+lateral implementations, to accelerate inference in a fully
+connected CRF by using Gaussian distances in space and
+color. With the recent explosion of compute capacity and
+convolutional models in the vision community, there are
+also deep-learning methods that attempt to achieve edge-
+aware ﬁltering. Chen et al. [10] presented DeepLab to per-
+form semantic segmentation; there, they use the fully con-
+nected CRF from Kr¨ahenb¨uhl and Koltun [21] on top of
+their convolutional neural network (CNN) to improve the
+localization of object boundaries. Xu et al. [40] learn edge-
+aware operators from the data to mimic various traditional
+handcrafted ﬁlters like the bilateral, weighted median, and
+weighted least squares ﬁlters [13]. However, machine learn-
+ing approaches require large amounts of training data spe-
+ciﬁc to a task, plus signiﬁcant compute power, while our
+approach works without any task-dependent training and
+runs efﬁciently on a single GPU. More recently, deep learn-
+ing methods have been introduced to learn optimal bilateral
+weights [18, 23, 39] instead of using the traditional Gaus-
+sian color weights.
+
+The domain transform Gastal and Oliveira [17] intro-
+duced the domain transform, a novel and efﬁcient method
+for edge-aware ﬁltering that is akin to bilateral ﬁlters. The
+domain transform is deﬁned as a 1-D isometric transforma-
+tion of a multi-valued 1-D function such that the distances in
+the range and domain are preserved. (See Sec. 3.2 for more
+details.) When applied to a 1-D image with multiple color
+channels, the transformation maps the distances in color and
+pixel space into a 1-D distance in the transformed space.
+When the scalar distance is measured in the transformed
+space, it is equivalent to measuring the vector distance in
+[R,G,B,X] space. This has the beneﬁt of dimensionality
+reduction, leading to a fast edge-aware ﬁltering technique
+which respects edges in color while blurring similar pixels.
+
+6015
+
+To apply the domain transform to a 2-D image, the authors
+apply two passes, once in the X direction and once in Y.
+This has a complexity of O(N d), and as a result scales well
+with dimensionality. Applying the domain transform to an
+image results in a ﬁltering effect, while in our case we op-
+timize according to an objective function. Chen et al. [9]
+proposed to perform edge-aware semantic segmentation us-
+ing deep learning and use a domain transform ﬁlter in their
+end-to-end training of their deep-learning framework. They
+also alter the deﬁnition of what is considered as ‘edge’ by
+learning an edge prediction network, and they then use the
+learned edge-map in a domain transform. Their application
+of the domain transform is in the form of a ﬁlter, and hence
+is similar to one iteration of our method. We use the do-
+main transform in our method in an iterative fashion within
+our optimization framework because it provides an efﬁcient
+way to compute the local edge-aware mean. The applica-
+tion of the domain transform as a ﬁlter similar to Chen et
+al. [9] produces less accurate results than our framework;
+as we show in Sec. 5.
+
+Bilateral solvers Recently, Barron et al. [3] suggested
+to view a color image as a function of the 5-D space
+[Y,U,V,X,Y], which they call the ‘bilateral space’, to esti-
+mate stereo for rendering defocus blur. They proposed to
+transform the stereo optimization problem by expressing
+the problem variables in the bilateral space and then opti-
+mizing in this new space. We will refer to this method as
+BL-Stereo, or BLS in short. Barron and Poole’s Fast Bi-
+lateral Solver (FBS) [4], on the other hand, solves a linear
+optimization problem in the bilateral space, which is differ-
+ent from BLS. In this setting, they require a target map to
+enhance, as well as a conﬁdence map for the target. The
+linearization of the problem allows them to converge to the
+solution faster. (See Sec 3.1 for more details.) Both of these
+approaches quantize the 5-D space into a grid, where the
+grid size is governed by the blur kernel size. This reduces
+the number of optimization variables and hence the com-
+plexity, leading to low runtimes. Mazumdar et al. [26] use
+a dense grayscale-space 3-D grid (instead of a 5-D color-
+space grid) and the Heavy-Ball algorithm to make FBS
+faster, but at the cost of accuracy.
+
+Our work is closely related to Barron et al. [3] and Bar-
+ron and Poole [4] in that we are targeting the same goal
+of developing general solvers that are edge-aware and efﬁ-
+cient. The gridding strategy of the previous methods scales
+well with higher blur amounts and larger spatial windows.
+However, using higher blur windows is not a viable option,
+especially in high-resolution imagery where it is important
+to maintain ﬁne details, such as multi-camera capture for
+virtual reality and satellite imagery. In contrast, our method
+does not require large blur kernels to be efﬁcient. Our
+method operates on the pixels themselves. Our approach
+is inherently parallelizable, and hence can greatly beneﬁt
+
+from GPU processing. Hence, it scales well with higher im-
+age resolutions irregardless of blur kernel size. As we show
+in Sec. 5, the high level of parallelism especially outshines
+prior methods for high-resolution imagery.
+
+We present our general optimization framework and
+demonstrate its performance on a variety of problems. We
+also present quantitative evaluations to show the competi-
+tive accuracy of our method, as well as the signiﬁcant speed-
+up that it delivers.
+
+3. Approach
+
+Edge-aware ﬁltering techniques smooth similar-looking
+regions of the image while preserving crisp edges. Filter-
+ing techniques can often be formulated as single iterations
+in a solver. For instance, the bilateral ﬁlter is equivalent to
+a single step in minimizing a weighted least squares energy
+function[12].
+In the following, we introduce the domain
+transform solver (DTS), which leverages repeated applica-
+tions of the domain transform (DT) ﬁlter. We ﬁrst present
+an optimization framework that is analogous to the existing
+bilateral solver formulations and then explain how the DT
+signiﬁcantly boosts our framework’s speed and scalability.
+
+3.1. Optimization framework
+
+Our DTS solves the following optimization problem:
+
+min
+
+z
+
+λXi
+
+(zi − ¯zNi)2
+}
+|
+
+=e(zi,Ni)
+
+{z
+
++ωici (zi − ti)2 +Xm
+
+λmΦm (z)
+
+(1)
+Here, the zi are the values we want to estimate, e.g. dis-
+parity in stereo, at the ith pixel of an image. The initial
+target estimate ti with a conﬁdence ci is also given for
+the ith pixel; ωi is an edge-aware normalization term de-
+scribed below. This optimization objective has an edge-
+aware regularizer e (zi, Ni), which forces the zi to be sim-
+ilar to the mean ¯zNi of its neighborhood Ni, computed
+in an edge-aware sense. This edge-aware mean is ¯zNi =
+
+the pixel color similarity as well as the distance between
+pixels i and j. We derive Wi,j in Sec. 3.2. The term
+
+(cid:16)Pj Wi,j ∗ zj(cid:17) /Pj Wi,j , where Wi,j takes into account
+ωi = 1/Pj Wi,j scales the conﬁdence of each pixel, such
+
+that pixels with similar neighbors are inﬂuenced less by
+their target value, and vice versa. We compute ¯zNi using
+the domain transform, which enables us to evaluate our pair-
+wise regularizer for any blur kernel size and dimensionality,
+faster than traditional approaches [5, 37, 28, 15, 27]. Φm (z)
+is an application-dependent term with a weighting factor of
+λm. For example, Φm (z) could be the photometric match-
+ing cost for the left-right image pair for stereo.
+
+In all applications, our framework aims to solve Eq. (1).
+The minimum at the point of the solution necessarily has
+a zero derivative. Hence, we next seek to characterize this
+
+6016
+
+minimum in order to leverage it later in our proposed ap-
+proach. For simplicity, we ﬁrst only investigate a simpliﬁed
+version of Eq. (1) that does not contain the problem-speciﬁc
+term Φm (z). This simpliﬁed version can be written as :
+
+min
+
+z
+
+F (z) = min
+
+z
+
+λXi
+
++Xi
+
+ωici (zi − ti)2 .
+
+(2)
+Taking the gradient of Eq. (2) with respect to zi and setting
+it to zero, at the minima of Eq. (2) we have
+
+(zi − ¯zNi)2
+|
+}
+
+=e(zi,Ni)
+
+{z
+
+zi =
+
+λ¯zNi + ωiciti
+
+λ + ωici
+
+.
+
+(3)
+
+In our supplementary material, we show that this optimal
+solution closely approximates the optimization function of
+the FBS [4]. The key distinction for our method lies in the
+explicit computation of ¯zNi via Wi,j . Whereas the FBS al-
+gorithmically depends on a kernel-size-dependent domain
+gridding/tiling in the computation of Wi,j , our DTS instead
+maps the zi values into a 1-D space using the domain trans-
+form, allowing pixel afﬁnities to be calculated with a run-
+time independent of blur kernel size.
+
+3.2. Domain transform with the L2 norm
+
+Gastal and Oliveira [17] deﬁne an isometric transfor-
+mation, which they call the domain transform (DT), for
+: Ω → Rc, Ω =
+a 1-D multi-valued function I
+[0,∞) by treating C = (x, I(x)) as a curve in Rc+1.
+The domain transform DT : Rc+1 → R is such
+it preserves distances between two points on the
+that
+curve C under a given norm.
+In contrast to Gastal and
+Oliveira [17], we use the L2 norm to deﬁne the distances
+which results in higher accuracy as shown in Table 2.
+Hence, we derive the domain transform here, which satis-
+ﬁes the constraint kDT (xi, I(xi)) − DT (xj, I(xj))k2 =
+k(xi, I(xi)) − (xj, I(xj))k2 for the nearest neighbors xi
+and xi+1. Here, only xi and xi+1 are considered because
+the following derivation is exact only when we are close to
+xi. Using a shorthand notation DT (x) = DT (xi, I(xi))
+and assuming a small shift h in x, we can express the dis-
+tance in pixels and color equal to the distance of the trans-
+form as follows:
+
+(DT (x + h) − DT (x))2 = h2 +
+
+c
+
+Xk=1
+
+(I(x + h) − I(x))2 .
+
+(4)
+Taking the limit as h → 0, followed by taking the square
+root and constraining DT (x) to be monotonic to avoid neg-
+ative roots, then integrating both sides, we obtain
+
+DT (u) = Z u
+
+0
+
+vuut1 +
+
+c
+
+Xk=1
+
+I ′2
+k (x) dx,
+
+u ∈ Ω.
+
+(5)
+
+More detailed derivation is available in the supplementary
+material. Using this deﬁnition of the domain transform of
+the 4-D space [X, R, G, B] with the curve C deﬁned by
+RGB color and the spatial domain X, we choose to express
+the edge-aware weights as follows:
+
+Wi,j = δr ( |DT (zi) − DT (zj)| )
+
+(6)
+
+with indicator function δr(d) = (d ≤ r).
+The relation with the simple domain transform blur-
+ring [17] can be seen by setting the conﬁdence scores ci
+to zero in Eq. (1). This will lead to the same solution as the
+domain transform ﬁltering. Similarly, setting ci to zero and
+Wi.j to Gaussian weights in color and space will lead to bi-
+lateral ﬁltering. Note that the above derivation is isometric
+since the function I is multi-valued but with a 1-dimensional
+domain Ω. By extending the domain to 2-D, the exact isom-
+etry is not valid, and following Gastal and Oliveira [17] we
+use alternating passes by separately considering the image
+as a function of X and then Y.
+
+We compute the conﬁdence scores ci by estimating the
+variance of the reﬁned variable z in an edge-aware sense
+using the domain transform as suggested in [4], and nor-
+malizing the variance into [0,1] range by taking negative
+exponential scaled by σc.
+
+4. Applications
+
+Now, all the terms except the application-speciﬁc terms
+in Eq. (1) are deﬁned. In the following, we present the appli-
+cation of our proposed framework to a variety of scenarios
+where we adapt Eq. (1) by changing function Φm.
+
+4.1. Stereo optimization
+
+Stereo depth estimation is a well-studied problem [34,
+19] in which the task is to estimate a matching correspon-
+dence of pixels in the left image to the pixels in the right
+image. This matching correspondence deﬁnes the disparity
+of the pixels and in turn the depth, and when done for each
+pixel provides us with a disparity map. Typically, a dense
+search is done along the row of a rectiﬁed pair by match-
+ing the pixel color similarity, i.e., applying a photometric
+matching cost. In the following, we reﬁne a disparity map.
+We obtain the disparity map from MC-CNN [44], which
+acts as the target (Fig. 2c) for which we calculate a conﬁ-
+dence score (Fig. 2d). We use the left color image to deﬁne
+and compute the edge-aware mean and optimize the dispari-
+ties to obtain a disparity map that is smooth at homogeneous
+regions but has sharp edges (Fig. 2e). Similar to our pro-
+posed solver, Barron and Poole [4] show that the FBS works
+well for a wide variety of optimization problems including
+stereo. When they apply the FBS to the stereo problem, they
+achieve faster convergence compared to BL-Stereo because
+they neglect the physical implication of changing the dispar-
+ity. In other words, if an optimizer changes the estimate of
+
+6017
+
+disparity at a point in the left image, this results in a change
+in the matching pixel in the right image and accordingly
+carries the potential of a change in the corresponding color.
+Here, we present a method for solving for the disparity in
+an edge-aware sense while having a photometric penalty for
+the left-right matching. Our loss for stereo optimization is
+
+min
+
+z
+
+λXi
++Xi
+
+(zi − ¯zNi)2 +Xi
+|
+γ (IL(i) − IR(i − zi))2
+}
+|
+
+=λmΦm(zi)
+
+{z
+
+,
+
+ωici ρ (zi − ti)
+}
+
+target term
+
+{z
+
+(7)
+
+where IL and IR are the left and right image of the stereo
+pair respectively. As disparity can be viewed as 1-D ﬂow,
+for robust optimization, we use a Charbonnier loss ρ (r) =
+√r2 + ε2 with ε = 0.001 on the target term, which has
+
+been shown to be effective for optical ﬂow [36]. Next, we
+will detail the application of our method to the problem of
+rendering defocus from depth, which is another application
+heavily relying on accurate depth edges.
+
+4.2. Synthetic defocus from depth
+
+Interest in creating synthetic defocus from depth is grow-
+ing, with phones like the Google Pixel 3 and the OnePlus 6
+providing a portrait mode where the shallow depth of ﬁeld
+effect is mimicked through the estimation of depth. In fact,
+BL-Stereo’s synthetic defocus method is used as part of the
+Lens Blur feature on Google’s phones [3]. We use our
+stereo optimization from Sec. 4.1 to estimate depth maps,
+which retain sharp discontinuities at color edges. Fig. 3
+shows the original color image and the defocus rendering
+produced by using our estimated depthmaps for scenes in
+the Middlebury dataset [33]. As our stereo optimization is
+edge-aware, the defocus rendering maintains high quality
+even at the edges. In the Jadeplant scene shown in Fig. 3a,
+the background is in focus, and for the same scene the blue
+block in the front is kept in focus (Fig. 3b). In the Playroom
+scene in Fig. 3c, the front chairs are chosen to be in focus.
+To render the synthetic defocus, we used the algorithm de-
+scribed in Sec. 6 of the supplementary material of Barron et
+al. [3]. See supplementary material for additional results.
+
+4.3. Depth super resolution
+
+The availability of cheap commodity depth sensors like
+the Microsoft’s Kinect, Asus Xtion, and Intel RealSense has
+spurred many avenues of research, including depth super-
+resolution. Depth super-resolution is important for sen-
+sors like the above because, often, the color camera is of
+high resolution, but the depth camera/projector has low-
+resolution, which leads to crude depth maps [20]. Ferstl et
+al. [16] adapted the Middlebury dataset for the depth super-
+resolution task to create a benchmark, which we use to eval-
+uate our method. For this task, we use a simple bicubic in-
+
+terpolation to upsample the low-resolution depth map and
+use this map as a target in our optimization; we then use the
+high-resolution color image to compute the domain trans-
+form based on an edge-aware mean and obtain our opti-
+mized result (Fig. 4c). We follow Barron and Poole [4] by
+setting the conﬁdence scores using a Gaussian bump model
+to represent the contribution of each pixel to the nearby
+upsampled pixels. We do not use additional penalties in
+Eq. (1) for this task in the form of Φm.
+
+4.4. Colorization
+
+Levin et al. [22] presented a method to convert a
+grayscale image into a color image using a few color strokes
+as input; see Fig. 1a for our result. Instead of an approach
+speciﬁcally developed for this task [43], we show the gener-
+alizability of our efﬁcient framework to the colorization task
+achieving similar results. We convert the input grayscale
+image into the YCbCr color space to extract the Y channel,
+which is used to compute the edge-aware weights Wi,j . The
+input strokes act as the target with a conﬁdence of one, and
+all other conﬁdences are zero. See Fig. 6 for an example
+input with color strokes.
+
+5. Experiments
+
+We now detail our quantitative evaluation of our frame-
+
+work as well as its run time performance.
+
+Stereo Optimization For the quantitative evaluation of
+our method, we use the Middlebury dataset [33]. Barron
+and Poole [4] used MC-CNN [44] as their initialization.
+For a fair comparison, we also use it as our target disparity
+map. Table 1 shows our results for the training and testing
+set, where we present the mean absolute error (MAE), root
+mean square error (RMSE), time per megapixel (sec/MP),
+and time normalized by number of disparity hypotheses
+(sec/GD) for non-occluded regions and for all pixels. All of
+these values were determined by the Middlebury evaluation
+website, and all of our times include the time to calculate
+MC-CNN on the target disparity maps. The timings for FBS
+and our method show the additional time spent in process-
+ing MC-CNN, with the total value in parentheses. Note that
+we obtain a large performance boost compared to MC-CNN
+with a marginal overhead in time. We compare favorably to
+Barron and Poole [4], especially for non-occluded pixels,
+while having signiﬁcant computational savings. We used
+σx = σy = 64px, σr = 0.25 with RGB colors normalized
+to a range of [0,1], λ = 0.99, and γ = 0.001. These pa-
+rameters were found to work best via a grid search strategy
+on the Middlebury training data. We ran a gradient descent
+algorithm for 3000 iterations in this experiment with a step
+size of 0.99 times the gradient to avoid numerical precision
+errors. Fig. 1 (c-e) and Fig. 5 show zoomed regions from
+
+6018
+
+(a) Color image
+
+(b) GT disparity
+
+(c) Target image
+
+(d) Conﬁdence
+
+(e) Our result
+
+Figure 2: Stereo Optimization: The top row shows our result in (e) which is computed using the color image (a) used to
+deﬁne color distance in the domain transform, and target (c) disparity obtained from MC-CNN [44]. The conﬁdence map (d)
+is used to weigh the target disparity in the optimization (Eq. (1)). Notice in the zoomed regions that our results are aligned to
+the edges of the color image.
+
+(a) Jadeplant: back carton in focus
+
+(b) Jadeplant: blue block in focus
+
+(c) Playroom: chairs in focus
+
+Figure 3: Render from defocus for the Middlebury scenes. The original is all-in-focus. (a) Original vs. ours, background in
+focus. (b) Original vs. ours, foreground in focus. (c) Original vs. ours, with the chairs in the front in focus.
+
+Algorithm
+
+g
+n
+i
+n
+i
+a
+r
+T
+
+g
+n
+i
+t
+s
+e
+T
+
+[44]
+
+[44] + FBS [4]
+
+[44] + DTS (ours)
+
+[44]
+
+[44] + FBS [4]
+
+[44] + DTS (ours)
+
+MAE (px) RMSE (px)
+no occ | all
+no occ | all
+18.0 | 36.6
+3.81 | 11.8
+2.60 | 6.66
+10.2 | 20.9
+3.02 | 9.12
+10.8 | 27.4
+21.3 | 55.0
+3.82 | 17.9
+2.67 | 8.19
+15.0 | 29.9
+3.78 | 14.6
+17.6 | 43.4
+
+sec/MP
+
+sec/GD
+
+83.3
+
+259
+
+42.7 (126) 153 (412)
+5.9 (89.2)
+19 (278)
+
+112
+
+28 (140)
+10 (122)
+
+254
+
+91 (345)
+23 (277)
+
+Table 1: Performance comparison on images from the Mid-
+dlebury dataset. The timing for FBS and our method shows
+the additional time spent in processing MC-CNN [44], and
+the total value in the parentheses. Our method takes a frac-
+tion of time as compared to FBS [4] to obtain a signiﬁcant
+reduction in error versus MC-CNN.
+
+the Jadeplant and Pipes scenes to highlight that we improve
+the target disparity maps from MC-CNN [44] to estimate
+sharp depth edges.
+
+Depth super-resolution We use the dataset introduced
+by Ferstl et al. [16] to evaluate our method for depth
+super-resolution. This dataset consists of three scenes (Art,
+Books, and Moebius) with added noise at 2, 4, 8, and 16x
+levels of upsampling. We used σx = σy = 8×f px where f
+is the level of upsampling. We used σr = 0.1 with YCbCr
+colors normalized to a range of [0, 1], λ = 0.99, and 10
+iterations of the gradient descent with a step size of 0.99.
+
+In Table 2, we present the RMS for each scene and mean
+geometric error for the dataset. The bicubic, DT and FBS
+results were produced by using the data and code provided
+by Barron et al. [2] (marked with †in Table 2). We also used
+the same code to evaluate our method. Both our method and
+the FBS use the bicubic upsampling as the target image.
+Our time is computed as the average over all images over
+10 trials and include the 7 ms required for bicubic upsam-
+pling. Our method is 12 times faster than Barron et al. [4]
+while achieving comparable performance on most images,
+especially for higher upsampling factors. The DTS is also
+more accurate and 2x faster than HFBS [26], which is one
+of the fastest parallel edge-aware optimizers.
+
+We also compare against the available results for Wei et
+al. [24], who use the mean absolute difference metric and
+report on 2×, 4×, and 8× upsampling. For (r = 1, τ = 1),
+their SG-WLS results in a MAD of 1.812, and for (r =
+4, τ = 4), they report a MAD of 1.51. In comparison, the
+DTS has a MAD of 1.48.
+
+Colorization Fig. (6) shows an example of our results,
+and we provide additional results in the supplementary ma-
+terial. To simulate inﬁnite conﬁdence, we overwrite the
+solution with the strokes at each iteration of the gradient
+descent. We used the following parameters for this experi-
+ment: σx = σy = 64, σr = 0.25, and 100 iterations in the
+gradient descent scheme. Our method performs the compu-
+
+6019
+
+(a) Color image.
+
+(b) GT disparity
+
+(c) Our result
+
+(d) Barron and Poole [4].
+
+Figure 4: Depth super-resolution: (a) original color image, (b) ground-truth disparity, (c) our optimized disparity, and (d)
+results using FBS obtained from the author’s website [2]. The inset highlights the details and the amount of smoothness we
+obtain in homogeneous regions while being edge-aware.
+
+Art
+
+2x
+5.32
+4.77
+5.06
+3.95
+3.02
+4.73
+3.27
+3.77
+
+4x
+6.07
+6.63
+6.94
+4.91
+3.91
+5.56
+4.01
+4.29
+
+8x
+7.27
+9.39
+9.42
+6.33
+5.14
+6.38
+5.18
+5.15
+
+16x
+9.59
+14.17
+14.21
+8.78
+7.47
+8.32
+7.93
+7.56
+
+2x
+5.00
+2.35
+2.57
+1.80
+1.41
+2.14
+1.85
+1.78
+
+Books
+8x
+5.45
+5.93
+5.95
+3.23
+2.42
+3.08
+3.10
+2.81
+
+4x
+5.15
+3.57
+3.83
+2.40
+1.86
+2.60
+2.30
+2.18
+
+16x
+5.97
+10.41
+10.41
+4.43
+3.34
+4.04
+4.34
+3.91
+
+2x
+5.34
+2.19
+2.36
+1.83
+1.39
+2.25
+1.92
+1.78
+
+Moebius
+8x
+4x
+5.68
+5.51
+5.38
+3.19
+3.39
+5.40
+3.41
+2.44
+2.40
+1.82
+3.18
+2.67
+2.40
+3.37
+2.96
+2.20
+
+16x
+6.11
+9.00
+8.96
+4.70
+3.26
+4.11
+4.71
+4.23
+
+RMS
+
+5.94
+5.48
+5.67
+3.60
+2.75
+3.74
+3.38
+3.24
+
+Time
+(ms)
+7†
+-
+-
+
+21†
+234†
+49.86
+18.88
+19.29
+
+Bicubic
+BGU [7]
+BGU-w[7]
+DT [17]
+FBS [4]
+HFBS [26]
+DTSL1 (Ours)
+DTS (Ours)
+
+Table 2: Performance of DTS on the depth super-resolution task. Our method is 12x faster than FBS while having comparable
+performance in most images, especially images with higher upsampling factors. † marks results taken from [4].
+
+(a) Color image
+
+(b) GT disparity
+
+(c) Target image
+
+(d) Our result
+
+Figure 5: Stereo optimization closeup for Middlebury Pipes
+scene. (a) Color image. (b) Ground-truth disparity. (c) Tar-
+get obtained using MC-CNN [44]. (d) Our result.
+
+tation at 0.267s/MP, which is a more than 3x speedup in
+comparison to Barron and Poole [4]. These colorization
+images are less than 1k×1k in resolution and do not fully
+exploit the highly parallel nature of our algorithm.
+
+High-resolution stereo When working with high-
+resolution data, we can truly exploit the high level of
+parallelism of our method. To demonstrate the parallelism
+of our approach, we tested our method on high-resolution
+depthmaps generated using the COLMAP 3D reconstruc-
+tion software [35]. For this task, we created a dataset
+of 6000×4000 px images using a Nikon D5300 DSLR.
+During COLMAP’s processing, we had to downsample
+the image sizes to 4500×2945 px after radial undistortion
+due to memory limits on the GPU. We used COLMAP
+
+(a) Grayscale image with
+
+(b) Our result.
+
+(c) Levin et al. [22]
+
+color strokes.
+
+Figure 6: Colorization: (a) We use the input grayscale im-
+age as our reference image and the user annotated strokes
+as target, (b) our result using DTS and (c) Levin et al. [22]
+result. Note that (b) and (c) are virtually identical.
+
+to generate a dense depthmap per image of the dataset,
+which acted as target in our method. The conﬁdence scores
+were calculated according to the variance in target depth,
+(Sec. 3.1). We reﬁned the raw noisy depthmaps to obtain
+ﬁltered depthmaps, which are visualized in Fig. 7 in the
+form of point clouds. As DTS can optimize the depths in
+parallel, we can achieve a high throughput. In particular,
+we require 0.0098s/MP to process the high-resolution
+imagery of this dataset.
+In contrast, FBS is difﬁcult to
+parallelize due to the use of a sparse color grid which
+introduces non-coherent memory access and a hierarchical
+preconditioner that has interdependent gradients across
+multiple optimization variables [26]. We use the following
+
+6020
+
+(a) Color images.
+
+(b) Our result.
+
+(c) COLMAP raw geometric depthmap.
+
+Figure 7: High-resolution stereo data: (a) Color image
+from the toy dataset, (b) point cloud visualization of our
+result, and raw depth generated by COLMAP [35] in (c).
+The point cloud views highlight that a signiﬁcant amount of
+noise present in the raw depthmap is removed using DTS.
+
+hyper-parameters for this experiment: σx = σy = 64,
+σr = 0.25, σc = 32 and used 10 gradient descent iterations.
+
+Benchmarking We benchmark our parallel approach us-
+ing the depth super-resolution dataset and compare against
+a parallel implementation of HFBS. As HFBS relies on a
+grid, its speed is dependent on the grid size and, in turn, the
+blur kernel size used to determine the voxel sizes. For an
+image with N pixels and Di possible values in each dimen-
+sion i, HFBS, like any other grid based method [27, 11, 4],
+partitions the d-dimensional space into a grid using the
+blur radii {ri}. For HFBS, d = 3, but in general, it
+spends O(Qd
+i (Di/ri)) time alone to create the grid. Be-
+cause of this, we observe an exponential increase in run-
+time as the σx,y = ri decrease, see Fig. 8a. On the other
+hand, we are independent of ri, and hence the time is con-
+stant for DTS. At the same time, our method is more ac-
+curate than HFBS. We evaluate the runtime and RMSE for
+σx,y = 8, 16, 32, 64, 128, 256, and keep the remainder of
+
+200
+
+150
+
+100
+
+50
+
+0
+
+s
+m
+ 
+n
+i
+ 
+e
+m
+T
+
+i
+
+DTS (Ours)
+HFBS
+
+25
+
+20
+
+15
+
+10
+
+5
+
+E
+S
+M
+R
+
+s
+m
+ 
+n
+i
+ 
+e
+m
+T
+
+i
+
+4
+
+8
+
+16
+
+32
+
+x,y
+
+64
+
+128
+
+0
+256
+
+50
+
+40
+
+30
+
+20
+
+10
+
+0
+
+DTS (Ours)
+HFBS
+
+6.5
+
+6
+
+5.5
+
+5
+
+4.5
+
+4
+
+3.5
+
+E
+S
+M
+R
+
+4
+
+8
+
+16
+
+32
+
+r
+
+64
+
+128
+
+3
+256
+
+(a) Dependence of time (black) and RMSE
+
+(b) Dependence of time (black) and RMSE
+
+(red) on σx,y .
+
+(red) on σr .
+
+Figure 8:
+remains more accurate than HFBS [26].
+
+(a) Our method is independent of blur σ and
+
+2
+
+)
+s
+(
+ 
+
+e
+m
+
+i
+t
+
+1.5
+
+1
+
+0.5
+
+0
+
+0.5
+
+1
+
+1.5
+
+Figure 9: Dependence on image resolution for DTS.
+
+the parameters the same as in our earlier experiments. The
+time is averaged over 10 trials. We observe a similar pattern
+by changing σr with σx,y = 8 (Fig. 8b).
+
+Scale Now we present how our method scales with in-
+creasing image resolution. In practice, our method scales
+linearly with the number of pixels in the image. Fig. 9(a)
+shows the dependence of time in seconds on the number
+of pixels in the image. We use the training images from
+the Middlebury dataset and only show the time consumed
+by DTS for the stereo task at 3000 iterations. Due to this
+linear dependence, our framework is also suitable for high-
+resolution imagery.
+
+6. Conclusion
+
+We have presented a novel edge-aware solver that
+achieves scalable performance across a variety of applicable
+tasks. Our method is faster by an order of magnitude com-
+pared to the state of the art while performing at comparable
+accuracy. The approach is highly parallelizable and scales
+well w.r.t image resolution and outshines at high resolution
+images. Furthermore, unlike existing methods, it is inde-
+pendent of blurring kernel size. Our framework is faster and
+accurate than previous parallel edge-aware alglorithms. To
+extend our approach, a future step is to move to multi-GPU
+setting, as well as use advanced optimization methods like
+conjugate gradient descent to obtain faster convergence.
+
+Acknowledgements This
+supported
+
+by NSF
+
+grant No.
+
+research
+
+was
+partially
+CNS-1405847.
+
+6021
+
+References
+
+[1] Andrew Adams, Jongmin Baek, and Myers Abraham Davis.
+Fast high-dimensional ﬁltering using the permutohedral lat-
+tice.
+In Computer Graphics Forum, volume 29 (2), pages
+753–762. Wiley Online Library, 2010. 2
+
+[2] Jon
+
+Barron.
+
+https://jonbarron.info/.
+
+https://drive.google.com/file/d/
+0B4nuwEMaEsnmaDI3bm5VeDRxams/view?usp=
+sharing, 2008. Online; accessed 8-March-2018. 6, 7
+
+[3] Jonathan T Barron, Andrew Adams, YiChang Shih, and Car-
+los Hern´andez. Fast bilateral-space stereo for synthetic de-
+focus. In Proceedings of the IEEE Conference on Computer
+Vision and Pattern Recognition, pages 4466–4474, 2015. 3,
+5
+
+[4] Jonathan T Barron and Ben Poole. The fast bilateral solver.
+In European Conference on Computer Vision, pages 617–
+632. Springer, 2016. 3, 4, 5, 6, 7, 8
+
+[5] Michael Bleyer, Christoph Rhemann, and Carsten Rother.
+Patchmatch stereo-stereo matching with slanted support win-
+dows. In Bmvc, volume 11, pages 1–11, 2011. 1, 3
+
+[6] Cesar Cadena and Jana Koˇseck´a. Semantic segmentation
+with heterogeneous sensor coverages. In Robotics and Au-
+tomation (ICRA), 2014 IEEE International Conference on,
+pages 2639–2645. IEEE, 2014. 2
+
+[7] Jiawen Chen, Andrew Adams, Neal Wadhwa, and Samuel W
+Hasinoff. Bilateral guided upsampling. ACM Transactions
+on Graphics (TOG), 35(6):203, 2016. 7
+
+[8] Jiawen Chen, Sylvain Paris, and Fr´edo Durand. Real-time
+edge-aware image processing with the bilateral grid. In ACM
+Transactions on Graphics (TOG), volume 26 (3), page 103.
+ACM, 2007. 2
+
+[9] Liang-Chieh Chen, Jonathan T Barron, George Papandreou,
+Kevin Murphy, and Alan L Yuille. Semantic image seg-
+mentation with task-speciﬁc edge detection using cnns and
+a discriminatively trained domain transform.
+In Proceed-
+ings of the IEEE Conference on Computer Vision and Pattern
+Recognition, pages 4545–4554, 2016. 3
+
+[10] Liang-Chieh Chen, George Papandreou, Iasonas Kokki-
+nos, Kevin Murphy, and Alan L Yuille. Deeplab: Se-
+mantic image segmentation with deep convolutional nets,
+atrous convolution, and fully connected crfs. arXiv preprint
+arXiv:1606.00915, 2016. 2
+
+[11] Fr´edo Durand and Julie Dorsey. Fast bilateral ﬁltering for the
+display of high-dynamic-range images. In ACM transactions
+on graphics (TOG), volume 21 (3), pages 257–266. ACM,
+2002. 2, 8
+
+[12] Michael Elad. On the origin of the bilateral ﬁlter and ways
+IEEE Transactions on image processing,
+
+to improve it.
+11(10):1141–1151, 2002. 2, 3
+
+[13] Zeev Farbman, Raanan Fattal, Dani Lischinski, and Richard
+Szeliski. Edge-preserving decompositions for multi-scale
+tone and detail manipulation.
+In ACM Transactions on
+Graphics (TOG), volume 27 (3), page 67. ACM, 2008. 2
+
+[14] Raanan Fattal. Edge-avoiding wavelets and their applica-
+tions. ACM Transactions on Graphics (TOG), 28(3):22,
+2009. 1
+
+[15] Raanan
+
+Fattal, Maneesh Agrawala,
+
+Szymon
+Rusinkiewicz. Multiscale shape and detail enhancement
+from multi-light image collections. In ACM Transactions on
+Graphics (TOG), volume 26 (3), page 51. ACM, 2007. 3
+
+and
+
+[16] David Ferstl, Christian Reinbacher, Rene Ranftl, Matthias
+R¨uther, and Horst Bischof.
+Image guided depth upsam-
+pling using anisotropic total generalized variation. In Com-
+puter Vision (ICCV), 2013 IEEE International Conference
+on, pages 993–1000. IEEE, 2013. 5, 6
+
+[17] Eduardo SL Gastal and Manuel M Oliveira. Domain trans-
+form for edge-aware image and video processing. In ACM
+Transactions on Graphics (ToG), volume 30, page 69. ACM,
+2011. 1, 2, 4, 7
+
+[18] Micha¨el Gharbi, Jiawen Chen, Jonathan T Barron, Samuel W
+Hasinoff, and Fr´edo Durand. Deep bilateral learning for real-
+time image enhancement. ACM Transactions on Graphics
+(TOG), 36(4):118, 2017. 2
+
+[19] Heiko Hirschmuller and Daniel Scharstein. Evaluation of
+cost functions for stereo matching. In Computer Vision and
+Pattern Recognition, 2007. CVPR’07. IEEE Conference on,
+pages 1–8. IEEE, 2007. 4
+
+[20] Kourosh Khoshelham and Sander Oude Elberink. Accuracy
+and resolution of kinect depth data for indoor mapping ap-
+plications. Sensors, 12(2):1437–1454, 2012. 5
+
+[21] Philipp Kr¨ahenb¨uhl and Vladlen Koltun. Efﬁcient inference
+in fully connected crfs with gaussian edge potentials. In Ad-
+vances in neural information processing systems, pages 109–
+117, 2011. 1, 2
+
+[22] Anat Levin, Dani Lischinski, and Yair Weiss. Coloriza-
+tion using optimization. In ACM Transactions on Graphics
+(ToG), volume 23 (3), pages 689–694. ACM, 2004. 1, 5, 7
+
+[23] Sifei Liu, Shalini De Mello, Jinwei Gu, Guangyu Zhong,
+Ming-Hsuan Yang, and Jan Kautz. Learning afﬁnity via spa-
+tial propagation networks. In Advances in Neural Informa-
+tion Processing Systems, pages 1520–1530, 2017. 2
+
+[24] Wei Liu, Xiaogang Chen, Chuanhua Shen, Zhi Liu, and Jie
+Yang. Semi-global weighted least squares in image ﬁltering.
+In The IEEE International Conference on Computer Vision
+(ICCV), Oct 2017. 6
+
+[25] Jiangbo Lu, Hongsheng Yang, Dongbo Min, and Minh N
+Do. Patch match ﬁlter: Efﬁcient edge-aware ﬁltering meets
+randomized search for fast correspondence ﬁeld estimation.
+In Computer Vision and Pattern Recognition (CVPR), 2013
+IEEE Conference on, pages 1854–1861. IEEE, 2013. 1
+
+[26] Amrita Mazumdar, Armin Alaghi, Jonathan T Barron, David
+Gallup, Luis Ceze, Mark Oskin, and Steven M Seitz. A
+hardware-friendly bilateral solver for real-time virtual real-
+ity video.
+In Proceedings of High Performance Graphics,
+page 13. ACM, 2017. 3, 6, 7, 8
+
+[27] Sylvain Paris and Fr´edo Durand. A fast approximation of
+the bilateral ﬁlter using a signal processing approach.
+In
+European conference on computer vision, pages 568–580.
+Springer, 2006. 2, 3, 8
+
+[28] Sylvain Paris, Pierre Kornprobst, Jack Tumblin, Fr´edo Du-
+rand, et al. Bilateral ﬁltering: Theory and applications.
+Foundations and Trends R(cid:13) in Computer Graphics and Vi-
+sion, 4(1):1–73, 2009. 2, 3
+
+6022
+
+[44] Jure Zbontar and Yann LeCun. Stereo matching by training
+a convolutional neural network to compare image patches.
+Journal of Machine Learning Research, 17(1-32):2, 2016. 1,
+4, 5, 6, 7
+
+[45] Ming Zhang and Bahadir K Gunturk. Multiresolution bi-
+lateral ﬁltering for image denoising. IEEE Transactions on
+image processing, 17(12):2324–2333, 2008. 2
+
+[29] Pietro Perona and Jitendra Malik. Scale-space and edge de-
+tection using anisotropic diffusion.
+IEEE Transactions on
+pattern analysis and machine intelligence, 12(7):629–639,
+1990. 1
+
+[30] Tuan Q Pham and Lucas J Van Vliet. Separable bilateral ﬁl-
+tering for fast video preprocessing. In Multimedia and Expo,
+2005. ICME 2005. IEEE International Conference on, pages
+4–pp. IEEE, 2005. 2
+
+[31] Fatih Porikli. Constant time o (1) bilateral ﬁltering. In Com-
+puter Vision and Pattern Recognition, 2008. CVPR 2008.
+IEEE Conference on, pages 1–8. IEEE, 2008. 2
+
+[32] Jerome Revaud, Philippe Weinzaepfel, Zaid Harchaoui, and
+Cordelia Schmid. Epicﬂow: Edge-preserving interpolation
+of correspondences for optical ﬂow. In Proceedings of the
+IEEE Conference on Computer Vision and Pattern Recogni-
+tion, pages 1164–1172, 2015. 1
+
+[33] Daniel Scharstein, Heiko Hirschm¨uller, York Kitajima,
+Greg Krathwohl, Nera Neˇsi´c, Xi Wang, and Porter West-
+ling. High-resolution stereo datasets with subpixel-accurate
+ground truth. In German Conference on Pattern Recognition,
+pages 31–42. Springer, 2014. 1, 5
+
+[34] Daniel Scharstein and Richard Szeliski. A taxonomy and
+evaluation of dense two-frame stereo correspondence algo-
+rithms. International journal of computer vision, 47(1-3):7–
+42, 2002. 4
+
+[35] Johannes Lutz Sch¨onberger and Jan-Michael Frahm.
+In Conference on Com-
+
+Structure-from-motion revisited.
+puter Vision and Pattern Recognition (CVPR), 2016. 7, 8
+
+[36] Deqing Sun, Stefan Roth, and Michael J Black. Secrets of
+optical ﬂow estimation and their principles.
+In Computer
+Vision and Pattern Recognition (CVPR), 2010 IEEE Confer-
+ence on, pages 2432–2439. IEEE, 2010. 5
+
+[37] Carlo Tomasi and Roberto Manduchi. Bilateral ﬁltering for
+gray and color images. In Computer Vision, 1998. Sixth In-
+ternational Conference on, pages 839–846. IEEE, 1998. 1,
+2, 3
+
+[38] Ben Weiss. Fast median and bilateral ﬁltering. In Acm Trans-
+actions on Graphics (TOG), volume 25 (3), pages 519–526.
+ACM, 2006. 2
+
+[39] Huikai Wu, Shuai Zheng, Junge Zhang, and Kaiqi Huang.
+Fast end-to-end trainable guided ﬁlter. In Proceedings of the
+IEEE Conference on Computer Vision and Pattern Recogni-
+tion, pages 1838–1847, 2018. 2
+
+[40] Li Xu, Jimmy Ren, Qiong Yan, Renjie Liao, and Jiaya Jia.
+Deep edge-aware ﬁlters. In International Conference on Ma-
+chine Learning, pages 1669–1678, 2015. 2
+
+[41] Qingxiong Yang, Narendra Ahuja, and Kar-Han Tan. Con-
+stant time median and bilateral ﬁltering. International Jour-
+nal of Computer Vision, 112(3):307–318, 2015. 2
+
+[42] Qingxiong Yang, Shengnan Wang, and Narendra Ahuja.
+Svm for edge-preserving ﬁltering. In Computer Vision and
+Pattern Recognition (CVPR), 2010 IEEE Conference on,
+pages 1775–1782. IEEE, 2010. 2
+
+[43] Liron Yatziv and Guillermo Sapiro. Fast image and video
+colorization using chrominance blending. IEEE transactions
+on image processing, 15(5):1120–1129, 2006. 5
+
+6023
+
+

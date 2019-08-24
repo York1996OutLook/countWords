@@ -1,0 +1,1669 @@
+BubbleNets: Learning to Select the Guidance Frame in
+
+Video Object Segmentation by Deep Sorting Frames
+
+Brent A. Grifﬁn
+
+Jason J. Corso
+
+University of Michigan
+
+{griffb,jjcorso}@umich.edu
+
+Abstract
+
+Semi-supervised video object segmentation has made
+signiﬁcant progress on real and challenging videos in re-
+cent years. The current paradigm for segmentation meth-
+ods and benchmark datasets is to segment objects in video
+provided a single annotation in the ﬁrst frame. However, we
+ﬁnd that segmentation performance across the entire video
+varies dramatically when selecting an alternative frame for
+annotation. This paper addresses the problem of learn-
+ing to suggest the single best frame across the video for
+user annotation—this is, in fact, never the ﬁrst frame of
+video. We achieve this by introducing BubbleNets, a novel
+deep sorting network that learns to select frames using a
+performance-based loss function that enables the conver-
+sion of expansive amounts of training examples from al-
+ready existing datasets. Using BubbleNets, we are able to
+achieve an 11% relative improvement in segmentation per-
+formance on the DAVIS benchmark without any changes to
+the underlying method of segmentation.
+
+1. Introduction
+
+Video object segmentation (VOS), the dense separation
+of objects in video from background, remains a hotly stud-
+ied area of video understanding. Motivated by the high cost
+of densely-annotated user segmentations in video [5, 38],
+our community is developing many new VOS methods that
+are regularly evaluated on the benchmark datasets support-
+ing VOS research [22, 31, 33, 37, 45]. Compared to unsu-
+pervised VOS [12, 21, 29, 44], semi-supervised VOS, the
+problem of segmenting objects in video given a single user-
+annotated frame, has seen rampant advances, even within
+just the past year [2, 4, 7, 8, 9, 16, 17, 25, 28, 30, 35, 46].
+
+The location and appearance of objects in video can
+change signiﬁcantly from frame-to-frame, and, from our
+own analysis, we ﬁnd that using different frames for anno-
+tation changes performance dramatically, as shown in Fig-
+ure 1. Annotating video data is an arduous process, so it
+
+Frame 1: Baseline
+
+Frame 12: +69%
+
+Frame 20: -53%
+
+Figure 1. The current paradigm for video object segmentation is
+to segment an object annotated in the ﬁrst frame of video (yellow,
+left). However, selecting a different frame for annotation changes
+performance across the entire video [for better (green) or worse
+(red)]. To best use an annotator’s time, our deep sorting framework
+suggests a frame that will improve segmentation performance.
+
+is critical that we improve performance of semi-supervised
+VOS methods by providing the best single annotation frame
+possible. However, we are not aware of any work that seeks
+to learn which frame to annotate for VOS.
+
+To that end, this paper addresses the problem of select-
+ing a single video frame for annotation that will lead to
+greater performance. Starting from an untouched video, we
+select an annotation frame using our deep bubble sorting
+framework, which makes relative performance predictions
+between pairs of frames using our custom network, Bub-
+bleNets. BubbleNets iteratively compares and swaps adja-
+cent video frames until the frame with the greatest predicted
+performance is ranked highest, at which point, it is selected
+for the user to annotate and use for VOS. To train Bub-
+bleNets, we use an innovative relative-performance-based
+loss that increases the number of training examples by or-
+ders of magnitude without increasing frame labeling re-
+quirements. Finally, we evaluate BubbleNets annotation
+frame selection on multiple VOS datasets and achieve as
+much as an 11% relative improvement in combined Jaccard
+
+18914
+
+measure and region contour accuracy (J +F ) over the same
+segmentation method given ﬁrst-frame annotations.
+
+The ﬁrst contribution of our paper is demonstrating the
+utility of alternative annotation frame selection strategies
+for VOS. The current paradigm is to annotate an object in
+the ﬁrst frame of video and then automatically segment that
+object in the remaining frames. We provide thorough analy-
+sis across four datasets and identify simple frame-selection
+strategies that are immediately implementable for all VOS
+methods and lead to better performance than ﬁrst-frame se-
+lection. To the best of our knowledge, this represents the
+ﬁrst critical investigation of segmentation performance for
+different annotation frame selection strategies.
+
+The second contribution of our paper is the deep bubble
+sorting framework and corresponding implementation that
+improves VOS performance. We are not aware of a sin-
+gle paper that investigates selection of the annotated frame
+in VOS. The necessary innovation for our network-based
+approach is our loss formulation, which allows extensive
+training on relatively few initial examples. We provide de-
+tails on generating application-speciﬁc performance labels
+from pre-existing datasets, and our deep sorting formula-
+tion is general to all video processes that train on individ-
+ual frames and have a measurable performance metric. Us-
+ing our custom network architecture and a modiﬁed loss
+function inspired by our VOS frame-selection analysis, we
+achieve the best frame-selection-based segmentation perfor-
+mance across all four evaluation datasets.
+
+We provide source code for the current work at
+
+https://github.com/griffbr/BubbleNets
+and a video at https://youtu.be/0kNmm8SBnnU.
+
+2. Related Work
+
+2.1. Video Object Segmentation
+
+Multiple benchmarks are available to evaluate VOS
+methods, including: SegTrackv2 [22, 37]; DAVIS 2016,
+2017, and 2018 [5, 31, 33]; and YouTube-VOS [45]. Mov-
+ing away from the single-object hypothesis of DAVIS 2016,
+these datasets are increasingly focused on the segmentation
+of multiple objects, which increases the need for a user-
+provided annotation to specify each object of interest and
+has led to the development of more semi-supervised VOS
+methods using an annotated frame. With some exceptions
+[1, 13, 27, 32], the majority of semi-supervised VOS meth-
+ods use an artiﬁcial neural network.
+
+The amount of training data available for learning-based
+VOS methods has increased dramatically with the introduc-
+tion of YouTube-VOS, which contains the most annotated
+frames of all current VOS benchmarks. However, due to
+the high cost of user annotation [5, 38], YouTube-VOS only
+provides annotations for every ﬁfth frame. Operating on the
+assumption that every frame should be available to the user
+
+for annotation, we obtain training data from, and base the
+majority of our analysis from, DAVIS 2017, which contains
+the most training and validation examples of all fully an-
+notated datasets and has many challenging video categories
+(e.g., occlusions, objects leaving view, appearance change,
+and multiple interacting objects).
+
+For our BubbleNets implementation that selects anno-
+tated frames for VOS, we segment objects using One-Shot
+Video Object Segmentation (OSVOS) [4], which is state-
+of-the-art in VOS and has inﬂuenced other leading methods
+[25, 42]. OSVOS uses a base network trained on ImageNet
+[10] to recognize image features, re-trains on DAVIS 2016
+to segment objects in video, and then ﬁne-tunes the net-
+work for each video using a user-provided annotation. One
+unique property of OSVOS is that it does not require tempo-
+ral consistency, i.e., the order that OSVOS segments frames
+is inconsequential. Conversely, even when segmentation
+methods operate sequentially [2, 16, 18, 23, 28, 30, 46], seg-
+mentation can propagate forward and backward from anno-
+tated frames selected later in a video.
+
+2.2. Active Learning
+
+Active learning (AL) is an area of research enabling
+learning algorithms to perform better with less training by
+letting them choose their own training data. AL is espe-
+cially useful in cases where large portions of data are un-
+labeled and manual labeling is expensive [3]. Selecting the
+best single annotated frame to train OSVOS represents a
+particularly hard problem in AL, starting to learn with no
+initial labeled instances, i.e., the cold start problem [26].
+
+Within AL, we are particularly interested in error reduc-
+tion. Error reduction is an intuitive sub-ﬁeld that directly
+optimizes the objective of interest and produces more accu-
+rate learners with fewer labeled instances than uncertainty
+or hypothesis-based AL approaches [34]. However, rather
+than going through all video frames and then formally pre-
+dicting the expected error reduction associated with any one
+annotation frame, BubbleNets simpliﬁes the problem by
+only comparing the relative performance of two frames at a
+time. By combining our decision framework with a bubble
+sort, we iterate this selection process across the entire video
+and promote the frame with the best relative performance to
+be our selected annotation frame.
+
+Within computer vision, previous AL work includes
+measures to reduce costs associated with annotating im-
+ages and selecting extra training frames after using an initial
+set of user annotations. Cost models predicting annotation
+times can be learned using a decision-theoretic approach
+[38, 40]. Other work has focused on increasing the effec-
+tiveness of crowd-sourced annotations [39]. To improve
+tracking performance, active structured prediction has been
+used to suggest extra training frames after using an initial
+set of user annotations [43]. Within VOS, other work in-
+
+8915
+
+creases segmentation accuracy by having a user review seg-
+mentations and then add annotations on frames with poor
+performance [4]. The DAVIS 2018 challenge includes em-
+phasis on maximizing segmentation performance with de-
+creased user annotation time [5].
+In contrast, we are not
+estimating annotation costs or selecting extra annotation
+frames. To support all semi-supervised VOS methods with-
+out increasing user effort, we are selecting a single frame
+for annotation that increases performance.
+
+3. BubbleNets
+
+We
+
+neural
+
+artiﬁcial
+
+an
+that
+
+network, Bub-
+design
+learns to suggest video frames for
+bleNets (BN),
+annotation that improve video object segmentation (VOS)
+performance. To learn performance-based frame selection
+on our custom network, we generate our own labeled train-
+ing data. Labeled video data are expensive, so we design
+our network loss to learn from fewer initial frame labels, as
+discussed in Section 3.1. In Section 3.2, we introduce our
+deep bubble sorting framework that uses BN performance
+predictions to select a single frame for annotation. We
+provide details for our BN architecture in Section 3.3. In
+Section 3.4, we present our BN implementation for VOS
+with complete training and conﬁguration details.
+
+3.1. Predicting Relative Performance
+
+Assume we are given a set of m training videos wherein
+each video has n frames with labels corresponding to some
+performance metric, y ∈ R, which we leave unspeciﬁed
+here but deﬁne in Section 3.4.1. Our goal is to learn to select
+the frame with the greatest performance from each video.
+
+One way to accomplish this task is to use the entire
+video as input to a network (e.g., using an LSTM or 3D-
+ConvNet [6]) and output the frame index with the greatest
+predicted performance; however, this approach only has m
+labeled training examples. A second way to formulate this
+problem is to use individual frames as input to a network
+and output the predicted performance of each frame. Us-
+ing this formulation, the frame with the maximum predicted
+performance can be selected from each video and there are
+m × n labeled training examples. While this is a signiﬁ-
+cant improvement over m examples, the second formulation
+only provides one training example per frame, which, for
+complicated and high annotation-cost processes like video
+object segmentation, makes the task of generating enough
+data to train a performance-prediction network impractical.
+To that end, instead of directly estimating the predicted
+performance y of each training frame, BN predicts the rel-
+ative difference in performance of two frames being com-
+pared (i.e., yi − yj for frames i and j from the same video).
+This difference may seem trivial, but it effectively increases
+the number of labels and training examples from m × n to
+m × (cid:0)n
+
+2(cid:1) ≈ mn2
+2 .
+
+To further increase the number of unique training exam-
+ples and increase BN’s accuracy, we use k random video
+reference frames as an additional network input. When pre-
+dicting the relative performance between two frames, ad-
+ditional consideration can be given to the frame that bet-
+ter represents the reference frames. Thus, similar to archi-
+tectures that process entire videos, reference frames pro-
+vide some context for the video as a whole. We ﬁnd that
+reference frames not only increase BN’s accuracy in prac-
+tice but also increase the number of training examples from
+m × (cid:0)n
+
+k+2(cid:1) ≈ mn(k+2)
+
+2(cid:1) to m × (cid:0) n
+
+k+2
+
+.
+
+Finally, we deﬁne our performance loss function as:
+
+L(W) := |(yi − yj) − f (xi, xj, Xref., W)| ,
+
+(1)
+
+where W are the trainable parameters of BN, yi is the per-
+formance label associated with the ith video frame, xi is
+the image and normalized frame index associated with the
+ith video frame, Xref. is the set of k reference images and
+frame indices, and f is the predicted relative performance.
+For later use, denote the normalized frame index for the ith
+frame of an n-frame video as
+
+Ii =
+
+i
+n
+
+.
+
+(2)
+
+Including I as an input enables BN to also consider tempo-
+ral proximity of frames for predicting performance.
+
+3.2. Deep Bubble Sorting
+
+Assume we train BubbleNets to predict the relative per-
+formance difference of two frames using the loss function
+(1) from Section 3.1. To select the frame with the great-
+est performance from a video, we use BN’s relative perfor-
+mance predictions within a deep bubble sorting framework,
+iteratively comparing and swapping adjacent frames until
+we identify the frame with the greatest predicted relative
+(and overall) performance.
+
+Our deep bubble sorting framework begins by comparing
+the ﬁrst two video frames. If BN predicts that the preceding
+frame has greater relative performance, the order of the two
+frames is swapped. Next, the leading frame is compared
+(and potentially swapped) with the next adjacent frame, and
+this process passes forward until reaching the end of the
+video (see Figure 2). The frame ranked highest at the end of
+the sort is selected as the predicted best-performing frame.
+Normally, bubble sort is deterministic and only needs
+one pass through a list to promote the greatest element to
+the top; conversely, our deep bubble sorting framework is
+stochastic. BN uses k random video reference frames as in-
+put for each prediction, and using a different set of reference
+frames can change that prediction; thus, a BN comparison
+for the same two frames can change. While bubble sort’s re-
+dundancy is sub-optimal relative to other comparison sorts
+in many applications [20], revisiting previous comparisons
+
+8916
+
+Network 
+
+ResNet
+
+Input
+
+Preprocessing
+
+Performance Prediction 
+
+Layers
+
+Video 
+Frame i
+
+ResNet
+
+50
+
+2048
+
+Network 
+Output
+
+Best Possible Sort
+
+Video 
+Frame j
+
+ResNet
+
+50
+
+2048
+
+Fully 
+
+Connected 
+
+256
+
+FC 
+128
+
+FC 
+64
+
+FC 
+32
+
+f
+
+Video
+Frame i
+Frame i
+Reference
+
+Frames
+
+ResNet
+ResNet
+ResNet
+50
+50
+50
+
+2048
+2048
+2048
+
+Input Frame Indices
+
+Compare Frames using Network
+
+Swap if          > 0
+
+f
+
+Video
+
+Frame 2
+
+Video
+
+Frame 1
+
+…
+
+Video
+Frame i
+
+Video
+Frame j
+
+…
+
+Video
+
+Frame n
+
+BubbleNets Sort
+
+F
++
+
+J
+
+1.0
+
+0.5
+
+0.0
+
+1
+
+10
+
+20
+
+30
+
+40
+
+Initial Video Frame Indices
+
+Figure 2. BubbleNets Framework: Deep sorting compares and
+swaps adjacent frames using their predicted relative performance.
+
+Figure 3. BubbleNets Prediction Sort of Motorbike Video. The
+green bar is the annotated training frame selected by BubbleNets.
+
+is particularly effective given BN’s stochastic nature. Ac-
+cordingly, our deep bubble sorting framework makes n for-
+ward passes for an n-frame video, which is sufﬁcient for
+a complete frame sort and increases the likelihood that the
+best-performing frame is promoted to the top.
+
+One way to increase BN’s consistency is to batch each
+network prediction over multiple sets of video reference
+frames. By summing the predicted relative performance
+over the entire batch, we reduce the variability of each
+frame comparison. However, two consequences of increas-
+ing batch size are: 1) increasing the chance of hitting a local
+minimum (i.e., some frame pairs are ordered incorrectly but
+never change) and 2) increasing execution time.
+In Sec-
+tion 4, we perform an ablation study to determine the best
+batch size for our speciﬁc application.
+
+Although BN is not explicitly trained to ﬁnd the best-
+performing frame in a video, our complete deep bubble sort-
+ing framework is able to accomplish this task, as shown in
+Figure 3. Even in cases where the best performing frames
+are not promoted to the top, an important secondary effect
+of our deep sorting framework is demoting frames that lead
+to poorer performance (e.g., Frame 20 in Figure 1); avoid-
+ing such frames is critical for annotation frame selection in
+video object segmentation.
+
+3.3. BubbleNets Architecture
+
+Our BubbleNets architecture is shown in Figure 2. The
+input has two comparison images, three reference images,
+and normalized indices (2) for all ﬁve frames.
+Increas-
+ing the number of reference frames, k, increases video-
+wide awareness for predicting relative frame performance
+but also increases network complexity;
+in practice, we
+ﬁnd that k = 3 is a good compromise. The input im-
+ages are processed using a base Residual Neural Network
+
+(ResNet 50, [15]) that is pre-trained on ImageNet, which
+has been shown to be a good initialization for segmenta-
+tion [9] and other video tasks [47]. Frame indices and
+ResNet features are fed into BN’s performance prediction
+layers, which consist of four fully-connected layers with
+decreasing numbers of neurons per layer. All performance
+prediction layers include the normalized frame indices as
+input and use a Leaky ReLU activation function [24]; the
+later three prediction layers have 20% dropout for all in-
+puts during training [36]. After the performance prediction
+layers, our BN architecture ends with one last fully con-
+nected neuron that is the output relative performance pre-
+diction f (xi, xj, Xref., W) ∈ R in (1).
+
+3.4. BubbleNets Implementation for
+
+Video Object Segmentation
+
+Assume a user wants to segment an object in video and
+provides an annotation of that object in a single frame. Be-
+cause annotating video data is time consuming, we use Bub-
+bleNets and deep sorting to automatically select the annota-
+tion frame for the user that results in the best segmentation
+performance possible. We segment objects from the anno-
+tated frame in the remainder of the video using One-Shot
+Video Object Segmentation (OSVOS) [4].
+
+3.4.1 Generating Performance Labels for Training
+
+Generating performance-based labels to train BN requires
+a quantitative measure of performance that is measurable
+on any given video frame. For our VOS performance mea-
+sure, we choose a combination of region similarity J and
+contour accuracy F . Region similarity (also known as in-
+tersection over union or Jaccard index [11]) provides an in-
+tuitive, scale-invariant evaluation for the number of misla-
+
+8917
+
+beled foreground pixels with respect to a ground truth an-
+notation. Given a foreground mask M and ground truth
+annotation G, J = M ∩G
+M ∪G . Contour accuracy evaluates the
+boundary of a segmentation by measuring differences be-
+tween the closed set of contours for M and G [31]; F is
+also correlated with J [14, Figure 5]. Using J and F , we
+deﬁne a frame performance label for loss function (1) as
+
+yi :=
+
+1
+n
+
+n
+
+X
+
+j=1
+
+Jj + Fj,
+
+(3)
+
+where yi is ith label of an n-frame video and Jj + Fj is the
+performance on frame j after using frame i for annotation.
+In simple words, yi is the video-wide mean performance
+that results from selecting the ith frame for annotation.
+
+We use our performance label (3) to generate BN train-
+ing data. To avoid labeling costs for annotating BN-selected
+frames and evaluating segmentation performance, we use a
+previously annotated VOS dataset. Our ideal dataset con-
+tains many examples and is fully-annotated to provide BN
+the complete set of video frames for annotation selection.
+We give full consideration to the datasets listed in Table 1
+[22, 31, 33, 37, 45]. YouTube-VOS contains the most an-
+notated frames, but the validation set provides annotations
+on only the ﬁrst video frame and the training set provides
+annotations only on every ﬁfth frame. SegTrackv2 has the
+most annotated frames per video, but this metric is skewed
+by a handful of long videos and the majority of SegTrackv2
+videos contain 40 frames or fewer (see Figure 4). Accord-
+ingly, we use the DAVIS 2017 training set, which contains
+the most examples of the fully annotated datasets.
+
+Using the DAVIS 2017 training set, we train OSVOS for
+500 iterations on every frame and ﬁnd the resulting perfor-
+mance label (3). For videos with multiple annotated ob-
+jects, performance labels are generated for each object on
+every frame. Preprocessing the dataset takes about a week
+on a dual-GPU (GTX 1080 Ti) machine but has many ben-
+eﬁts. First, BN can train without running OSVOS, which
+signiﬁcantly decreases training time. Second, we know the
+ground truth performance of every frame, so we can evalu-
+ate the overall deep sorting framework (e.g., seeing which
+frames are under- or over-promoted in Figure 3). Finally,
+we can compare performance against several simple frame
+selection strategies and know the best and worst frame se-
+lections possible for each video in the dataset.
+
+3.4.2 Five BubbleNets Conﬁgurations and Training
+
+To test the efﬁcacy of new concepts and establish best prac-
+tices, we implement ﬁve BN conﬁgurations for VOS. The
+ﬁrst conﬁguration (BN0) uses the standard BN architecture
+in Section 3.3. The second and third conﬁgurations are sim-
+ilar to BN0 but use No Input Frame Indices (BNNIFI) or No
+
+Table 1. Dataset Metrics. Most of the SegTrackv2 videos and all
+of the YT-VOS videos have less than 40 annotated frames.
+
+DAVIS SegTrack YT-VOS
+‘16 Val.
+(1st 1,000)
+
+DAVIS 2017
+Val.
+Train
+61
+144
+60
+30
+
+1,999
+3,984
+
+Number of
+Objects
+Videos
+4,209
+Annotated Frames
+Object Annotations 10,238
+Annotated Frames Per Video
+Mean
+Median
+Range
+Coef. of Variation
+
+70.2
+71
+
+0.22
+
+66.6
+67.5
+
+68.8
+67.5
+
+25–100 34–104 40–104
+
+0.31
+
+0.32
+
+20
+20
+
+1,376
+1,376
+
+v2
+24
+14
+
+1,066
+1,515
+
+76.1
+39
+
+21–279
+
+1.03
+
+1,000
+607
+
+16,715
+26,742
+
+27.5
+30
+
+8–36
+0.29
+
+s
+s
+a
+
+M
+y
+t
+i
+l
+i
+b
+a
+b
+o
+r
+P
+
+0
+
+50
+
+DAVIS 2017 Train
+YT-VOS
+SegTrackv2
+DAVIS 2016 Val.
+DAVIS 2017 Val.
+
+100
+Frames Per Video
+
+150
+
+200
+
+250
+
+Figure 4. PMF for Annotated Frames Available Per Video.
+
+Reference Frames (BNNRF). The fourth and ﬁfth conﬁgu-
+rations are similar to BN0 but use loss functions modiﬁed
+from L (1) to predict Single-frame Performance (BNLSP)
+or bias toward middle Frame selection (BNLF).
+
+BNLSP’s single-frame performance loss is deﬁned as:
+
+LSP(W) := |yi − f (xi, Xref., W)| ,
+
+(4)
+
+where yi is the single performance label for frame i. Alter-
+natively, BNLF’s middle-frame biased loss is deﬁned as:
+
+LF(W) := |(yi − yj) − (di − dj) − f (xi, xj, Xref., W)| ,
+(5)
+
+where di is the distance between frame i and the middle
+frame. Using the normalized index from (2), we ﬁnd di as:
+
+di = λ |Ii − IMF| ,
+
+(6)
+
+where IMF = 0.5 is the normalized middle frame index and
+λ = 0.5 determines the relative emphasis of middle frame
+bias in (5). The intuition behind (5) is simple. In addition
+to predicting the performance difference between frames i
+and j, BNLF will learn to consider distance of each frame
+from the middle of the video. Given no predicted perfor-
+mance difference, the network will simply fall back on the
+frame closest to the middle, which is shown in Section 4 to
+be an effective annotation choice. To help BNLF learn the
+additional frame-based loss, we remove all network layer
+dropout associated with the frame input indices.
+
+All ﬁve conﬁgurations are trained using the labeled
+DAVIS 2017 training data described in Section 3.4.1. To
+
+8918
+
+Table 2. BubbleNets Conﬁgurations.
+
+Input
+
+DAVIS 2017
+
+Table 3. Ablation Study on DAVIS 2017 Val. Set: Study of BN
+input batch size for bubble sort comparisons and end performance.
+
+Conﬁg. Frame
+
+Total Training
+Indices Frames Function Iterations Time
+
+Loss
+
+Ref.
+
+ID
+BN0
+BNNIFI
+BNLF
+BNNRF
+BNLSP
+
+Yes
+No
+Yes
+Yes
+Yes
+
+Yes
+Yes
+Yes
+No
+Yes
+
+L (1) 3,125
+5m 11s 59.7
+L (1) 2,500
+3m 52s 58.7
+LF (5) 8,125 15m 30s 57.8
+L (1) 3,125
+2m 20s 55.4
+LSP (4) 1,875
+2m 32s 55.1
+
+Val. Mean
+F
+J
+65.5
+65.0
+63.8
+62.3
+62.3
+
+decrease training time, all DAVIS 2017 training frames are
+preprocessed through the ResNet portion of the architec-
+ture, which does not change during BN training. We use
+a batch size of 1,024 randomly selected videos; each video
+uses up to ﬁve frames that are randomly selected without re-
+placement (e.g., two comparison and three reference). We
+add an L1 weight regularization loss with a coefﬁcient of
+2 × 10−6, and use the Adam Optimizer [19] with a 1 × 10−3
+learning rate. The number of training iterations and training
+time for each conﬁguration is summarized in Table 2.
+
+We evaluate all models using the original bubble sort-
+ing framework, although BNLSP requires two forward net-
+work passes per sort comparison and BNNRF is deterministic
+without the random reference frames. Tasked with learning
+frame-based loss and frame performance differences, BNLF
+requires the most training iterations of all BN networks.
+BNLSP trains in fewer iterations due to simpliﬁed loss, and
+both BNLSP and BNNRF train faster due to fewer input im-
+ages. As shown in Table 2, the BN0 model outperforms
+BNLSP and BNNRF, justifying our claims in Section 3.1 for
+using relative frame performance and reference frames.
+
+4. Experimental Results
+
+4.1. Setup
+
+Our primary experiments and analysis use the DAVIS
+2017 Validation set. As with the training set in Sec-
+tion 3.4.1, we ﬁnd the segmentation performance for every
+possible annotated frame, which enables us to do a complete
+analysis that includes the best and worst possible frame se-
+lections and simple frame selection strategies. We deter-
+mine the effectiveness of each frame selection strategy by
+calculating the mean J + F for the resulting segmentations
+on the entire dataset; the mean is calculated on a per video-
+object basis (e.g., a video with two annotated objects will
+contribute to the mean twice). Best and worst frame se-
+lections are determined using the combined J + F score
+for each video object. The simple frame selection strategies
+are selecting the ﬁrst frame (current VOS standard), mid-
+dle frame (found using ﬂoor division of video length), last
+frame, and a random frame from each video for each object.
+Finally, because BN results can vary from using random ref-
+erence frames as input, we only use results from the ﬁrst run
+of each conﬁguration (same with random frame selection).
+
+Batch
+Size
+
+1
+3
+5
+10
+20
+
+Performance (J + F )
+
+BN0
+124.1
+125.2
+125.2
+125.2
+123.6
+
+BNNIFI
+122.9
+122.0
+123.8
+122.0
+123.4
+
+BNLF
+120.5
+121.6
+121.7
+120.3
+120.7
+
+Mean Video
+
+Sort Time
+
+3.88 s
+4.83 s
+5.32 s
+6.52 s
+9.34 s
+
+4.2. Ablation Study
+
+We perform an ablation study to determine the best
+batch size for BN predictions. Recall from Section 3.2 that
+batches reduce variability by using multiple sets of random
+reference frames. As shown in Table 3, a batch size of 5
+leads to the best performance for all BN conﬁgurations and
+is chosen as the standard setting for all remaining results.
+The mean video sort times in Table 3 are for BNLF, which
+consistently has the highest sort times. As a practical con-
+sideration, we emphasize that the frame selection times in
+Table 3 are negligible compared to the time it takes a user
+to annotate a frame [5].
+
+4.3. DAVIS Validation
+
+Complete annotated frame selection results for the
+DAVIS 2016 and 2017 validation sets are provided in Ta-
+ble 4. To put these results in perspective, the current dif-
+ference in J + F for the two leading VOS methods on the
+DAVIS 2016 Val. benchmark is 2.1 [25, 42].
+
+For ﬁrst frame selection, it is worth acknowledging that
+both datasets intend for annotation to take place on the ﬁrst
+frame, which guarantees that objects are visible for anno-
+tation (in some videos, objects become occluded or leave
+the view). Despite this advantage, middle frame selection
+outperforms ﬁrst frame selection on both datasets overall
+and on 3/5 of the videos on DAVIS 2017 Val. In fact, on
+both datasets ﬁrst frame selection is, on average, closer to
+the worst possible frame selection than the best. Last frame
+selection has the worst performance and, using the coefﬁ-
+cient of variation, the most variable relative performance.
+Finally, the best performing annotation frame is never the
+ﬁrst or last frame for any DAVIS validation video.
+
+Middle frame selection has the best performance of all
+simple strategies. We believe that the intuition for this is
+simple. Because the middle frame has the least cumulative
+temporal distance from all other frames, it is on average
+more representative of the other frames with respect to an-
+notated object positions and poses. Thus, the middle frame
+is, on average, the best performing frame for segmentation.
+All BN conﬁgurations outperform the simple selection
+strategies, and BN0 performs best of all BN conﬁgurations.
+When selecting different frames, BN0 beats middle frame
+selection on 3/5 videos and ﬁrst frame selection on 4/5
+videos for DAVIS 2017 Val. By comparing the performance
+
+8919
+
+Table 4. Dataset Annotated Frame Selection Results.
+
+Table 5. Results on Datasets with Limited Frames Per Video.
+
+Segmentation Performance (J + F )
+
+Mean
+
+Median
+
+Range
+
+DAVIS 2017 Val.
+
+141.2
+125.2
+123.8
+121.7
+119.2
+116.5
+113.3
+104.7
+86.3
+
+171.2
+159.8
+157.3
+155.6
+155.2
+152.8
+147.5
+147.5
+127.7
+
+143.2
+128.9
+129.9
+128.0
+124.0
+119.7
+117.2
+110.3
+88.2
+
+14.9–194.9
+7.6–194.2
+8.7–194.2
+7.6–194.3
+7.6–193.6
+1.6–193.2
+3.5–192.5
+4.4–190.1
+1.6–188.9
+
+DAVIS 2016 Val.
+
+176.3
+168.5
+165.7
+170.5
+169.5
+153.4
+157.3
+153.0
+141.3
+
+130.6–194.9
+72.6–194.5
+72.6–194.5
+72.6–193.8
+77.1–193.8
+115.2–191.7
+83.1–194.5
+72.0–189.6
+68.3–188.9
+
+Coef. of
+Variation
+
+0.26
+0.34
+0.35
+0.38
+0.41
+0.38
+0.39
+0.42
+0.56
+
+0.11
+0.18
+0.18
+0.21
+0.21
+0.15
+0.25
+0.23
+0.31
+
+BNLF
+BNNIFI
+BN0
+
+Annotation
+
+Frame
+
+Selection
+
+Best
+BN0
+BNNIFI
+BNLF
+Middle
+Random
+First
+Last
+Worst
+
+Best
+BN0
+BNNIFI
+BNLF
+Middle
+First
+Random
+Last
+Worst
+
+y
+c
+n
+e
+u
+q
+e
+r
+F
+
+20
+
+15
+
+10
+
+5
+
+0
+
+0
+
+0.25
+0.75
+Normalized Frame Index (I)
+
+0.5
+
+1
+
+Figure 5. Frame-Selection Locations in Video: Normalized in-
+dices (2) of all BN annotation frame selections on DAVIS ‘17 Val.
+
+of BN0 and BNNIFI, we ﬁnd that BN0’s use of normalized
+frame indices (2) is beneﬁcial for performance.
+
+Finally, it is clear from the frame-selection locations in
+Figure 5 that BNLF’s modiﬁed loss function (5) successfully
+biases selections toward the middle of each video.
+
+4.4. Results on Datasets with Limited Frames
+
+Annotated frame selection results for SegTrackv2 and
+YouTube-VOS are provided in Table 5. As emphasized in
+Section 3.4.1, the videos in these datasets have a limited
+number of frames available for annotation, which limits the
+effectiveness of BN frame selection. Because the YouTube-
+VOS validation set only provides annotations on the ﬁrst
+frame, we instead evaluate on the ﬁrst 1,000 objects of the
+YouTube-VOS training set, which provides annotations on
+every ﬁfth frame. This reduces the number of candidate
+annotation frames that BN can compare, sort, and select
+to one ﬁfth of that available in a standard application for
+the same videos. While all BN conﬁgurations outperform
+ﬁrst and last frame selection, BNLF is the only conﬁgura-
+tion that consistently outperforms all other selection strate-
+gies. We postulate that the additional bias of BNLF toward
+
+Annotation
+
+Frame
+
+Selection
+
+BNLF
+Middle
+BNNIFI
+BN0
+Last
+First
+
+BNLF
+Middle
+BNNIFI
+BN0
+First
+Last
+
+Segmentation Performance (J + F )
+
+Mean
+
+134.7
+134.5
+134.3
+130.6
+123.6
+122.3
+
+115.5
+115.0
+111.8
+110.4
+107.3
+101.2
+
+Median
+SegTrackv2
+
+Range
+
+145.9
+143.5
+144.2
+127.3
+130.4
+122.5
+
+14.3–184.6
+14.3–182.8
+33.9–178.5
+50.0–183.2
+14.3–178.4
+45.8–181.7
+
+YT-VOS (1st 1,000)
+
+126.6
+124.2
+121.0
+121.5
+114.0
+108.1
+
+0.0–197.3
+0.0–196.2
+0.0–196.3
+0.0–194.1
+0.0–196.3
+0.0–195.4
+
+Coef. of
+Variation
+
+0.32
+0.32
+0.30
+0.30
+0.36
+0.31
+
+0.46
+0.46
+0.47
+0.49
+0.49
+0.56
+
+Table 6. Cross Evaluation of Benchmark Methods: OSVOS and
+OnAVOS DAVIS ‘17 Val. results using identical frame selections.
+
+Segmentation
+
+Frame Selection and DAVIS J & F Mean
+
+Method
+
+OSVOS
+OnAVOS
+
+First
+56.6
+63.9
+
+Middle
+
+59.6
+68.4
+
+BNLF
+60.8
+68.5
+
+BNNIFI
+
+61.9
+68.4
+
+BN0
+62.6
+69.2
+
+Table 7. Frames Per Video and Relative Performance: BN per-
+formances relative to ﬁrst frame on DAVIS 2017 Validation.
+Relative Mean (J + F )
+
+Videos from
+
+Number of
+
+DAVIS 2017 Val.
+10 Longest
+All
+10 Shortest
+
+Frames
+81–104
+34–104
+34–43
+
+BN0
+
+BNNIFI
+
+BNLF
++ 11.8% + 10.9% + 4.0%
++ 10.5% + 9.3% + 7.4%
++ 3.3%
++ 4.9%
+
++ 5.0%
+
+Figure 6. BNLF–Middle Frame Comparison: Two best (left) and
+worst (right) BNLF selections relative to the middle frame.
+
+index-based selections made this conﬁguration more robust
+to reductions in candidate annotation frames.
+
+4.5. Results on Different Segmentation Methods
+
+Cross evaluation results for different segmentation meth-
+ods are provided in Table 6. All BN conﬁgurations se-
+lect annotation frames that improve the performance of
+OnAVOS, despite BN training exclusively on OSVOS-
+generated labels. Nonetheless, the label-generating formu-
+lation in Section 3.4.1 is general to other semi-supervised
+VOS methods; thus, new BN training labels can always be
+generated for other methods. Note that ﬁrst frame results
+in Table 6 differ from the online benchmark due to dataset-
+speciﬁc conﬁgurations (e.g., [41]), non-deterministic com-
+ponents, and our segmenting and evaluating objects from
+multi-object videos separately, which is more challenging.
+
+8920
+
+Figure 7. Qualitative Comparison on DAVIS 2017 Validation Set: Segmentations from different annotated frame selection strategies.
+
+4.6. Final Considerations for Implementation
+
+Selecting the middle frame for annotation is the best per-
+forming simple selection strategy on all datasets and is easy
+to implement in practice. However, BNLF is more reliable
+than middle frame selection and results in better segmen-
+tation performance on all datasets. As shown in Figure 5,
+BNLF selects frames close to the middle of each video, but
+deviates toward frames that, on average, result in better per-
+formance than the middle frame (see Tables 4 & 5). On
+DAVIS 2017 Val., BNLF deviations from the middle frame
+results in better performance 70% of the time. We believe
+the underlying mechanism for this improvement is recog-
+nizing when the middle frame exhibits less distinguishable
+ResNet features or is less representative of the video refer-
+ence frames. To demonstrate beneﬁcial and counterproduc-
+tive examples of this behavior, the two best and worst BNLF
+selections relative to the middle frame on DAVIS 2017 Val.
+are shown with relative performance % in Figure 6.
+
+BN0 has the greatest relative segmentation improve-
+ments over simple selection strategies on the DAVIS valida-
+tion datasets (see example comparison in Figure 7). How-
+ever, this performance did not translate to datasets with a
+limited number of annotation frames available. To deter-
+mine if this is due to domain shift of fewer frames, we an-
+alyze the 10 longest and shortest videos from DAVIS 2017
+Val. in Table 7 as an additional experiment. The key result
+is that BN0 and BNNIFI’s relative performance gains double
+once approximately forty annotation frames are available.
+This is encouraging as most real-world videos have many
+
+more frames available for annotation, which is conducive
+for BN0’s best annotated frame selection results.
+
+5. Conclusions
+
+We emphasize that automatic selection of the best-
+performing annotation frames for video object segmenta-
+tion is a hard problem. Still, as video object segmentation
+methods become more learning-based and data-driven, it is
+critical that we make the most of training data and users’
+time for annotation. The most recent DAVIS challenge
+has shifted focus toward improving performance given lim-
+ited annotation feedback [5]. However, we demonstrate
+in this work that there are already simple strategies avail-
+able that offer a signiﬁcant performance improvement over
+ﬁrst frame annotations without increasing user effort; like-
+wise, our BubbleNets framework further improves perfor-
+mance using learned annotated frame selection. To continue
+progress in this direction and improve video object segmen-
+tation algorithms in practice, dataset annotators should give
+full consideration to alternative frame selection strategies
+when preparing future challenges.
+
+Finally, while the current BubbleNets implementation is
+speciﬁc to video object segmentation, it is more widely ap-
+plicable. In future work, we plan to apply BubbleNets to
+improve performance in other video-based applications.
+
+Acknowledgements
+
+This work was partially supported by the DARPA MediFor
+program under contract FA8750-16-C-0168.
+
+8921
+
+References
+
+[1] S. Avinash Ramakanth and R. Venkatesh Babu. Seamseg:
+Video object segmentation using patch seams. In Proceed-
+ings of the IEEE Conference on Computer Vision and Pattern
+Recognition (CVPR), 2014. 2
+
+[2] L. Bao, B. Wu, and W. Liu. CNN in MRF: video object seg-
+mentation via inference in A cnn-based higher-order spatio-
+temporal MRF. In IEEE Conference on Computer Vision and
+Pattern Recognition (CVPR), 2018. 1, 2
+
+[3] J. Bernard, M. Hutter, M. Zeppelzauer, D. Fellner, and
+M. Sedlmair. Comparing visual-interactive labeling with ac-
+tive learning: An experimental study. IEEE Transactions on
+Visualization and Computer Graphics, 24(1):298–308, Jan
+2018. 2
+
+[4] S. Caelles, K.-K. Maninis, J. Pont-Tuset, L. Leal-Taix´e,
+D. Cremers, and L. Van Gool. One-shot video object seg-
+mentation.
+In IEEE Conference on Computer Vision and
+Pattern Recognition (CVPR), 2017. 1, 2, 3, 4
+
+[5] S. Caelles, A. Montes, K. Maninis, Y. Chen, L. V. Gool,
+F. Perazzi, and J. Pont-Tuset. The 2018 DAVIS challenge on
+video object segmentation. CoRR, abs/1803.00557, 2018. 1,
+2, 3, 6, 8
+
+[6] J. Carreira and A. Zisserman. Quo vadis, action recognition?
+a new model and the kinetics dataset. In 2017 IEEE Confer-
+ence on Computer Vision and Pattern Recognition (CVPR),
+2017. 3
+
+[7] Y. Chen, J. Pont-Tuset, A. Montes, and L. Van Gool. Blaz-
+ingly fast video object segmentation with pixel-wise met-
+ric learning.
+In Computer Vision and Pattern Recognition
+(CVPR), 2018. 1
+
+[8] J. Cheng, Y.-H. Tsai, W.-C. Hung, S. Wang, and M.-H. Yang.
+Fast and accurate online video object segmentation via track-
+ing parts. In IEEE Conference on Computer Vision and Pat-
+tern Recognition (CVPR), 2018. 1
+
+[9] J. Cheng, Y.-H. Tsai, S. Wang, and M.-H. Yang. Segﬂow:
+Joint learning for video object segmentation and optical
+ﬂow. In IEEE International Conference on Computer Vision
+(ICCV), 2017. 1, 4
+
+[10] J. Deng, W. Dong, R. Socher, L. J. Li, K. Li, and L. Fei-
+Fei. Imagenet: A large-scale hierarchical image database. In
+IEEE Conference on Computer Vision and Pattern Recogni-
+tion (CVPR), 2009. 2
+
+[11] M. Everingham, L. Van Gool, C. K. Williams, J. Winn, and
+A. Zisserman. The pascal visual object classes (VOC) chal-
+lenge. International journal of computer vision, 88(2):303–
+338, 2010. 4
+
+[12] A. Faktor and M. Irani. Video segmentation by non-local
+In British Machine Vision Conference
+
+consensus voting.
+(BMVC), 2014. 1
+
+[13] Q. Fan, F. Zhong, D. Lischinski, D. Cohen-Or, and B. Chen.
+Jumpcut: non-successive mask transfer and interpolation for
+video cutout. ACM Trans. Graph., 34(6):195, 2015. 2
+
+[14] B. A. Grifﬁn and J. J. Corso. Tukey-inspired video object
+segmentation. In IEEE Winter Conference on Applications
+of Computer Vision (WACV), 2019. 5
+
+[15] K. He, X. Zhang, S. Ren, and J. Sun. Deep residual learning
+for image recognition. In The IEEE Conference on Computer
+Vision and Pattern Recognition (CVPR), 2016. 4
+
+[16] V. Jampani, R. Gadde, and P. V. Gehler. Video propagation
+networks. In IEEE Conference on Computer Vision and Pat-
+tern Recognition (CVPR), 2017. 1, 2
+
+[17] W. D. Jang and C. S. Kim. Online video object segmentation
+via convolutional trident network. In 2017 IEEE Conference
+on Computer Vision and Pattern Recognition (CVPR), pages
+7474–7483, July 2017. 1
+
+[18] A. Khoreva, R. Benenson, E. Ilg, T. Brox, and B. Schiele.
+Lucid data dreaming for object tracking. The 2017 DAVIS
+Challenge on Video Object Segmentation - CVPR Work-
+shops, 2017. 2
+
+[19] D. P. Kingma and J. Ba. Adam: A method for stochastic
+optimization. In International Conference on Learning Rep-
+resentations (ICLR), 2014. 6
+
+[20] D. Knuth. The Art of Computer Programming, volume 1-
+3. Addison-Wesley Longman Publishing Co., Inc., Boston,
+MA, USA, 1998. 3
+
+[21] Y. J. Lee, J. Kim, and K. Grauman. Key-segments for video
+object segmentation. In IEEE International Conference on
+Computer Vision (ICCV), 2011. 1
+
+[22] F. Li, T. Kim, A. Humayun, D. Tsai, and J. M. Rehg.
+Video segmentation by tracking many ﬁgure-ground seg-
+ments. In The IEEE International Conference on Computer
+Vision (ICCV). 1, 2, 5
+
+[23] X. Li, Y. Qi, Z. Wang, K. Chen, Z. Liu, J. Shi, P. Luo,
+C. C. Loy, and X. Tang. Video object segmentation with re-
+identiﬁcation. The 2017 DAVIS Challenge on Video Object
+Segmentation - CVPR Workshops, 2017. 2
+
+[24] A. L. Maas, A. Y. Hannun, and A. Y. Ng. Rectiﬁer nonlin-
+earities improve neural network acoustic models. In ICML
+Workshop on Deep Learning for Audio, Speech and Lan-
+guage Processing, 2013. 4
+
+[25] K. Maninis, S. Caelles, Y. Chen, J. Pont-Tuset, L. Leal-Taix,
+D. Cremers, and L. V. Gool. Video object segmentation
+without temporal information.
+IEEE Transactions on Pat-
+tern Analysis and Machine Intelligence, pages 1–1, 2018. 1,
+2, 6
+
+[26] A. McCallum and K. Nigam. Employing EM and pool-based
+In In International
+
+active learning for text classiﬁcation.
+Conference on Machine Learning (ICML), 1998. 2
+
+[27] N. Mrki, F. Perazzi, O. Wang, and A. Sorkine-Hornung. Bi-
+lateral space video segmentation. In 2016 IEEE Conference
+on Computer Vision and Pattern Recognition (CVPR), pages
+743–751, June 2016. 2
+
+[28] S. W. Oh, J.-Y. Lee, K. Sunkavalli, and S. J. Kim. Fast video
+object segmentation by reference-guided mask propagation.
+In IEEE Conference on Computer Vision and Pattern Recog-
+nition (CVPR), 2018. 1, 2
+
+[29] A. Papazoglou and V. Ferrari. Fast object segmentation in
+In Proceedings of the IEEE Interna-
+
+unconstrained video.
+tional Conference on Computer Vision (ICCV), 2013. 1
+
+[30] F. Perazzi, A. Khoreva, R. Benenson, B. Schiele, and
+A.Sorkine-Hornung. Learning video object segmentation
+from static images. In IEEE Conference on Computer Vision
+and Pattern Recognition (CVPR), 2017. 1, 2
+
+8922
+
+[31] F. Perazzi, J. Pont-Tuset, B. McWilliams, L. Van Gool,
+M. Gross, and A. Sorkine-Hornung. A benchmark dataset
+and evaluation methodology for video object segmentation.
+In IEEE Conference on Computer Vision and Pattern Recog-
+nition (CVPR), 2016. 1, 2, 5
+
+[32] F. Perazzi, O. Wang, M. Gross, and A. Sorkine-Hornung.
+Fully connected object proposals for video segmentation. In
+IEEE International Conference on Computer Vision (ICCV),
+2015. 2
+
+[33] J. Pont-Tuset, F. Perazzi, S. Caelles, P. Arbel´aez, A. Sorkine-
+Hornung, and L. Van Gool. The 2017 davis challenge on
+video object segmentation. arXiv:1704.00675, 2017. 1, 2, 5
+[34] B. Settles. Active learning. Synthesis Lectures on Artiﬁcial
+
+Intelligence and Machine Learning, 6(1):1–114, 2012. 2
+
+[35] J. Shin Yoon, F. Rameau, J. Kim, S. Lee, S. Shin, and
+I. So Kweon. Pixel-level matching for video object segmen-
+tation using convolutional neural networks. In IEEE Inter-
+national Conference on Computer Vision (ICCV), 2017. 1
+
+[36] N. Srivastava, G. Hinton, A. Krizhevsky, I. Sutskever, and
+R. Salakhutdinov. Dropout: A simple way to prevent neu-
+ral networks from overﬁtting. Journal of Machine Learning
+Research, 15:1929–1958, 2014. 4
+
+[37] D. Tsai, M. Flagg, A. Nakazawa, and J. M. Rehg. Motion
+coherent tracking using multi-label mrf optimization. Inter-
+national journal of computer vision, 100(2):190–202, 2012.
+1, 2, 5
+
+[38] S. Vijayanarasimhan and K. Grauman. What’s it going to
+cost you?: Predicting effort vs. informativeness for multi-
+label image annotations. In IEEE Conference on Computer
+Vision and Pattern Recognition (CVPR), 2009. 1, 2
+
+[39] S. Vijayanarasimhan and K. Grauman. Large-scale live ac-
+tive learning: Training object detectors with crawled data
+
+and crowds.
+108(1):97–114, May 2014. 2
+
+International Journal of Computer Vision,
+
+[40] S. Vijayanarasimhan, P. Jain, and K. Grauman. Far-sighted
+active learning on a budget for image and video recognition.
+In IEEE Conference on Computer Vision and Pattern Recog-
+nition (CVPR), 2010. 2
+
+[41] P. Voigtlaender and B. Leibe. Online adaptation of convolu-
+tional neural networks for the 2017 davis challenge on video
+object segmentation. The 2017 DAVIS Challenge on Video
+Object Segmentation - CVPR Workshops, 2017. 7
+
+[42] P. Voigtlaender and B. Leibe. Online adaptation of convo-
+lutional neural networks for video object segmentation. In
+British Machine Vision Conference (BMVC), 2017. 2, 6
+
+[43] C. Vondrick and D. Ramanan. Video annotation and tracking
+with active learning. In J. Shawe-Taylor, R. S. Zemel, P. L.
+Bartlett, F. Pereira, and K. Q. Weinberger, editors, Advances
+in Neural Information Processing Systems 24, pages 28–36.
+Curran Associates, Inc., 2011. 2
+
+[44] S. Wehrwein and R. Szeliski. Video segmentation with back-
+ground motion models. In British Machine Vision Confer-
+ence (BMVC), 2017. 1
+
+[45] N. Xu, L. Yang, Y. Fan, D. Yue, Y. Liang, J. Yang, and
+T. Huang. Youtube-vos: A large-scale video object segmen-
+tation benchmark. arXiv preprint arXiv:1809.03327, 2018.
+1, 2, 5
+
+[46] L. Yang, Y. Wang, X. Xiong, J. Yang, and A. K. Katsaggelos.
+Efﬁcient video object segmentation via network modulation.
+IEEE Conference on Computer Vision and Pattern Recogni-
+tion (CVPR), 2018. 1, 2
+
+[47] L. Zhou, C. Xu, and J. Corso. Towards automatic learning of
+procedures from web instructional videos. In AAAI Confer-
+
+ence on Artiﬁcial Intelligence, 2018. 4
+
+8923
+
+

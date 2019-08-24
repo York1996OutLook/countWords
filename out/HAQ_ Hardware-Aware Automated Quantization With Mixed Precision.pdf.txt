@@ -1,0 +1,1939 @@
+HAQ: Hardware-Aware Automated Quantization with Mixed Precision
+
+Kuan Wang∗, Zhijian Liu∗, Yujun Lin∗, Ji Lin, and Song Han
+{kuanwang, zhijian, yujunlin, jilin, songhan}@mit.edu
+
+Massachusetts Institute of Technology
+
+Abstract
+
+Model quantization is a widely used technique to com-
+press and accelerate deep neural network (DNN) inference.
+Emergent DNN hardware accelerators begin to support
+mixed precision (1-8 bits) to further improve the compu-
+tation efﬁciency, which raises a great challenge to ﬁnd the
+optimal bitwidth for each layer: it requires domain experts
+to explore the vast design space trading off among accu-
+racy, latency, energy, and model size, which is both time-
+consuming and sub-optimal. There are plenty of specialized
+hardware for neural networks, but little research has been
+done for specialized neural network optimization for a par-
+ticular hardware architecture. Conventional quantization
+algorithm ignores the different hardware architectures and
+quantizes all the layers in a uniform way. In this paper,
+we introduce the Hardware-Aware Automated Quantization
+(HAQ) framework which leverages the reinforcement learn-
+ing to automatically determine the quantization policy, and
+we take the hardware accelerator’s feedback in the design
+loop. Rather than relying on proxy signals such as FLOPs
+and model size, we employ a hardware simulator to gener-
+ate direct feedback signals (latency and energy) to the RL
+agent. Compared with conventional methods, our framework
+is fully automated and can specialize the quantization policy
+for different neural network architectures and hardware ar-
+chitectures. Our framework effectively reduced the latency
+by 1.4-1.95× and the energy consumption by 1.9× with neg-
+ligible loss of accuracy compared with the ﬁxed bitwidth (8
+bits) quantization. Our framework reveals that the optimal
+policies on different hardware architectures (i.e., edge and
+cloud architectures) under different resource constraints (i.e.,
+latency, energy and model size) are drastically different. We
+interpreted the implication of different quantization policies,
+which offer insights for both neural network architecture
+design and hardware architecture design.
+
+∗ indicates equal contributions.
+
+73
+
+72
+
+71
+
+70
+
+69
+
+68
+
+)
+
+%
+
+(
+ 
+y
+c
+a
+r
+u
+c
+c
+A
+1
+-
+p
+o
+T
+
+ 
+
+MobileNets (fixed 8-bit quantization)
+MobileNets (our flexible-bit quantization)
+
+Model Size:
+
+1MB 2MB 3MB
+
+25
+
+44
+
+63
+
+82
+
+101
+
+120
+
+Latency (ms)
+
+Figure 1: We need mixed precision for different layers. We
+quantize MobileNets [13] to different number of bits (both
+weights and activations), and it lies on a better pareto curve
+(yellow) than ﬁxed bit quantization (blue). The reason is that
+different layers have different redundancy and have differ-
+ent arithmetic intensity (OPs/byte) on the hardware, which
+advocates for using mixed precision for different layers.
+
+1. Introduction
+
+In many real-time machine learning applications (such
+as robotics, autonomous driving, and mobile VR/AR), deep
+neural networks is strictly constrained by the latency, energy,
+and model size. In order to improve the hardware efﬁciency,
+many researchers have proposed to directly design efﬁcient
+models [25, 13, 2] or to quantize the weights and activations
+to low precision [9, 35].
+
+Conventional quantization methods use the same number
+of bits for all layers [3, 15], but as different layers have dif-
+ferent redundancy and behave differently on the hardware
+(computation bounded or memory bounded), it is necessary
+to use mixed precision for different layers (as shown in Fig-
+ure 1). This ﬂexibility was originally not supported by chip
+vendors until recently the hardware manufacturers started
+to implement this feature: Apple released the A12 Bionic
+chip that supports mixed precision for the neural network
+inference [7]; NVIDIA recently introduced the Turing GPU
+architecture that supports 1-bit, 4-bit, 8-bit and 16-bit arith-
+metic operations [22]; Imagination launched a ﬂexible neural
+network IP that supports per-layer bitwidth adjustment for
+
+18612
+
+Inference latency on
+
+HW1
+
+HW2
+
+HW3
+
+Best Q. policy for HW1
+
+16.29 ms
+
+85.24 ms
+
+117.44 ms
+
+Best Q. policy for HW2
+
+19.95 ms
+
+64.29 ms
+
+108.64 ms
+
+Best Q. policy for HW3
+
+19.94 ms
+
+66.15 ms
+
+99.68 ms
+
+Table 1: Inference latency of MobileNet-V1 [13] on three
+hardware architectures under different quantization policies.
+The quantization policy that is optimized for one hardware
+is not optimal for the other. This suggests we need a spe-
+cialized quantization solution for different hardware archi-
+tectures. (HW1: BitFusion [26], HW2: BISMO [27] edge
+accelerator, HW3: BISMO cloud accelerator, batch = 16).
+
+both weights and activations [14]. Besides industry, recently
+academia also works on the bit-level ﬂexible hardware de-
+sign: BISMO [27] proposed the bit-serial multiplier to sup-
+port multiplications of 1 to 8 bits; BitFusion [26] supports
+multiplications of 2, 4, 8 and 16 bits in a spatial manner.
+
+However, a very missing part is how to determine the
+bitwidth of both weights and activations for each layer
+on different hardware accelerators. This is a vast design
+space: with M different neural network models, each with N
+layers, on H different hardware platforms, there are in total
+O(H × M × 82N )∗ possible solutions. For a widely used
+ResNet-50 [10] model, the size of the search space is about
+8100, which is even larger than the number of particles in
+the universe. Conventional methods require domain experts
+(with knowledge of both machine learning and hardware
+architecture) to explore the huge design space smartly with
+rule-based heuristics, such as: we should retain more bits
+in the ﬁrst layer which extracts low level features and in the
+last layer which computes the ﬁnal outputs; also, we should
+use more bits in the convolution layers than in the fully-
+connected layers because empirically, the convolution layers
+are more sensitive. As the neural network becomes deeper,
+the search space increases exponentially, which makes it
+infeasible to rely on hand-crafted strategies. Therefore, these
+rule-based quantization policies are usually sub-optimal, and
+they cannot generalize from one model to another. In this
+paper, we would like to automate this exploration process by
+a learning-based framework.
+
+Another challenge is how to optimize the latency and
+the energy consumption of a given model on the hardware.
+A widely adopted approach is to rely on some proxy sig-
+nals (e.g., FLOPs, number of memory references) [13, 25].
+However, as different hardware behaves very differently, the
+performance of a model on the hardware cannot always be
+accurately reﬂected by these proxy signals. Therefore, it
+is important to directly involve the hardware architecture’s
+
+∗Assuming the bitwidth is 1 to 8 for both weights and activations.
+
+performance feedback into the design loop. Also, as demon-
+strated in Table 1, the quantization solution optimized on
+one hardware might not be optimal on the other, which raises
+the demand for specialized policies for different hardware
+architectures.
+
+To this end, we propose the Hardware-Aware Automated
+Quantization (HAQ) framework that leverages reinforce-
+ment learning to automatically predict the quantization pol-
+icy given the hardware’s feedback. The RL agent decides the
+bitwidth of a given neural network in a layer-wise manner.
+For each layer, the agent receives the layer conﬁguration and
+statistics as observation, and it then outputs the action which
+is the bitwidth of weights and activations. We then leverage
+the hardware accelerator as the environment to obtain the
+direct feedback from hardware to guide the RL agent to sat-
+isfy the resource constraints. After all layers are quantized,
+we ﬁnetune the quantized model for one more epoch, and
+feed the validation accuracy after short-term retraining as the
+reward signal to our RL agent. During the exploration, we
+leverage the deep deterministic policy gradient (DDPG) [18]
+to supervise our RL agent. We also studied the quantization
+policy on multiple hardware architectures: both cloud and
+edge neural network accelerators, with spatial or temporal
+multi-precision design.
+
+The contribution of this paper has four aspects:
+
+1. Automation: We propose an automated framework for
+quantization, which does not require domain experts
+and rule-based heuristics. It frees the human labor from
+exploring the vast search space of choosing bitwidths.
+
+2. Hardware-Aware: Our framework involves the hard-
+ware architecture into the loop so that it can directly
+reduce the latency, energy and storage on the target
+hardware instead of relying on proxy signals.
+
+3. Specialization: For different hardware architectures,
+our framework can offer a specialized quantization pol-
+icy that’s exactly tailored for the target hardware archi-
+tecture to optimize latency and energy.
+
+4. Design Insights: We interpreted the different quantiza-
+tion polices learned for different hardware architectures.
+Taking both computation and memory access into ac-
+count, the interpretation offers insights on both neural
+network architecture and hardware architecture design.
+
+2. Related Work
+
+Quantization. There have been extensive explorations on
+compressing and accelerating deep neural networks using
+quantization. Han et al. [9] quantized the network weights
+to reduce the model size by rule-based strategies: e.g., they
+used human heuristics to determine the bitwidths for con-
+volution and fully-connected layers. Courbariaux et al. [5]
+binarized the network weights into {−1, +1}; Rastegari et
+al. [24] and Zhou et al. [33] binarized each convolution ﬁlter
+
+28613
+
+Actor
+
+Action
+
+Critic
+
+State  
+Reward
+
+Agent: DDPG
+
+Layer 3 
+3bit / 5bit
+
+Layer 4 
+6bit / 7bit
+
+Layer 5 
+4bit / 6bit
+
+Layer 6 
+5bit / 6bit
+
+……
+
+3 bit weight
+
+5 bit activation
+
+1 0 1 0 0 0 1 0
+
+BitFusion (On the Edge)
+
+BISMO (On the Cloud)
+⋯
+
+PE
+
+PE
+
+BISMO (On the Edge)
+⋯
+
+PE
+
+PE
+
+PE
+
+⋯
+
+PE
+
+PE
+
+⋯
+
+PE
+
+PE
+
+⋯
+
+PE
+
+PE
+
+w
+
+n ⋯
+
+PE
+
+⋯
+
+w0
+
+a
+
+n ⋯
+
+PE
+
+w
+
+n ⋯
+
+PE
+⋯
+⋯
+
+⋯
+
+w0
+
+a
+
+n ⋯
+⋯
+
+PE
+⋯
+⋯
+
+w
+
+n ⋯
+
+⋯
+⋯
+
+w0
+
+a
+
+⋯
+
+n ⋯
+⋯
+
+⋯
+⋯
+
+⋯
+
+⋯
+
+a0
+
+⋯
+
+Cycle T 
+(LSB)
+
+⋯
+
+Cycle 0 
+(MSB)
+
+a0
+
+⋯
+&
+
++
+
+<<
+
+PE
+
+PE
+
+a0
+
+⋯
+
+…
+
+1 1 1 0 1 0 1 0 0 1 0 1 0
+
+Hardware 
+Mapping
+
+PE
+
+1 1 1 0 1 0 1 0 0 1
+
+Direct 
+
+Feedback
+
+1 1 1 0 1 0 1 0 0 1 0
+
+……
+
+⋯
+
+⋯
+
+⋯
+
+⋯
+
+⋯
+
+&
+
++
+
+<<
+
++
+
++
+
+⋯
+
+&
+
++
+
+<<
+
++
+
+Policy
+
+Quantized Model
+
+Hardware Accelerator
+
+Figure 2: An overview of our Hardware-Aware Automated Quantization (HAQ) framework. We leverage the reinforcement
+learning to automatically search over the huge quantization design space with hardware in the loop. The agent propose an
+optimal bitwidth allocation policy given the amount of computation resources (i.e., latency, power, and model size). Our RL
+agent integrates the hardware accelerator into the exploration loop so that it can obtain the direct feedback from the hardware,
+instead of relying on indirect proxy signals.
+
+⋯
+
+⋯
+
+into {−w, +w}; Zhu et al. [35] mapped the network weights
+into {−wN, 0, +wP} using two bits; Zhou et al. [34] used
+one bit for network weights and two bits for activations; Ja-
+cob et al. [15] made use of 8-bit integers for both weights and
+activations. We refer the reader to the survey paper by Kr-
+ishnamoorthi et al. [17] for a more detailed overview. These
+conventional quantization methods either simply assign the
+same number of bits to all layers or require domain experts to
+determine the bitwidths for different layers, while our frame-
+work automates this design process, and our learning-based
+policy outperforms rule-based strategies.
+
+AutoML. Many researchers aimed to improve the perfor-
+mance of deep neural networks by searching the network
+architectures: Zoph et al. [36] proposed the Neural Architec-
+ture Search (NAS) to explore and design the transformable
+network building blocks, and their network architecture out-
+performs several human designed networks; Liu et al. [20]
+introduced the Progressive NAS to accelerate the architecture
+search by 5× using sequential model-based optimization;
+Pham et al. [23] introduced the Efﬁcient NAS to speed up
+the exploration by 1000× using parameter sharing; Cai et
+al. [1] introduced the path-level network transformation to
+effectively search the tree-structured architecture space. Mo-
+tivated by these AutoML frameworks, He et al. [11] lever-
+aged the reinforcement learning to automatically prune the
+convolution channels. Our framework further explores the
+automated quantization for network weights and activations,
+and it takes the hardware architectures into consideration.
+
+Efﬁcient Models. To facilitate the efﬁcient deployment,
+researchers designed hardware-friendly approaches to slim
+neural network models. For instance, the coarse-grained
+
+⋯
+
+a0
+
+a0
+
+a0
+
+⋯
+
+⋯
+
+⋯
+
+⋯
+
+⋯
+
+⋯
+
+⋯
+
+⋯
+
+⋯
+
+⋯
+
+⋯
+
+⋯
+
+⋯
+
+⋯
+
+w0
+
+w0
+
+w0
+
+⋯
+⋯
+
+⋯
+⋯
+
+⋯
+⋯
+
+⋯
+⋯
+
+a ⋯
+
+a ⋯
+
+a ⋯
+
+w ⋯
+
+w ⋯
+
+w ⋯
+
+channel pruning methods [12, 19, 21] prune away the entire
+channel of convolution kernels to achieve speedup. Recently,
+researchers have explicitly optimized for various aspects of
+hardware properties, including the inference latency and en-
+ergy: Yang et al. [31] proposed the energy-aware pruning
+to directly optimize the energy consumption of neural net-
+works; Yang et al. [32] reduced the inference time of neural
+networks on the mobile devices through a lookup table. Nev-
+ertheless, these methods are still rule-based and mostly focus
+on pruning. Our framework automates the quantization pro-
+cess by taking hardware-speciﬁc metric as direct rewards
+using a learning based method.
+
+⋯
+
+⋯
+
+3. Approach
+
+We model the quantization task as a reinforcement learn-
+ing problem (Figure 2). We use the actor-critic model with
+DDPG agent to give the action: bits for each layer. We
+collect hardware counters as constraints, together with ac-
+curacy as rewards to search the optimal quantization policy.
+We have three hardware environments that covers edge and
+cloud, spatial and temporal architectures for mixed-precision
+accelerator.
+
+3.1. Observation (State Space)
+
+Our agent processes the neural network in a layer-wise
+manner. For each layer, our agent takes two steps: one for
+weights, and one for activations. In this paper, we introduce
+a ten-dimensional feature vector Ok as our observation:
+If the kth layer is a convolution layer, the state Ok is
+
+Ok = (k, cin, cout, skernel, sstride, sfeat, nparams, idw, iw/a, ak−1),
+(1)
+
+38614
+
+where k is the layer index, cin is #input channels, cout is
+#output channels, skernel is kernel size, sstride is the stride,
+sfeat is the input feature map size, nparams is #parameters,
+idw is a binary indicator for depthwise convolution, iw/a is a
+binary indicator for weight/activation, and ak−1 is the action
+from the last time step.
+
+If the kth layer is a fully-connected layer, the state Ok is
+
+Instead, we use direct latency and energy feedback from
+the hardware accelerator as resource constraints, which en-
+ables our RL agent to determine the bitwidth allocation pol-
+icy from the subtle differences between different layers: e.g.,
+vanilla convolution has more data reuse and better locality,
+while depthwise convolution [4] has less reuse and worse
+locality, which makes it memory bounded. Such difference
+impacts the optimal quantization policy.
+
+Ok = (k, hin, hout, 1, 0, sfeat, nparams, 0, iw/a, ak−1),
+
+(2)
+
+3.4. Quantization
+
+where k is the layer index, hin is #input hidden units, hout is
+#output hidden units, sfeat is the size of input feature vector,
+nparams is #parameters, iw/a is a binary indicator for weight/
+activation, and ak−1 is the action from the last step.
+
+For each dimension in the observation vector Ok, we
+
+normalize it into [0, 1] to make them in the same scale.
+
+3.2. Action Space
+
+We use a continuous action space to determine the
+bitwidth. The reason that we do not use a discrete action
+space is because it loses the relative order: e.g., 2-bit quan-
+tization is more aggressive than 4-bit and even more than
+8-bit. At the kth time step, we take the continuous action ak
+(which is in the range of [0, 1]), and round it into the discrete
+bitwidth value bk:
+
+We linearly quantize the weights and activations of each
+layer using the action ak given by our agent, as linearly
+quantized model only needs ﬁxed point arithmetic unit which
+is more efﬁcient to implement on the hardware.
+
+Speciﬁcally, for each weight value w in the kth layer, we
+ﬁrst truncate it into the range of [−c, c], and we then quantize
+it linearly into ak bits:
+
+quantize(w, ak, c) = round(clamp(w, c)/s) × s,
+
+(4)
+
+where clamp(·, x) is to truncate the values into [−x, x], and
+the scaling factor s is deﬁned as s = c/(2ak−1 − 1). In this
+paper, we choose the value of c by ﬁnding the optimal value
+x that minimizes the KL-divergence between the original
+weight distribution Wk and the quantized weight distribution
+quantize(Wk, ak, x):
+
+bk = round(bmin − 0.5 + ak × (bmax − bmin + 1)),
+
+(3)
+
+c = arg min
+
+x
+
+DKL(Wk || quantize(Wk, ak, x)),
+
+(5)
+
+where bmin and bmax denote the min and max bitwidth (in our
+experiments, we set bmin to 2 and bmax to 8).
+
+Resource Constraints.
+In real-world applications, we
+have limited computation budgets (i.e., latency, energy, and
+model size). We would like to ﬁnd the quantization policy
+with the best performance given the constraint.
+
+We encourage our agent to meet the computation budget
+by limiting the action space. After our RL agent gives actions
+{ak} to all layers, we measure the amount of resources
+that will be used by the quantized model. The feedback is
+directly obtained from the hardware accelerator, which we
+will discuss in Section 3.3. If the current policy exceeds
+our resource budget (on latency, energy or model size), we
+will sequentially decrease the bitwidth of each layer until the
+constraint is ﬁnally satisﬁed.
+
+3.3. Direct Feedback from Hardware Accelerators
+
+An intuitive feedback to our RL agent can be FLOPs or
+the model size. However, as these proxy signals are indirect,
+they are not equal to the performance (i.e., latency, energy
+consumption) on the hardware. Cache locality, number of
+kernel calls, memory bandwidth all matters. Proxy feed-
+back can not model these hardware functionality to ﬁnd the
+specialized strategies (see Table 1).
+
+where DKL(· || ·) is the KL-divergence that characterizes the
+distance between two distributions. As for activations, we
+quantize the values similarly except that we truncate them
+into the range of [0, c], not [−c, c] since the activation values
+(which are the outputs of the ReLU layers) are non-negative.
+
+3.5. Reward Function
+
+After quantization, we retrain the quantized model for
+one more epoch to recover the performance. As we have
+already imposed the resource constraints (latency, energy) by
+limiting the action space (Section 3.2), we deﬁne our reward
+function R to be only related to the accuracy:
+
+R = λ × (accquant − accorigin),
+
+(6)
+
+where accorigin is the top-1 classiﬁcation accuracy of the full-
+precision model on the training set, accquant is the accuracy
+of the quantized model after ﬁnetuning, and λ is a scaling
+factor which is set to 0.1 in our experiments.
+
+3.6. Agent
+
+For the RL agent, we leverage the deep deterministic
+policy gradient (DDPG) [18], which is an off-policy actor-
+critic algorithm for continuous control problem. In our envi-
+ronment, one step means that our agent makes an action
+
+48615
+
+to decide the number of bits assigned to the weights or
+activations of a speciﬁc layer, while one episode is com-
+posed of multiple steps, where our RL agent makes actions
+to all layers. We apply a variant form of the Bellman’s
+Equation, where each transition in an episode is deﬁned
+as Tk = (Ok, ak, R, Ok+1). During exploration, the Q-
+function is computed as
+
+ˆQk = Rk − B + γ × Q(Ok+1, w(Ok+1) | θQ),
+
+(7)
+
+and the loss function can be approximated by
+
+L =
+
+1
+Ns
+
+Ns
+X
+
+k=1
+
+( ˆQk − Q(Ok, ak | θQ))2,
+
+(8)
+
+where Ns denotes the number of steps in this episode, and
+the baseline B is deﬁned as an exponential moving average
+of all previous rewards in order to reduce the variance of the
+gradient estimation. The discount factor γ is set to 1 since we
+assume that the action made for each layer should contribute
+equally to the ﬁnal result. Moreover, as the number of steps
+is always ﬁnite (bounded by the number of layers), the sum
+of the rewards will not explode.
+
+3.7. Implementation Details
+
+In this section, we present the implementation details
+
+about RL exploration and ﬁnetuning quantized models.
+
+Agent. The DDPG agent consists of an actor network and
+a critic network. Both using the same network architec-
+ture: they take the state vector and the action from the last
+time step as inputs and feed them into two separate fully-
+connected layers with hidden sizes of 400. After that, we
+add the two hidden vectors together and go through another
+two fully-connected layers with hidden sizes of {300, 1}. As
+for the actor network, we use an additional sigmoid function
+to project the output into the range of [0, 1].
+
+Exploration. Optimization of the DDPG agent is carried
+out using ADAM [16] with β1 = 0.9 and β2 = 0.999. We
+use a ﬁxed learning rate of 10−4 for the actor network and
+10−3 for the critic network. During exploration, we employ
+the following stochastic process of the noise:
+
+w′(Ok) ∼ Ntrunc(w(Ok | θw
+
+k ), σ2, 0, 1),
+
+(9)
+
+where Ntrunc(µ, σ, a, b) is the truncated normal distribution,
+and w is the model weights. The noise σ is initialized as 0.5,
+and after each episode, the noise is decayed exponentially
+with a decay rate of 0.99.
+
+Finetuning. During exploration, we ﬁnetune the quantized
+model for one epoch to help recover the performance (using
+SGD with a ﬁxed learning rate of 10−3 and momentum of
+0.9). We randomly select 100 categories from ImageNet [6]
+
+Hardware Batch PE Array AXI port Block RAM
+
+Edge
+
+Zynq-7020
+
+Cloud
+
+VU9P
+
+1
+
+16
+
+8×8
+16×16
+
+4×64b
+4×256b
+
+140×36Kb
+2160×36Kb
+
+Table 2: The conﬁgurations of edge and cloud accelerators.
+
+to accelerate the model ﬁnetuning during exploration. After
+exploration, we quantize the model with our best policy and
+ﬁnetune it on the full dataset.
+
+4. Experiments
+
+We conduct extensive experiments to demonstrate the
+consistent effectiveness of our framework for multiple objec-
+tives: latency, energy, and model size.
+
+Datasets and Models. Our experiments are performed on
+the ImageNet [6] dataset. As our focus is on more efﬁcient
+models, we extensively study the quantization of MobileNet-
+V1 [13] and MobileNet-V2 [25]. Both MobileNets are in-
+spired from the depthwise separable convolutions [4] and re-
+place the regular convolutions with the pointwise and depth-
+wise convolutions: MobileNet-V1 stacks multiple “depth-
+wise – pointwise” blocks repeatedly; while MobileNet-V2
+uses the “pointwise – depthwise – pointwise” blocks as its
+basic building primitives.
+
+4.1. Latency Constrained Quantization
+
+We ﬁrst evaluate our framework under latency constraints
+on two representative hardware architectures: spatial and
+temporal architectures for multi-precision CNN. We show
+that it’s beneﬁcial to have specialized quantization policies
+for different hardware architectures. We systematically inter-
+pret the policy given by AI to guide future human designs.
+
+Temporal Architecture. Bit-Serial Matrix Multiplication
+Overlay (BISMO) proposed by Yaman et al. [27] is a classic
+temporal design of neural network accelerator on FPGA. It
+introduces bit-serial multipliers which are fed with one-bit
+digits from 256 weights and corresponding activations in
+parallel at one time and accumulates their partial products
+by shifting over time.
+
+Spatial Architecture. BitFusion architecture proposed by
+Hardik et al. [26] is a state-of-the-art spatial ASIC design for
+neural network accelerator. It employs a 2D systolic array of
+Fusion Units which spatially sum the shifted partial products
+of two-bit elements from weights and activations.
+
+4.1.1 Quantization policy for BISMO Architecture
+
+Inferencing neural networks on edge devices and cloud
+severs can be quite different: batch size, memory bandwidth,
+peak FLOPs, etc.. We use Xilinx Zynq-7020 FPGA [30] as
+
+58616
+
+Edge Accelerator
+
+Cloud Accelerator
+
+MobileNet-V1
+
+MobileNet-V2
+
+MobileNet-V1
+
+MobileNet-V2
+
+Bitwidths Acc.-1 Acc.-5 Latency Acc.-1 Acc.-5 Latency Acc.-1 Acc.-5 Latency Acc.-1 Acc.-5 Latency
+
+PACT [3]
+
+4 bits
+
+62.44
+
+84.19 45.45 ms 61.39
+
+83.72
+
+52.15 ms
+
+62.44
+
+84.19
+
+57.49 ms
+
+61.39
+
+83.72
+
+74.46 ms
+
+Ours
+
+ﬂexible
+
+67.40
+
+87.90 45.51 ms 66.99
+
+87.33
+
+52.12 ms
+
+65.33
+
+86.60
+
+57.40 ms
+
+67.01
+
+87.46
+
+73.97 ms
+
+PACT [3]
+
+5 bits
+
+67.00
+
+87.65 57.75 ms 68.84
+
+88.58
+
+66.94 ms
+
+67.00
+
+87.65
+
+77.52 ms
+
+68.84
+
+88.58
+
+99.43 ms
+
+Ours
+
+ﬂexible
+
+70.58
+
+89.77 57.70 ms 70.90
+
+89.91
+
+66.92 ms
+
+69.97
+
+89.37
+
+77.49 ms
+
+69.45
+
+88.94
+
+99.07 ms
+
+PACT [3]
+
+6 bits
+
+70.46
+
+89.59 70.67 ms 71.25
+
+90.00
+
+82.49 ms
+
+70.46
+
+89.59
+
+99.86 ms
+
+71.25
+
+90.00 127.07 ms
+
+Ours
+
+ﬂexible
+
+71.20
+
+90.19 70.35 ms 71.89
+
+90.36
+
+82.34 ms
+
+71.20
+
+90.08
+
+99.66 ms
+
+71.85
+
+90.24 127.03 ms
+
+Original
+
+8 bits
+
+70.82
+
+89.85 96.20 ms 71.81
+
+90.25 115.84 ms 70.82
+
+89.85 151.09 ms 71.81
+
+90.25 189.82 ms
+
+Table 3: Latency-constrained quantization on BISMO (edge accelerator and cloud accelerator) on ImageNet. Our framework
+can reduce the latency by 1.4× to 1.95× with negligible loss of accuracy compared with the ﬁxed bitwidth (8 bits) quantization.
+
+8
+6
+4
+t
+2
+i
+b
+#
+4
+6
+
+6
+4
+
+t
+i
+2
+b
+#
+4
+6
+8
+
+#
+g
+o
+l
+
+4 
+2
+0
+
+depthwise: fewer bits
+
+pointwise:more bits
+
+Edge
+
+Cloud
+
+layer
+
+layer
+
+depthwise:more bits
+
+pointwise:fewer bits
+
+#weight bit (pointwise)
+#activation bit (pointwise)
+
+#weight bit (depthwise)
+#activation bit (depthwise)
+
+# OPs per Byte (pointwise)
+
+# OPs per Byte (depthwise)
+
+layer
+
+Figure 3: Quantization policy under latency constraints for
+MobileNet-V1. On edge accelerator, our RL agent allocates
+less activation bits to the depthwise convolutions, which
+echos that the depthwise convolutions are memory bounded
+and the activations dominates the memory access. On cloud
+accelerator, our agent allocates more bits to the depthwise
+convolutions and allocates less bits to the pointwise convolu-
+tions, as cloud device has more memory bandwidth and high
+parallelism, the network appears to be computation bounded.
+
+our edge device and Xilinx VU9P [29] as our cloud device.
+Table 2 shows our experiment conﬁgurations on these two
+platforms along with their available resources.
+
+As for comparison, we adopt the PACT [3] as our baseline,
+which uses the same number of bits for all layers except for
+the ﬁrst layer which extracts the low level features, they
+
+use 8 bits for both weights and activations as it has fewer
+parameters and is very sensitive to errors. We follow a
+similar setup for the ﬁrst layer (8 bits), and explore the
+bitwidth allocation policy for all the other layers. Under the
+same latency, HAQ consistently achieved better accuracy
+than the baseline on both the cloud and the edge (Table 3).
+With similar accuracy, HAQ can reduce the latency by 1.4×
+to 1.95× compared with the baseline.
+
+Interpreting the quantization policy. Our agent gave
+quite different quantization policy for edge and cloud ac-
+celerators (Figure 3). For the activations, the depthwise con-
+volution layers are assigned less bitwidth than the pointwise
+layers on the edge; while on the cloud device, the bitwidth
+of these two types of layers are similar. For weights, the
+bitwidth of these types of layers are nearly the same on the
+edge; while on the cloud, the depthwise convolution layers
+got more bitwidth than the pointwise convolution layers.
+
+We explain the difference of quantization policy between
+edge and cloud by the rooﬂine model [28]. Many previous
+works use FLOPs or BitOPs as metrics to measure compu-
+tation complexity. However, they are not able to directly
+reﬂect the latency, since there are many other factors inﬂu-
+encing the hardware performance, such as memory access
+cost and degree of parallelism [25, 21]. Taking computation
+and memory access into account, the rooﬂine model assumes
+that applications are either computation-bound or memory
+bandwidth-bound, if not ﬁtting in on-chip caches, depending
+on their operation intensity. Operation intensity is measured
+as operations (MACs in neural networks) per byte accessed.
+A lower operation intensity indicates suffering more from
+the memory access.
+
+The bottom of Figure 3 shows the operation intensities
+(OPs per Byte) of convolution layers in the MobileNet-V1.
+Depthwise convolution is memory bounded, and the point-
+wise convolution is computation bounded. Our experiments
+show that when running MobileNet-V1 on the edge devices
+
+68617
+
+t
+i
+b
+#
+
+t
+i
+b
+#
+
+6
+
+4
+
+2
+
+4
+
+6
+
+6
+
+4
+
+2
+
+4
+
+6
+
+depthwise:fewer bits
+
+pointwise:more bits
+
+Edge
+
+depthwise:fewer bits at first few layers
+
+depthwise:more bits at last few layers
+
+Cloud
+
+layer
+
+layer
+
+depthwise:more bits
+
+pointwise:fewer bits
+
+#weight bit (pointwise)
+
+#weight bit (depthwise)
+
+#activation bit (pointwise)
+
+#activation bit (depthwise)
+
+Figure 4: Quantization policy under latency constraints for MobileNet-V2 on BISMO. Similar to Figure 3, depthwise layer is
+assigned with fewer bits on the edge accelerator, and pointwise layer is assigned with fewer bits on the cloud accelerator.
+
+Weights Activations Acc.-1 Acc.-5 Latency
+
+Weights Activations Acc.-1 Acc.-5
+
+Energy
+
+PACT [3]
+
+4 bits
+
+4 bits
+
+Ours
+
+ﬂexible
+
+ﬂexible
+
+PACT [3]
+
+6 bits
+
+4 bits
+
+Ours
+
+ﬂexible
+
+ﬂexible
+
+PACT [3]
+
+6 bits
+
+6 bits
+
+Ours
+
+ﬂexible
+
+ﬂexible
+
+62.44
+
+67.45
+
+67.51
+
+70.40
+
+70.46
+
+70.90
+
+84.19
+
+87.85
+
+7.86 ms
+
+7.86 ms
+
+PACT [3]
+
+4 bits
+
+4 bits
+
+Ours
+
+ﬂexible
+
+ﬂexible
+
+87.84
+
+11.10 ms
+
+PACT [3]
+
+6 bits
+
+4 bits
+
+89.69
+
+11.09 ms
+
+Ours
+
+ﬂexible
+
+ﬂexible
+
+89.59
+
+19.99 ms
+
+PACT [3]
+
+6 bits
+
+6 bits
+
+89.95
+
+19.98 ms
+
+Ours
+
+ﬂexible
+
+ﬂexible
+
+62.44
+
+64.78
+
+67.51
+
+70.37
+
+70.46
+
+70.90
+
+84.19
+
+13.47 mJ
+
+85.85
+
+13.69 mJ
+
+87.84
+
+16.57 mJ
+
+89.40
+
+16.30 mJ
+
+89.59
+
+26.80 mJ
+
+89.73
+
+26.67 mJ
+
+Original
+
+8 bits
+
+8 bits
+
+70.82
+
+89.85
+
+20.08 ms
+
+Original
+
+8 bits
+
+8 bits
+
+70.82
+
+89.95
+
+31.03 mJ
+
+Table 4: Latency-constrained quantization on BitFusion
+(MobileNet-V1 on ImageNet). Our framework can reduce
+the latency by 2× with almost no loss of accuracy compared
+with the ﬁxed bitwidth (8 bits) quantization.
+
+Table 5: Energy-constrained quantization on BitFusion
+(MobileNet-V1 on ImageNet). Our framework reduces the
+power consumption by 2× with nearly no loss of accuracy
+compared with the ﬁxed bitwidth quantization.
+
+with small batch size, its latency is dominated by the depth-
+wise convolution layers. Since the feature maps take a major
+proportion in the memory of depthwise convolution layers,
+our agent gives the activations less bits. In contrast, when
+running MobileNet-V1 on the cloud with large batch size,
+our agent increases the bitwidth of depthwise convolution to
+preserve the accuracy at low memory overhead since depth-
+wise convolution only takes a small proportion of the total
+weights. A similar phenomenon can be observed in Figure 4
+on MobileNet-V2. Moreover, as the activation size in deeper
+layers gets smaller, they get assigned more bits.
+
+4.1.2 Quantization policy for BitFusion Architecture
+
+In order to demonstrate the effectiveness of our frame-
+work on different hardware architectures, we further compare
+our framework with PACT [3] under the latency constraints
+on the BitFusion [26] architecture (Table 4). Our frame-
+work performs much better than the hand-craft policy with
+the same latency. It can achieve almost no degradation of
+accuracy with only half of the latency used by the original
+
+MobileNet-V1 model (from 20.08 to 11.09 ms). Therefore,
+our framework is ﬂexible to provide specialized quantization
+policy for different hardware platforms.
+
+4.2. Energy Constrained Quantization
+
+We then evaluate our framework under the energy con-
+straints. Similar to the latency-constrained experiments, we
+compare our framework with PACT [3] that uses ﬁxed num-
+ber of bits without hardware feedback. From Table 5, we can
+clearly see that our framework outperforms the rule-based
+baseline: it achieves much better performance while consum-
+ing similar amount of energy. In particular, our framework is
+able to achieve almost no loss of accuracy with nearly half of
+the energy consumption of the original MobileNet-V1 model
+(from 31.03 to 16.57 mJ), which suggests that mixed preci-
+sion with hardware-aware, specialized quantization policy
+can indeed help reduce the energy consumption.
+
+78618
+
+MobileNet-V1
+
+MobileNet-V2
+
+ResNet-50
+
+Weights Acc.-1 Acc.-5 Model Size Acc.-1 Acc.-5 Model Size Acc.-1 Acc.-5 Model Size
+
+Han et al. [9]
+
+2 bits
+
+Ours
+
+ﬂexible
+
+Han et al. [9]
+
+3 bits
+
+Ours
+
+ﬂexible
+
+Han et al. [9]
+
+4 bits
+
+Ours
+
+ﬂexible
+
+37.62
+
+57.14
+
+65.93
+
+67.66
+
+71.14
+
+71.74
+
+64.31
+
+81.87
+
+86.85
+
+88.21
+
+89.84
+
+90.36
+
+1.09 MB
+
+1.09 MB
+
+1.60 MB
+
+1.58 MB
+
+2.10 MB
+
+2.07 MB
+
+58.07
+
+66.75
+
+68.00
+
+70.90
+
+71.24
+
+71.47
+
+81.24
+
+87.32
+
+87.96
+
+89.76
+
+89.93
+
+90.23
+
+0.96 MB
+
+0.95 MB
+
+1.38 MB
+
+1.38 MB
+
+1.79 MB
+
+1.79 MB
+
+68.95
+
+70.63
+
+75.10
+
+75.30
+
+76.15
+
+76.14
+
+88.68
+
+89.93
+
+92.33
+
+92.45
+
+92.88
+
+92.89
+
+6.32 MB
+
+6.30 MB
+
+9.36 MB
+
+9.22 MB
+
+12.40 MB
+
+12.14 MB
+
+Original
+
+32 bits
+
+70.90
+
+89.90
+
+16.14 MB
+
+71.87
+
+90.32
+
+13.37 MB
+
+76.15
+
+92.86
+
+97.49 MB
+
+Table 6: Model size-constrained quantization on ImageNet. Compared with Deep Compression [8], our framework achieves
+higher accuracy under similar model size (especially under high compression ratio).
+
+depthwise:more bits
+
+pointwise:fewer bits
+
+more params, fewer bits
+
+s
+t
+i
+b
+#
+
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+
+#
+g
+o
+l
+
+6
+4
+2
+
+2
+4
+6
+
+#params (pointwise)
+
+ #params (depthwise)
+
+#weight bits (pointwise)
+
+#weight bits (depthwise)
+
+layer
+
+Figure 5: Quantization policy under model size constraints for MobileNet-V2. Our RL agent allocates more bits to the
+depthwise convolutions, since depthwise convolutions have fewer number of parameters.
+
+4.3. Model Size Constrained Quantization
+
+Finally, we evaluate our framework under the model size
+constraints. Following Han et al. [9], we employ the k-means
+algorithm to quantize the values into k different centroids
+instead of using the linear quantization for compression,
+since k-means quantization can be more effective reducing
+the model size.
+
+We compare our framework with Deep Compression [9]
+on MobileNets and ResNet-50. From Table 6, we can see
+that our framework performs much better than Deep Com-
+pression: it achieves higher accuracy with the same model
+size. For compact models like MobileNets, Deep Compres-
+sion signiﬁcantly degrades the performance especially under
+aggressive quantization, while our framework can preserve
+the accuracy much better. For instance, when Deep Com-
+pression quantizes the weights of MobileNet-V1 to 2 bits,
+the accuracy drops signiﬁcantly from 70.90 to 37.62; while
+our framework can still achieve 57.14 of accuracy with the
+same model size. The reason is our framework makes full
+use of the mixed precision by systematically searching the
+optimal quantization policy.
+
+Discussions.
+In Figure 5, we visualize the bitwidth allo-
+cation strategy for MobileNet-V2. From this ﬁgure, we
+can observe that our framework assigns more bitwidths to
+the weights in depthwise convolution layers than pointwise
+convolution layers. Intuitively, this is because the number
+of parameters in the former is much smaller than the latter.
+Comparing Figure 4 and Figure 5, the policies are drasti-
+
+cally different under different optimization objectives (fewer
+bitwiths for depthwise convolutions under latency optimiza-
+tion, more bitwidths for depthwise convolutions under model
+size optimization). Our framework succeeds in learning to
+adjust its bitwidth policy under different constraints.
+
+5. Conclusion
+
+In this paper, we propose Hardware-Aware Automated
+Quantization (HAQ), an automated framework for quanti-
+zation which does not require any domain experts and rule-
+based heuristics. We provide a learning based method that
+can search the quantization policy with hardware feedback.
+Compared with indirect proxy signals, our framework can
+offer a specialized quantization solution for different hard-
+ware platforms. Extensive experiments demonstrate that our
+framework performs better than conventional rule-based ap-
+proaches for multiple objectives: latency, energy and model
+size. Our framework reveals that the optimal policies on
+different hardware architectures are drastically different, and
+we interpreted the implication of those policies. We believe
+the insights will inspire the future software and hardware
+co-design for efﬁcient deployment of deep neural networks.
+
+Acknowledgements. We thank MIT Quest for Intelli-
+gence, MIT-IBM Watson AI Lab, Xilinx, Samsung, Intel,
+ARM, Qualcomm, and SONY for supporting this research.
+We thank Google Cloud and AWS Machine Learning Re-
+search Awards for providing the computation resource.
+
+88619
+
+References
+
+[1] Han Cai, Jiacheng Yang, Weinan Zhang, Song Han, and
+Yong Yu. Path-Level Network Transformation for Efﬁcient
+Architecture Search. In ICML, 2018. 3
+
+[2] Han Cai, Ligeng Zhu, and Song Han. ProxylessNAS: Direct
+Neural Architecture Search on Target Task and Hardware. In
+ICLR, 2019. 1
+
+[3] Jungwook Choi, Zhuo Wang, Swagath Venkataramani,
+Pierce I-Jen Chuang, Vijayalakshmi Srinivasan, and Kailash
+Gopalakrishnan. PACT: Parameterized Clipping Activation
+for Quantized Neural Networks. arXiv, 2018. 1, 6, 7
+
+[4] Franc¸ois Chollet. Xception - Deep Learning with Depthwise
+
+Separable Convolutions. In CVPR, 2017. 4, 5
+
+[5] Matthieu Courbariaux, Itay Hubara, Daniel Soudry, Ran El-
+Yaniv, and Yoshua Bengio. Binarized Neural Networks: Train-
+ing Deep Neural Networks with Weights and Activations
+Constrained to +1 or -1. arXiv, 2016. 2
+
+[6] Jia Deng, Wei Dong, Richard Socher, Li-Jia Li, Kai Li, and
+ImageNet - A large-scale hierarchical image
+
+Fei-Fei Li.
+database. In CVPR, 2009. 5
+
+[7] EENews. Apple describes 7nm a12 bionic chips, 2018. 1
+[8] Song Han. Efﬁcient Methods and Hardware for Deep Learn-
+
+ing. PhD thesis, 2017. 8
+
+[9] Song Han, Huizi Mao, and William Dally. Deep Compression:
+Compressing Deep Neural Networks with Pruning, Trained
+Quantization and Huffman Coding. In ICLR, 2016. 1, 2, 8
+
+[10] Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun.
+Deep Residual Learning for Image Recognition. In CVPR,
+2016. 2
+
+[11] Yihui He, Ji Lin, Zhijian Liu, Hanrui Wang, Li-Jia Li, and
+Song Han. AMC: AutoML for Model Compression and
+Acceleration on Mobile Devices. In ECCV, 2018. 3
+
+[12] Yihui He, Xiangyu Zhang, and Jian Sun. Channel pruning for
+
+accelerating very deep neural networks. In ICCV, 2017. 3
+
+[13] Andrew G Howard, Menglong Zhu, Bo Chen, Dmitry
+Kalenichenko, Weijun Wang, Tobias Weyand, Marco An-
+dreetto, and Hartwig Adam. MobileNets: Efﬁcient Convo-
+lutional Neural Networks for Mobile Vision Applications.
+arXiv, 2017. 1, 2, 5
+
+[14] Imagination. Powervr neural network accelerator, 2018. 2
+[15] Benoit Jacob, Skirmantas Kligys, Bo Chen, Menglong Zhu,
+Matthew Tang, Andrew G Howard, Hartwig Adam, and
+Dmitry Kalenichenko. Quantization and Training of Neu-
+ral Networks for Efﬁcient Integer-Arithmetic-Only Inference.
+In CVPR, 2018. 1, 3
+
+[16] Diederik Kingma and Jimmy Ba. Adam - A Method for
+
+Stochastic Optimization. In ICLR, 2015. 5
+
+[17] Raghuraman Krishnamoorthi. Quantizing deep convolutional
+networks for efﬁcient inference - A whitepaper. arXiv, 2018.
+3
+
+[18] Timothy Lillicrap, Jonathan J Hunt, Alexander Pritzel, Nico-
+las Heess, Tom Erez, Yuval Tassa, David Silver, and Daan
+Wierstra. Continuous control with deep reinforcement learn-
+ing. In ICLR, 2016. 2, 4
+
+[19] Ji Lin, Yongming Rao, Jiwen Lu, and Jie Zhou. Runtime
+
+Neural Pruning. In NIPS, 2017. 3
+
+[20] Chenxi Liu, Barret Zoph, Maxim Neumann, Jonathon Shlens,
+Wei Hua, Li-Jia Li, Li Fei-Fei, Alan Yuille, Jonathan Huang,
+and Kevin Murphy. Progressive Neural Architecture Search.
+In ECCV, 2018. 3
+
+[21] Zhuang Liu, Jianguo Li, Zhiqiang Shen, Gao Huang,
+Shoumeng Yan, and Changshui Zhang. Learning efﬁcient
+convolutional networks through network slimming. In ICCV,
+2017. 3, 6
+
+[22] Nvidia. Nvidia tensor cores, 2018. 1
+[23] Hieu Pham, Melody Y Guan, Barret Zoph, Quoc V Le, and
+Jeff Dean. Efﬁcient Neural Architecture Search via Parameter
+Sharing. In ICML, 2018. 3
+
+[24] Mohammad Rastegari, Vicente Ordonez, Joseph Redmon,
+and Ali Farhadi. XNOR-Net - ImageNet Classiﬁcation Using
+Binary Convolutional Neural Networks. In ECCV, 2016. 2
+
+[25] Mark Sandler, Andrew Howard, Menglong Zhu, Andrey Zh-
+moginov, and Liang-Chieh Chen. MobileNetV2: Inverted
+Residuals and Linear Bottlenecks. In CVPR, 2018. 1, 2, 5, 6
+[26] Hardik Sharma, Jongse Park, Naveen Suda, Liangzhen Lai,
+Benson Chau, Vikas Chandra, and Hadi Esmaeilzadeh. Bit
+fusion: Bit-level dynamically composable architecture for
+accelerating deep neural network. In ISCA, 2018. 2, 5, 7
+
+[27] Yaman Umuroglu, Lahiru Rasnayake, and Magnus Sjalander.
+Bismo: A scalable bit-serial matrix multiplication overlay for
+reconﬁgurable computing. In FPL, 2018. 2, 5
+
+[28] Samuel Williams, Andrew Waterman, and David Patterson.
+Rooﬂine: an insightful visual performance model for multi-
+core architectures. Communications of the ACM, 52(4):65–76,
+2009. 6
+
+[29] Xilinx. Ultrascale architecture and product data sheet:
+
+Overview, 2018. 6
+
+[30] Xilinx. Zynq-7000 soc data sheet: Overview, 2018. 5
+[31] Tien-Ju Yang, Yu-Hsin Chen, and Vivienne Sze. Designing
+energy-efﬁcient convolutional neural networks using energy-
+aware pruning. arXiv, 2016. 3
+
+[32] Tien-Ju Yang, Andrew Howard, Bo Chen, Xiao Zhang, Alec
+Go, Mark Sandler, Vivienne Sze, and Hartwig Adam. Ne-
+tadapt: Platform-aware neural network adaptation for mobile
+applications. In ECCV, 2018. 3
+
+[33] Aojun Zhou, Anbang Yao, Kuan Wang, and Yurong Chen.
+Explicit loss-error-aware quantization for low-bit deep neu-
+ral networks.
+In Proceedings of the IEEE Conference on
+Computer Vision and Pattern Recognition, pages 9426–9435,
+2018. 2
+
+[34] Shuchang Zhou, Zekun Ni, Xinyu Zhou, He Wen, Yuxin
+Wu, and Yuheng Zou. DoReFa-Net - Training Low Bitwidth
+Convolutional Neural Networks with Low Bitwidth Gradients.
+arXiv, 2016. 3
+
+[35] Chenzhuo Zhu, Song Han, Huizi Mao, and William Dally.
+
+Trained Ternary Quantization. In ICLR, 2017. 1, 3
+
+[36] Barret Zoph and Quoc V Le. Neural Architecture Search with
+
+Reinforcement Learning. In ICLR, 2017. 3
+
+98620
+
+

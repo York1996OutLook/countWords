@@ -1,0 +1,1446 @@
+Cascaded Projection: End-to-End Network Compression and Acceleration
+
+Breton Minnehan
+
+Andreas Savakis
+
+Rochester Institute of Technology
+
+Rochester Institute of Technology
+
+blm2144@rit.edu
+
+andreas.savakis@rit.edu
+
+Abstract
+
+We propose a data-driven approach for deep convolu-
+tional neural network compression that achieves high accu-
+racy with high throughput and low memory requirements.
+Current network compression methods either ﬁnd a low-
+rank factorization of the features that requires more mem-
+ory, or select only a subset of features by pruning entire
+ﬁlter channels. We propose the Cascaded Projection (CaP)
+compression method that projects the output and input ﬁl-
+ter channels of successive layers to a uniﬁed low dimen-
+sional space based on a low-rank projection. We optimize
+the projection to minimize classiﬁcation loss and the dif-
+ference between the next layer’s features in the compressed
+and uncompressed networks. To solve this non-convex opti-
+mization problem we propose a new optimization method
+of a proxy matrix using backpropagation and Stochastic
+Gradient Descent (SGD) with geometric constraints. Our
+cascaded projection approach leads to improvements in all
+critical areas of network compression: high accuracy, low
+memory consumption, low parameter count and high pro-
+cessing speed. The proposed CaP method demonstrates
+state-of-the-art results compressing VGG16 and ResNet
+networks with over 4× reduction in the number of compu-
+tations and excellent performance in top-5 accuracy on the
+ImageNet dataset before and after ﬁne-tuning.
+
+1. Introduction
+
+The compression of deep neural networks is gaining
+attention due to the effectiveness of deep networks and
+their potential applications on mobile and embedded de-
+vices. The powerful deep networks developed today are
+often overparameterized [9] and require large amounts of
+memory and computational resources [3]. Thus, efﬁcient
+network compression, that reduces the number of computa-
+tions and memory required to process images, enables the
+broader application of deep neural networks.
+
+Methods for network compression can be categorized
+into four types, based on quantization, sparsiﬁcation, fac-
+torization and pruning. In this work we leverage the advan-
+
+Figure 1. Visual representation of network compression methods
+on a single CNN layer. Top row: Factorization compression with
+a reprojection step that increases memory. Middle row: Pruning
+compression where individual ﬁlters are removed. Bottom row:
+Proposed CaP method which forms linear combinations of the ﬁl-
+ters without requiring reprojection.
+
+tages of factorization and pruning methods, as they are the
+most popular. Quantization methods accelerate deep net-
+works and reduce storage by using mixed precision arith-
+metic and hashing codes [4, 6, 13]. However most of them
+require mixed precision arithmetic, which is not always
+available on standard hardware. Sparsiﬁcation methods
+eliminate individual connections between nodes that have
+minimal impact on the network, however, they are not well
+suited for current applications because most neural network
+libraries are not optimized for sparse convolution operations
+and fail to achieve signiﬁcant speedup.
+
+Factorization methods [10, 29, 33, 55] reduce computa-
+tions by factorizing the network kernels, often by splitting
+large kernels into a series of convolutions with smaller ﬁl-
+ters. These methods have the drawback of increasing mem-
+ory consumption due to the intermediate convolution op-
+erations. Such memory requirements pose a problem for
+mobile applications, where network acceleration is needed
+most. Pruning methods [13, 19, 35, 37, 39, 44, 54, 56] com-
+press layers of a network by removing entire convolutional
+
+10715
+
+ﬁlters and the corresponding channels in the ﬁlters of the
+next layer. They do not require feature map reprojection,
+however they discard a large amount of information when
+eliminating entire ﬁlter channels.
+
+In this paper, we propose the Cascaded Projection (CaP)
+compression method which combines the superior recon-
+struction ability of factorization methods with the multi-
+layer cascaded compression of pruning methods.
+Instead
+of selecting a subset of features, as is done in pruning meth-
+ods, CaP forms linear combinations of the original features
+that retain more information. However, unlike factorization
+methods, CaP brings the kernels in the next layer to low di-
+mensional feature space and therefore does not require ad-
+ditional memory for reprojection.
+
+Figure 1 provides a visual representation of the differ-
+ences between the three methods: factorization (top row)
+reprojects to higher dimensional space and increases mem-
+ory, pruning (middle row) masks ﬁlters and eliminates their
+channels, and our proposed CaP methods (bottom row)
+combines ﬁlters to a smaller number without reprojecting.
+Our results demonstrate that by forming ﬁlters based on lin-
+ear combinations instead of pruning with a mask, more in-
+formation is kept in the ﬁltering operations and better net-
+work classiﬁcation accuracy is achieved. The primary con-
+tributions of this paper are the following:
+
+1. We propose the CaP compression method that ﬁnds a
+low dimensional projection of the feature kernels and
+cascades the projection to compress the input channels
+of the kernels in the next layers.
+
+2. We introduce proxy matrix projection backpropaga-
+tion, the ﬁrst method to optimize the compression pro-
+jection for each layer using end-to-end training with
+standard backpropagation and stochastic gradient de-
+scent.
+
+3. Our optimization method allows us to use a new loss
+function that combines the reconstruction loss with
+classiﬁcation loss to ﬁnd a better solution.
+
+4. The CaP method is the ﬁrst to simultaneously optimize
+the compression projection for all layers of residual
+networks.
+
+5. Our results illustrate that CaP compressed networks
+achieve state-of-the-art accuracy while reducing the
+network’s number of parameters, computational load
+and memory consumption.
+
+2. Related Work
+
+The goal of network compression and acceleration is
+to reduce the number of parameters and computations
+performed in deep networks without sacriﬁcing accuracy.
+Early work in network pruning dates back to the 1990’s
+[14]. However, the area did not gain much interest until
+deep convolutional networks became common [31, 32, 43]
+and the redundancy of network parameters became apparent
+
+[9]. Recent works aim to develop smaller network architec-
+tures that require fewer resources [20, 25, 42].
+
+Quantization techniques [4, 6, 13, 28] use integer or
+mixed precision arithmetic only available on state-of-the-
+art GPUs [38]. These methods reduce the computation time
+and the amount of storage required for the network param-
+eters. They can be applied in addition to other methods
+to further accelerate compressed networks, as was done in
+[30].
+
+Network sparsiﬁcation [36], sometimes referred to as un-
+structured pruning, reduces the number of connections in
+deep networks by imposing sparsity constraints. The work
+in [21] proposed recasting the sparsiﬁed network into sepa-
+rate groups of operations where the ﬁlters in each layer are
+only connected to a subset of the input channels. In [52]
+k-means clustering is used to encourage similarity between
+features to aid in compression. However, these methods re-
+quire training the network from scratch which is not practi-
+cal or efﬁcient.
+
+Filter factorization methods reduce computations at the
+cost of increased memory load for storing intermediate fea-
+ture maps. Initial works focused on factorizing the three-
+dimensional convolutional kernels into three separable one-
+dimensional ﬁlters [10, 29]. In [33] CP-decomposition is
+used to decompose the convolutional layers into ﬁve lay-
+ers with lower complexity. More recently [55] performed a
+channel decomposition that found a projection of the con-
+volutional ﬁlters in each layer such that the asymmetric re-
+projection error was minimized.
+
+Channel pruning methods [35, 37, 39, 44, 56] remove
+entire feature kernels for network compression. In [13] ker-
+nels are pruned based on their magnitudes, under the as-
+sumption that kernels with low magnitudes provide little in-
+formation to the network. Li et al. [35] suggested a similar
+pruning technique based on kernel statistics. He et al. [19]
+proposed pruning ﬁlters based on minimizing the recon-
+struction error of each layer. Luo et al. [37] further extended
+the concepts in [19] to prune ﬁlters that have minimal im-
+pact on the reconstruction of the next layer. Yu et al. [54]
+proposed Neuron Importance Score Propagation (NISP) to
+calculate the importance of each neuron based on its contri-
+bution to the ﬁnal feature representation and prune feature
+channels that provide minimal information to the ﬁnal fea-
+ture representation.
+
+Other recent works have focused less on ﬁnding the op-
+timal set of features to prune and more on ﬁnding the op-
+timal amount of features to remove from each layer of the
+network. This is important to study because the amount of
+pruning performed in each layer is often set arbitrarily or
+through extensive experimentation. In [53, 54] the authors
+propose automatic pruning architecture methods based on
+statistical measures.
+In [18, 24] methods are proposed
+which use reinforcement learning to learn an optimal net-
+
+10716
+
+work compression architecture. Additional work has been
+done to reduce the number of parameters in the ﬁnal lay-
+ers of deep networks [5], however the fully connected layer
+only contributes a small fraction of the overall computa-
+tions.
+
+3. Cascaded Projection Methodology
+
+In this section we provide an in depth discussion of the
+CaP compression and acceleration method. We ﬁrst intro-
+duce projection compression when applied to a single layer,
+and explain the relationship between CaP and previous ﬁlter
+factorization methods [55]. One of the main goals of CaP
+compression is eliminating the feature reprojection step per-
+formed in factorization methods. To accomplish this, CaP
+extends the compression in the present layer to the inputs
+of the kernels in the next layer by projecting them to the
+same low dimensional space, as shown in Figure 2. Next
+we demonstrate that, with a few alterations, the CaP com-
+pression method can perform simultaneous optimization of
+the projections for all of the layers in residual networks [15].
+Lastly we present the core component of the CaP method,
+which is our new end-to-end optimization method that op-
+timizes the layer compression projections using standard
+back-propagation and stochastic gradient descent.
+
+3.1. Problem Deﬁnition
+
+In a convolutional network, as illustrated in the top row
+of Fig. 2, the ith layer takes as input a 4-Tensor Ii of dimen-
+sion (n×ci×hi×wi), where n is the number of images (mini-
+batch size) input into the network, ci is the number channels
+in the input and wi and hi are the height and width of the
+input. The input is convolved with a set of ﬁlters Wi repre-
+sented as a 4-Tensor with dimensions (ci+1×ci×k×k), where
+ci+1 is the number of kernels and k is the spatial dimensions
+of the kernels, generally 3 pixels. In many networks, there
+is an additional bias, bi, of dimension (ci+1 × 1 × 1 × 1),
+that is added to each channel of the output. More formally,
+the convolution operation for layer i of a CNN is given as:
+
+Oi = Ii ∗ Wi + bi
+
+(1)
+
+where (∗) is the convolution operator. The input to the next
+layer is calculated by applying a nonlinearity to the output
+as Ii+1 = G(Oi), where G(·) is often a ReLU [40].
+
+Network compression aims to reduce the number of ﬁl-
+ters so that the classiﬁcation accuracy of the network is min-
+imally impacted. In this work we ﬁnd a projection Pi that
+maps the features to a lower dimensional space by minimiz-
+ing both the reconstruction error and the classiﬁcation loss,
+as described in the rest of this section.
+
+3.2. Single Layer Projection Compression
+
+We ﬁrst present how projection based compression is
+used to compress a single layer of a network. To com-
+
+Figure 2. Visual representation of the compression of a CNN layer
+using the CaP method to compress the ﬁlters Wi and Wi+1 in the
+current and next layers using projections Pi and PT
+respectively.
+The reconstruction error in the next layer is computed after the
+nonlinearity G(·).
+
+i
+
+press layer i, the output features are projected to low di-
+mensional representation of rank r using an orthonormal
+projection matrix Pi represented as a 4-Tensor of dimen-
+sion (ci+1 ×r×1×1). The optimal projection, P∗
+i for layer
+i, based on minimizing the reconstruction loss is given as:
+
+Oi −(Ii ∗Wi ∗Pi + bi ∗Pi)∗PT
+
+P∗
+
+i = argmin
+
+Pi
+
+(cid:13)(cid:13)
+
+2
+
+F
+
+(2)
+
+i (cid:13)(cid:13)
+
+where k·k2
+
+F is the Frobenious norm.
+
+Inspired by [55], we alter our optimization criteria to
+minimize the reconstruction loss of the input to the next
+layer. This results in the optimization:
+
+2
+
+F
+
+Pi
+
+P∗
+
+i = argmin
+
+(cid:13)(cid:13)G(Oi)−G((Ii ∗Wi ∗Pi +bi ∗Pi)∗PT
+i )(cid:13)(cid:13)
+
+(3)
+The inclusion of the nonlinearity makes this a more difﬁcult
+optimization problem. In [55] the problem is relaxed and
+solved using Generalized SVD [12, 49, 50]. Our Cascaded
+Projection method is based on the end-to-end approach de-
+scribed next.
+
+3.3. Cascaded Projection Compression
+
+Factorization methods, including the single layer projec-
+tion compression discussed above, are inefﬁcient due to the
+additional convolution operations required to reproject the
+features to high dimensional space. Pruning methods avoid
+reprojection by removing all channels associated with the
+pruned ﬁlters. CaP takes a more powerful approach that
+forms linear combination of the kernels by projecting with-
+out the extra memory requirements of factorization meth-
+ods. Following the diagram in Figure 2, we consider two
+successive convolutional layers, labeled i and i + 1, with
+kernels Wi, Wi+1 and biases bi, bi+1 respectively. The
+
+10717
+
+input to layer i is Ii, while the output of layer i + 1 is the
+input to layer i + 2, denoted by Ii+2 and given below.
+
+Ii+2 = G(G(Ii ∗ Wi + bi) ∗ Wi+1 + bi+1)
+
+(4)
+
+After substituting our compressed representation with re-
+projection for layer i in the above we get:
+
+Ii+2 = G(G((Ii∗Wi∗Pi+bi∗Pi)∗PT
+
+i )∗Wi+1+bi+1) (5)
+
+To avoid reprojecting the low dimensional features back
+to higher dimensional space with PT
+i , we seek two projec-
+tions. The ﬁrst PO
+i which captures the optimal lower di-
+mensional representation of the features in the current layer,
+and the second PI
+i which pulls the kernels of the next layer
+down to lower dimensional space. This formulation leads
+to an optimization problem over the projection operators:
+
+∗
+
+{PI
+i
+
+, PO
+i
+
+∗
+
+kIi+2 −G(G((Ii ∗Wi ∗PO
+i
+
+} = argmin
+i ,PO
+
+i
+
+PI
++bi ∗PO
+
+i ))∗PI
+
+i ∗Wi+1 +bi+1)k2
+F
+
+(6)
+
+To make the problem tractable, we enforce two strong
+constraints on the projections. We require that they are
+i )T .
+orthonormal and transposes of each other: PI
+For the remainder of this work we replace PO
+i with
+Pi and PT
+i , respectively. These constraints make the opti-
+mization problem more feasible by reducing the parameter
+search space to a single projection operator for each layer.
+
+i = (PO
+
+i and PI
+
+P∗
+
+i = argmin
+
+Pi,Pi∈On×m
+
+kIi+2 −G(G((Ii ∗Wi ∗Pi
+
+(7)
+
++bi ∗Pi))∗PT
+
+i ∗Wi+1 +bi+1)k2
+F
+
+We solve the optimization of a single projection oper-
+ator for each layer using a novel data-driven optimization
+method for projection operators discussed in Section 3.6.
+
+3.3.1 Kernel Compression and Relaxation
+
+Once the projection optimization is complete, we re-
+place the kernels and biases in the current layer with their
+projected versions WO
+i = bi∗Pi respec-
+tively. We also replace the kernels in the next layer with
+their input compressed versions WI
+i ∗Wi+1. Thus,
+
+i =Wi∗Pi and bO
+
+i+1 = PT
+
+Ii+2 = G(G((Ii ∗ WO
+
+i + bO
+
+i )) ∗ WI
+
+i+1 + bi+1)
+
+(8)
+
+i and WI
+
+Figure 2 depicts how the ﬁlters WI
+
+i+1 in the next layer
+are compressed using the projection PT
+i and are therefore
+smaller than the kernels in the original network. Utilizing
+the compressed kernels WO
+i results in twice the
+speedup over traditional factorization methods for all com-
+pressed intermediate layers (other than ﬁrst and last layers).
+Following kernel projection, we perform an additional
+round of training in which only the compressed kernels are
+optimized. We refer to this step as kernel relaxation because
+we are allowing the kernels to ﬁnd a better optimal solution
+after our projection optimization step.
+
+3.4. Mixture Loss
+
+A beneﬁt of gradient based optimization is that a loss
+function can be altered to minimize both reconstruction and
+classiﬁcation error. Previous methods have focused on ei-
+ther reconstruction error minimization [19, 37] or classi-
+ﬁcation [54] based metrics when pruning each layer. We
+propose using a combination of the standard cross entropy
+classiﬁcation loss, LClass, and the reconstruction loss LR,
+shown in Figure 2. The reconstruction loss for layer i is
+given as:
+
+LR(i) = kIi+2 − G(G((Ii ∗ Wi ∗ Pi
++bi ∗ Pi)) ∗ PT
+i ∗ Wi+1 + bi+1)k2
+F
+
+(9)
+
+The mixture loss used to optimize the projections in layer i
+is given as
+
+L(i) = LR(i) + γLClass
+
+(10)
+
+where γ is a mixture parameter that allows adjusting the im-
+pact of each loss during training. By using a combination of
+the two losses we obtain a compressed network that main-
+tains classiﬁcation accuracy while having feature represen-
+tations for each layer which contain the maximal amount of
+information from the original network.
+
+3.5. Compressing Multi Branch Networks
+
+Multi-branch networks are popular due to their excellent
+performance and come in a variety of forms such as the In-
+ception networks [46, 47, 45], Residual networks (ResNets)
+[15] and Dense Networks (DenseNets) [22] among others.
+We primarily focus on applying CaP network compression
+to ResNets, but our method can be integrated with other
+multi-branch networks. We select the ResNet architecture
+for two reasons. First, ResNets have a proven record of pro-
+ducing state-of-the art results [15, 16]. And second, the skip
+connections work well with network compression, as they
+allow propagating information through the network regard-
+less of the compression process within the individual layers.
+Our CaP modiﬁcation for ResNet compression is illus-
+trated in Figure 3.
+In our approach, we do not alter the
+structure of the residual block outputs, therefore we do not
+compress the outputs of the last convolution layers in each
+residual block, as was done by [37]. In [35, 54] pruning
+is performed on the residual connections, but we do not af-
+fect them, because pruning these layers has a large negative
+impact on the network’s accuracy.
+
+We calculate the reconstruction error in ResNets at the
+outputs of each residual block, as shown in Fig. 3, in con-
+trast to single branch networks where we calculate the re-
+construction error at the next layer as shown in Fig. 2. By
+calculating the reconstruction error after the skip connec-
+tions, we leverage the information in the skip connections
+in our projection optimization.
+
+10718
+
+Figure 3. Illustration of simultaneous optimization of the projections for each layer of the ResNet18 network using a mixture loss that
+includes the classiﬁcation loss and the reconstruction losses in each layer for intermediate supervision. We do not alter the structure of the
+residual block outputs, therefore we do not affect residual connections and we do not compress the outputs of the last convolution layers in
+each residual block.
+
+3.5.1 Simultaneous Layer Compression
+
+3.6. Back Propagated Projection Optimization
+
+Most network compression methods apply a greedy
+layer-wise compression scheme, where one layer is com-
+pressed or pruned at a time. However, this layer-by-layer
+approach to network compression can lead to sub-optimal
+results [54]. We now present a version of CaP where all
+layers are simultaneously optimized. This approach allows
+the latter layers to help guide the projections of the earlier
+layers and minimize the total reconstruction error through-
+out the network.
+
+In our experiments, we found that simultaneous opti-
+mization of the projection matrices has the risk of becom-
+ing unstable when we compress more than one layer in each
+residual block. To overcome this problem we split the train-
+ing of the projections in residual blocks with more than one
+compressible layer into two rounds. In the ﬁrst round, the
+projections for the odd layers are optimized, and in the sec-
+ond round the even layer projections are optimized.
+
+Additionally, we found that using the reconstruction loss
+at the ﬁnal layers did not provide enough supervision to the
+network. We therefore introduced deep supervision for each
+layer by minimizing the sum of normalized reconstruction
+losses for each layer, given by:
+
+argmin
+
+Pi∈P
+
+N
+
+Xi=0
+
+LR(i) +γLClass
+
+(11)
+
+where Pi is the projection for the ith layer, and N is the
+total number of layers. We outline our approach to ﬁnding
+a solution for the above optimization using iterative back-
+propagation next.
+
+In this section we present an end-to-end Proxy Matrix
+Projection (PMaP) optimization method, which is an it-
+erative optimization of the projection using backpropaga-
+tion with Stochastic Gradient Descent (SGD). The proposed
+method efﬁciently optimizes the network compression by
+combining backpropagation with geometric constraints.
+
+In our framework, we restrict the projection operators
+T Pi = I. The set of
+to be orthogonal and thus satisfy Pi
+(n × m) real-valued orthogonal matrices On×m, forms a
+smooth manifold known as a Grassmann manifold. There
+are several optimization methods on Grassmann manifolds,
+most of which include iterative optimization and retraction
+methods [7, 1, 48, 2, 51].
+
+With CaP compression, the projection for each layer is
+dependent on the projections in all previous layers adding
+dependencies in the optimization across layers. Little work
+had been done in the ﬁeld of optimization over multiple de-
+pendent Grassmann manifolds. Huang et al. [23] impose
+orthogonality constraints on the weights of a neural network
+during training using a method for backpropagation of gra-
+dients through structured linear algebra layers developed in
+[26, 27]. Inspired by these works, we utilize a similar ap-
+proach where instead of optimizing each projection matrix
+directly, we use a proxy matrix Xi for each layer i and a
+transformation Φ(·) such that Φ(Xi) = Pi.
+
+We obtain the transformation Φ(·) that projects each
+proxy matrix Xi
+to the closest location on the Grass-
+mann manifold by performing Singular Value Decomposi-
+tion (SVD) on Xi, such that Xi = UiΣiVT
+i , where Ui and
+VT
+i are orthogonal matrices and Σi is the matrix of singular
+
+10719
+
+values. The projection to the closest location on the Grass-
+mann manifold is performed as Φ(Xi) = UiVT
+
+i = Pi.
+
+During training, the projection matrix Pi is not updated
+directly; instead the proxy parameter Xi is updated based
+on the partial derivatives of the loss with respect to Ui and
+Vi, ∂L
+respectively. The partial derivative of the
+∂Ui
+loss L with respect to the proxy parameter Xi was derived
+in [26, 27] using the chain rule and is given by:
+
+and ∂L
+∂Vi
+
+∂L
+∂Xi
+
+= Ui(2Σi(cid:18)KT
+
+i ◦(cid:18)VT
+
+i
+
+∂L
+
+∂Vi(cid:19)(cid:19)sym
+
++
+
+∂L
+
+∂Σi)VT
+
+i
+
+(12)
+where ◦ is the Hadamard product, Asym is the symmet-
+ric part of matrix A given as Asym = 1
+2 (AT + A). Since
+Φ(Xi) = UiVT
+i , the loss does not depend on the matrix Σi.
+Thus, ∂L
+∂Σi
+
+= 0, and equation (12) becomes:
+
+Figure 4. Plot of the reconstruction error (vertical axis) for the
+range of compression (left axis) for each layer of the network
+(right axis). The reconstruction error is lower when early layers
+are compressed.
+
+∂L
+∂Xi
+
+= Ui(2Σi(cid:18)KT
+
+i ◦(cid:18)VT
+
+i
+
+∂L
+
+∂Vi(cid:19)(cid:19)sym)VT
+
+i
+
+(13)
+
+The above allows us to optimize our compression pro-
+jection operators for each layer of the network using back-
+propagation and SGD. Our method allows for end-to-end
+network compression using standard deep learning frame-
+works for the ﬁrst time.
+
+4. Experiments
+
+We ﬁrst perform experiments on independent layer com-
+pression of the VGG16 network to investigate how each
+layer responds to various levels of compression. We then
+perform a set of ablation studies on the proposed CaP algo-
+rithm to determine the impact for each step of the algorithm
+on the ﬁnal accuracy of the compressed network. We com-
+pare CaP to other state-of-the-art methods by compressing
+the VGG16 network to have over 4× fewer ﬂoating point
+operations. Finally we present our experiments with vary-
+ing levels of compression of ResNet architectures, with 18
+or 50 layers, trained on the CIFAR10 dataset.
+
+All experiments were performed using PyTorch 0.4 [41]
+on a work station running Ubuntu 16.04. The workstation
+had an Intel i5-6500 3.20GHz CPU with 15 GB of RAM
+and a NVIDIA Titan V GPU.
+
+4.1. Layer wise Experiments
+
+In these experiment we investigate how each layer of
+the network is affected by increasing amounts of compres-
+sion. We perform ﬁlter compression using CaP for each
+layer independently, while leaving all other layers uncom-
+pressed. We considered a range of compression for each
+layer, from 5% to 99%, and display the results in Figure
+4. This plot shows two trends. Firstly the reconstruction
+error does not increase much until 70% compression, indi-
+cating that a large portion of the parameters in each layer
+
+Figure 5. Plot of the classiﬁcation accuracy (vertical axis) for the
+range of compression (left axis) for each layer of the network
+(right axis). The classiﬁcation accuracy remains unaffected for
+large amounts of compression in a single layer anywhere in the
+network.
+
+are redundant and could be reduced without much loss in
+accuracy. The second trend is the increase in reconstruction
+error for each level of compression for the deeper layers of
+the network (right axis).
+
+In Figure 5 we plot the network accuracy resulting from
+each level of compression for each layer. The network is rel-
+atively unaffected for a large range of compression, despite
+the fact that there is a signiﬁcant amount of reconstruction
+error introduced by the compression shown in Figure 4.
+
+4.2. CaP Ablation Experiments
+
+We ran additional experiments to determine the contri-
+bution of the projection optimization and kernel relaxation
+steps of our algorithm. We ﬁrst trained the ResNet18 net-
+work on the CIFAR100 dataset and achieved a baseline ac-
+curacy of 78.23%. We then compressed the network to 50%
+of the original size using only parts of the CaP method to as-
+sess the effects of different components. We present these
+results in Table 1.
+
+We also trained a compressed version ResNet18 from
+scratch for 350 epochs, to provide a baseline for the com-
+
+10720
+
+pressed ResNet18 network. When only projection compres-
+sion is performed on the original ResNet18 network, there
+was a drop in accuracy of 1.58%. This loss in classiﬁca-
+tion accuracy decreased to 0.76% after kernel relaxation. In
+contrast, when the optimized projections are replaced with
+random projections and only kernel relaxation training is
+performed, there is a 1.96% drop in accuracy, a 2.5 times
+increase in classiﬁcation error. These results demonstrate
+that the projection optimization is an important aspect of
+our network compression algorithm, and the combination
+of both steps outperforms training the compressed network
+from scratch.
+
+ResNet18 Network Variation
+
+Accuracy
+
+ResNet18 Uncompressed (upper bound)
+
+Compressed ResNet18 from Scratch
+
+CaP Compression with Projection Only
+CaP with Random Proj. & Kernel Relax
+
+CaP with Projection & Kernel Relax
+
+78.23
+77.22
+76.65
+76.27
+77.47
+
+Table 1. Network compression ablation study of the CaP method
+compressing the ResNet18 Network trained on the CIFAR100
+dataset. (Bold numbers are best).
+
+Figure 6. Classiﬁcation accuracy drop on CIFAR10, relative to
+baseline, of compression methods (CaP, PCAS [53], PFEC [35]
+and LPF [24]) for a range of compression levels on ResNet18
+(Top) and ResNet50 (Bottom).
+
+4.3. ResNet Compression on CIFAR 10
+
+We perform two sets of experiments using ResNet18 and
+ResNet50 trained on the CIFAR10 dataset [31]. We com-
+
+ResNet Method
+
+PFEC [35]
+
+CP [19]
+SFP [17]
+AMC [18]
+
+CaP
+
+PFEC [35]
+NISP [54]
+
+CP [19]
+SFP [17]
+AMC [18]
+DCP [56]
+
+CaP
+
+PFEC [35]
+MIL [11]
+SFP [17]
+
+CaP
+
+PFEC [35]
+NISP [54]
+SFP [17]
+
+CaP
+
+56
+
+110
+
+90.1 / 92.8
+
+FT FLOPs% Acc. / Base
+91.31 / 93.04
+N
+90.90 / 92.80
+N
+N
+92.26 / 93.59
+N
+N
+Y
+Y
+Y
+Y
+Y
+Y
+Y
+
+72.4
+50.0
+47.4
+50.0
+50.2
+72.4
+57.4
+50.0
+47.4
+50.0
+35.0
+50.2
+
+92.92 / 93.51
+93.06 / 93.04
+
+91.80 / 92.80
+93.35 / 93.59
+
+91.9 / 92.8
+93.7 / 93.6
+
+93.22 / 93.51
+
+(-0.03) *
+
+N
+N
+N
+N
+Y
+Y
+Y
+Y
+
+61.4
+65.8
+59.2
+50.1
+61.4
+56.3
+59.2
+50.1
+
+92.94 / 93.53
+93.44 / 93.63
+93.38 / 93.68
+93.95/ 94.29
+93.30 / 93.53
+
+(-0.18) *
+
+93.86 / 93.68
+94.14/ 94.29
+
+Table 2. Comparison of CaP with pruning and factorization based
+methods using ResNet56 and ResNet110 trained on CIFAR10. FT
+denotes ﬁne-tuning. (Bold numbers are best). * Only the relative
+drop in accuracy was reported in [54] without baseline accuracy.
+
+press 18 and 50 layer ResNets with varying levels of com-
+pression and compare the relative drop in accuracy of CaP
+with other state-of-the-art methods [53, 35, 24]. We plot the
+drop in classiﬁcation accuracy for ResNet18 and ResNet50
+in Figure 6. For both networks, the CaP method outper-
+forms the other methods for the full range of compression.
+
+In Table 2, we present classiﬁcation accuracy of
+ResNet56 and ResNet110 with each residual block com-
+pressed to have 50% fewer FLOPs using CaPs. We compare
+the results obtained by CaP with those of [17, 18, 35, 54, 19]
+where the networks have been subjected to similar compres-
+sion ratios. We report accuracy results with and without
+ﬁne-tuning and include the baseline performance for com-
+parison.
+
+Results with ﬁne-tuning are generally better, except in
+cases when there is over-ﬁtting. However, ﬁne-tuning for
+a long period of time can hide the poor performance of
+a compression algorithm by retraining the network ﬁlters
+away from the compression results. The results of the CaP
+method without ﬁne-tuning are based on projection opti-
+mization and kernel relaxation on the compressed ﬁlters
+with reconstruction loss, while the ﬁne-tuning results are
+produced with an additional round of training based on mix-
+ture loss for all of the layers in the network.
+
+10721
+
+Method
+
+Parameters Memory (Mb) FLOPs GPU Speedup Top-5 Accuracy / Baseline
+
+VGG16 [43] (Baseline)
+
+14.71M
+
+Low-Rank [29]
+
+Asym. [55]
+
+Channel Pruning [19]
+
+CaP (based on [19] arch)
+
+CaP Optimal
+
+-
+
+5.11M
+7.48M
+7.48M
+7.93M
+
+3.39
+
+-
+
+3.90
+1.35
+1.35
+1.11
+
+30.9B
+
+-
+
+3.7B
+6.8B
+6.8B
+6.8B
+
+1
+
+1.01*
+1.55*
+2.5*
+3.05
+3.44
+
+89.9
+
+80.02 / 89.9
+86.06 / 89.9
+82.0 / 89.9
+
+86.57 / 90.38
+88.23 / 90.38
+
+Table 3. Network compression results of pruning and factorization based methods without ﬁne-tuning. The top-5 accuracy of the baseline
+VGG16 network varies slightly for each of the methods due to different models and frameworks. (Bold numbers are best). Results marked
+with * were obtained from [19].
+
+Method
+
+VGG16 [43]
+Scratch [19]
+COBLA [34]
+Tucker [30]
+
+CP [19]
+
+ThiNet-2 [37]
+
+CaP
+
+Mem.
+(Mb)
+3.39
+1.35
+4.21
+4.96
+1.35
+1.44
+1.11
+
+FLOPs
+
+Top-5 Acc.
+/ Baseline
+
+30.9B
+6.8B
+7.7B
+6.3B
+6.8B
+6.7B
+6.8B
+
+89.9
+88.1
+
+88.9 / 89.9
+89.4 / 89.9
+88.9 / 89.9
+
+88.86 / 90.01
+89.39 / 90.38
+
+Table 4. Network compression results of pruning and factorization
+based methods with ﬁne-tuning. (Bold numbers are best).
+
+4.4. VGG16 Compression with ImageNet
+
+We compress the VGG16 network trained on Ima-
+geNet2012 [8] and compare the results of CaP with other
+state-of-the-art methods. We present two sets of results,
+without ﬁne-tuning and with ﬁne-tuning, in Tables 3 and 4
+respectively. Fine-tuning on ImageNet is time intensive and
+requires signiﬁcant computation power. This is a hindrance
+for many applications where users do not have enough re-
+sources to retrain a compressed network.
+
+In Table 3 we compare CaP with factorization and prun-
+ing methods, all without ﬁne-tuning. As expected, factor-
+ization methods suffer from increased memory load due
+to their additional intermediate feature maps. The chan-
+nel pruning method in [19] has a signiﬁcant reduction in
+memory consumption but under-performs the factorization
+method in [55] without ﬁne-tuning. We present two sets of
+results for the CaP algorithm, each with different levels of
+compression for each layer. To match the architecture used
+in [19] we compressed layers 1-7 to 33% of their original
+size, and ﬁlters in layers 8-10 to 50% of their original size,
+while the remaining layers are left uncompressed . We also
+used the CaP method with a compression architecture that
+was selected based on our layer-wise training experiments.
+The results in Table 3 demonstrate that the proposed CaP
+compression achieves higher speedup and higher classiﬁca-
+tion accuracy than the factorization or pruning methods.
+
+In Table 4 we compare CaP with state-of-the-art net-
+
+work compression methods, all with ﬁne-tuning. The un-
+compressed VGG16 results are from [43]. We include re-
+sults from training a compressed version of VGG16 from
+scratch on the ImageNet dataset as reported in [19]. We
+compare CaP with the results of two factorization methods
+[34, 30] and two pruning methods [19], [37]. Both factor-
+ization methods achieve impressive classiﬁcation accuracy,
+but this comes at the cost of increased memory consump-
+tion. The pruning methods reduce both the FLOPs and
+the memory consumption of the network, while maintain-
+ing high classiﬁcation accuracy. However, they rely heavily
+on ﬁne-tuning to achieve high accuracy. We lastly provide
+the results of the CaP compression optimized at each layer.
+Our results demonstrate that the CaP algorithm gives state-
+of-the-art results, has the largest reduction in memory con-
+sumption, and outperforms the pruning methods in terms of
+top-5 accuracy.
+
+5. Conclusion
+
+In this paper, we propose cascaded projection, an end-
+to-end trainable framework for network compression that
+optimizes compression in each layer. Our CaP approach
+forms linear combinations of kernels in each layer of the
+network in a manner that both minimizes reconstruction er-
+ror and maximizes classiﬁcation accuracy. The CaP method
+is the ﬁrst in the ﬁeld of network compression to optimize
+the low dimensional projections of the layers of the network
+using backpropagation and SGD, using our proposed Proxy
+Matrix Projection optimization method.
+
+We demonstrate state-of-the-art performance compared
+to pruning and factorization methods, when the CaP method
+is used to compress standard network architectures trained
+on standard datasets. A side beneﬁt of the CaP formula-
+tion is that it can be performed using standard deep learning
+frameworks and hardware, and it does not require any spe-
+cialized libraries for hardware for acceleration.
+In future
+work, the CaP method can be combined with other meth-
+ods, such as quantization and hashing, to further accelerate
+deep networks.
+
+10722
+
+References
+
+[1] P. A. Absil, R. Mahony, and R. Sepulchre. Optimization al-
+gorithms on matrix manifolds. Princeton University Press,
+2009.
+
+[2] P. A. Absil and J. Malick. Projection-like retractions on ma-
+trix manifolds. SIAM Journal on Optimization, 22(1):135–
+158, 2012.
+
+[3] A. Canziani, A. Paszke, and E. Culurciello. An analysis of
+deep neural network models for practical applications. arXiv
+preprint arXiv:1605.07678, 2016.
+
+[4] W. Chen, J. Wilson, S. Tyree, K. Weinberger, and Y. Chen.
+Compressing neural networks with the hashing trick. In Pro-
+ceedings of the International Conference on Machine Learn-
+ing (ICML) (ICML), pages 2285–2294, 2015.
+
+[5] Y. Cheng, F. X. Yu, R. S. Feris, S. Kumar, A. Choudhary,
+and S.-F. Chang. An exploration of parameter redundancy
+in deep networks with circulant projections. In Proceedings
+of the IEEE International Conference on Computer Vision
+(ICCV), pages 2857–2865, 2015.
+
+[6] M. Courbariaux, Y. Bengio, and J.-P. David. Training deep
+neural networks with low precision multiplications. In Pro-
+ceedings of the International Conference on Machine Learn-
+ing (ICML) Workshop, 2014.
+
+[7] J. P. Cunningham and Z. Ghahramani. Linear dimensionality
+reduction: survey, insights, and generalizations. Journal of
+Machine Learning Research, 16(1):2859–2900, 2015.
+
+[8] J. Deng, W. Dong, R. Socher, L.-J. Li, K. Li, and L. Fei-
+Fei. Imagenet: A large-scale hierarchical image database. In
+Proceedings of the IEEE conference on Computer Vision and
+Pattern Recognition (CVPR), pages 248–255, 2009.
+
+[9] M. Denil, B. Shakibi, L. Dinh, N. De Freitas, et al. Pre-
+dicting parameters in deep learning. In Advances in Neural
+Information Processing Systems (NIPS), pages 2148–2156,
+2013.
+
+[10] E. L. Denton, W. Zaremba, J. Bruna, Y. LeCun, and R. Fer-
+gus. Exploiting linear structure within convolutional net-
+works for efﬁcient evaluation. In Advances in Neural Infor-
+mation Processing Systems (NIPS), pages 1269–1277, 2014.
+
+[11] X. Dong, J. Huang, Y. Yang, and S. Yan. More is less: A
+more complicated network with less inference complexity. In
+Proceedings of the IEEE International Conference on Com-
+puter Vision (ICCV), 2017.
+
+[12] J. C. Gower, G. B. Dijksterhuis, et al. Procrustes problems,
+
+volume 30. Oxford University Press on Demand, 2004.
+
+[13] S. Han, H. Mao, and W. J. Dally. Deep compression: Com-
+pressing deep neural networks with pruning, trained quanti-
+zation and huffman coding. In International Conference on
+Learning Representations (ICLR), 2015.
+
+[14] B. Hassibi and D. G. Stork. Second order derivatives for
+network pruning: Optimal brain surgeon.
+In Advances in
+Neural Information Processing Systems (NIPS, pages 164–
+171, 1993.
+
+[15] K. He, X. Zhang, S. Ren, and J. Sun. Deep residual learning
+for image recognition. In Proceedings of the IEEE confer-
+ence on Computer Vision and Pattern Recognition (CVPR),
+pages 770–778, 2016.
+
+[16] K. He, X. Zhang, S. Ren, and J. Sun. Identity mappings in
+deep residual networks. In Proceedings of the IEEE Euro-
+pean Conference on Computer Vision (ECCV), pages 630–
+645. Springer, 2016.
+
+[17] Y. He, G. Kang, X. Dong, Y. Fu, and Y. Yang. Soft ﬁlter
+pruning for accelerating deep convolutional neural networks.
+In International Joint Conference on Artiﬁcial Intelligence
+(IJCAI), 2018.
+
+[18] Y. He, J. Lin, Z. Liu, H. Wang, L.-J. Li, and S. Han. Amc:
+Automl for model compression and acceleration on mobile
+devices.
+In Proceedings of the European Conference on
+Computer Vision (ECCV), pages 784–800, 2018.
+
+[19] Y. He, X. Zhang, and J. Sun. Channel pruning for accelerat-
+ing very deep neural networks. In Proceedings of the IEEE
+International Conference on Computer Vision (ICCV), Oct
+2017.
+
+[20] A. G. Howard, M. Zhu, B. Chen, D. Kalenichenko, W. Wang,
+T. Weyand, M. Andreetto, and H. Adam. Mobilenets: Efﬁ-
+cient convolutional neural networks for mobile vision appli-
+cations. arXiv preprint arXiv:1704.04861, 2017.
+
+[21] G. Huang, S. Liu, L. van der Maaten, and K. Q. Weinberger.
+Condensenet: An efﬁcient densenet using learned group con-
+volutions. In Proceedings of the IEEE Conference on Com-
+puter Vision and Pattern Recognition (CVPR), June 2018.
+
+[22] G. Huang, Z. Liu, K. Q. Weinberger, and L. van der Maaten.
+Densely connected convolutional networks. In Proceedings
+of the IEEE conference on Computer Vision and Pattern
+Recognition (CVPR), volume 1, page 3, 2017.
+
+[23] L. Huang, X. Liu, B. Lang, A. W. Yu, Y. Wang, and B. Li.
+Orthogonal weight normalization: Solution to optimization
+over multiple dependent stiefel manifolds in deep neural net-
+works. arXiv preprint arXiv:1709.06079, 2017.
+
+[24] Q. Huang, K. Zhou, S. You, and U. Neumann. Learning
+to prune ﬁlters in convolutional neural networks.
+In Pro-
+ceedings of the IEEE Winter Conference on Applications of
+Computer Vision (WACV), pages 709–718, 2018.
+
+[25] F. N. Iandola, S. Han, M. W. Moskewicz, K. Ashraf, W. J.
+Dally, and K. Keutzer. Squeezenet: Alexnet-level accuracy
+with 50x fewer parameters and¡ 0.5 mb model size. arXiv
+preprint arXiv:1602.07360, 2016.
+
+[26] C. Ionescu, O. Vantzos, and C. Sminchisescu. Matrix Back-
+propagation for Deep Networks with Structured Layers. In
+Proceedings of the IEEE International Conference on Com-
+puter Vision (ICCV), 2015.
+
+[27] C. Ionescu, O. Vantzos, and C. Sminchisescu. Training deep
+networks with structured layers by matrix backpropagation.
+arXiv preprint arXiv:1509.07838, 2015.
+
+[28] B. Jacob, S. Kligys, B. Chen, M. Zhu, M. Tang, A. Howard,
+H. Adam, and D. Kalenichenko. Quantization and training
+of neural networks for efﬁcient integer-arithmetic-only infer-
+ence. arXiv preprint arXiv:1712.05877, 2017.
+
+[29] M. Jaderberg, A. Vedaldi, and A. Zisserman. Speeding up
+convolutional neural networks with low rank expansions.
+In Proceedings of the British Machine Vision Conference
+(BMVC), 2014.
+
+[30] Y.-D. Kim, E. Park, S. Yoo, T. Choi, L. Yang, and D. Shin.
+Compression of deep convolutional neural networks for fast
+
+10723
+
+and low power mobile applications. In International Confer-
+ence on Learning Representations (ICLR), 2016.
+
+IEEE onference on Computer Vision and Pattern Recogni-
+tion (CVPR), pages 1–9, 2015.
+
+[47] C. Szegedy, V. Vanhoucke, S. Ioffe, J. Shlens, and Z. Wojna.
+Rethinking the inception architecture for computer vision. In
+Proceedings of the IEEE conference on Computer Vision and
+Pattern Recognition (CVPR), June 2016.
+
+[48] H. D. Tagare. Notes on optimization on stiefel manifolds.
+
+Technical report, Technical report, Yale University, 2011.
+
+[49] Y. Takane and H. Hwang. Regularized linear and kernel re-
+dundancy analysis. Computational Statistics & Data Analy-
+sis, 52(1):394–405, 2007.
+
+[50] Y. Takane and S. Jung. Generalized constrained redundancy
+
+analysis. Behaviormetrika, 33(2):179–192, 2006.
+
+[51] Z. Wen and W. Yin. A feasible method for optimization
+with orthogonality constraints. Mathematical Programming,
+142(1-2):397–434, 2013.
+
+[52] J. Wu, Y. Wang, Z. Wu, Z. Wang, A. Veeraraghavan, and
+Y. Lin. Deep k-means: Re-training and parameter sharing
+with harder cluster assignments for compressing deep con-
+volutions.
+In Proceedings of the 35th International Con-
+ference on Machine Learning, volume 80 of Proceedings
+of Machine Learning Research, pages 5363–5372, Stock-
+holmsmssan, Stockholm Sweden, 10–15 Jul 2018.
+
+[53] K. Yamamoto and K. Maeno. Pcas: Pruning channels with
+attention statistics. arXiv preprint arXiv:1806.05382, 2018.
+[54] R. Yu, A. Li, C.-F. Chen, J.-H. Lai, V. I. Morariu, X. Han,
+M. Gao, C.-Y. Lin, and L. S. Davis. Nisp: Pruning net-
+works using neuron importance score propagation. In Pro-
+ceedings of the IEEE Conference on Computer Vision and
+Pattern Recognition (CVPR), 2018.
+
+[55] X. Zhang, J. Zou, X. Ming, K. He, and J. Sun. Efﬁcient
+and accurate approximations of nonlinear convolutional net-
+works. In Proceedings of the IEEE conference on Computer
+Vision and Pattern Recognition (CVPR), pages 1984–1992,
+2015.
+
+[56] Z. Zhuang, M. Tan, B. Zhuang, J. Liu, Y. Guo, Q. Wu,
+J. Huang, and J. Zhu. Discrimination-aware channel pruning
+for deep neural networks. In Advances in Neural Information
+Processing Systems 31, pages 875–886. 2018.
+
+[31] A. Krizhevsky. Learning multiple layers of features from tiny
+images. Technical report, Department of Computer Science,
+University of Toronto, 2009.
+
+[32] A. Krizhevsky, I. Sutskever, and G. E. Hinton.
+
+Imagenet
+classiﬁcation with deep convolutional neural networks. Ad-
+vances in Neural Information Processing Systems (NIPS),
+25:1097–1105, 2012.
+
+[33] V. Lebedev, Y. Ganin, M. Rakhuba,
+
+I. Oseledets, and
+V. Lempitsky.
+Speeding-up convolutional neural net-
+works using ﬁne-tuned cp-decomposition. arXiv preprint
+arXiv:1412.6553, 2014.
+
+[34] C. Li and C. Richard Shi. Constrained optimization based
+low-rank approximation of deep neural networks.
+In Pro-
+ceedings of the IEEE European Conference on Computer Vi-
+sion (ECCV), pages 732–747, 2018.
+
+[35] H. Li, A. Kadav, I. Durdanovic, H. Samet, and H. P. Graf.
+Pruning ﬁlters for efﬁcient convnets. In International Con-
+ference on Learning Representations (ICLR), 2016.
+
+[36] B. Liu, M. Wang, H. Foroosh, M. Tappen, and M. Pensky.
+Sparse convolutional neural networks. In Proceedings of the
+IEEE conference on Computer Vision and Pattern Recogni-
+tion (CVPR), pages 806–814, 2015.
+
+[37] J.-H. Luo, J. Wu, and W. Lin. Thinet: A ﬁlter level prun-
+ing method for deep neural network compression.
+In Pro-
+ceedings of the IEEE International Conference on Computer
+Vision (ICCV), Oct 2017.
+
+[38] S. Markidis, S. W. Der Chien, E. Laure, I. B. Peng, and J. S.
+Vetter. Nvidia tensor core programmability, performance &
+precision. arXiv preprint arXiv:1803.04014, 2018.
+
+[39] P. Molchanov, S. Tyree, T. Karras, T. Aila, and J. Kautz.
+Pruning convolutional neural networks for resource efﬁcient
+inference. In Proceedings of the International Conference on
+Learning Representations (ICLR), 2017.
+
+[40] V. Nair and G. E. Hinton. Rectiﬁed linear units improve re-
+stricted boltzmann machines. In Proceedings of the Interna-
+tional Conference on Machine Learning (ICML), pages 807–
+814, 2010.
+
+[41] A. Paszke, S. Gross, S. Chintala, G. Chanan, E. Yang, Z. De-
+Vito, Z. Lin, A. Desmaison, L. Antiga, and A. Lerer. Auto-
+matic differentiation in pytorch. In NIPS-W, 2017.
+
+[42] J. Redmon and A. Farhadi. Yolov3: An incremental improve-
+
+ment. arXiv, 2018.
+
+[43] K. Simonyan and A. Zisserman. Very deep convolutional
+networks for large-scale image recognition. In Proceedings
+of the International Conference on Learning Representations
+(ICLR), 2015.
+
+[44] S. Srinivas and R. V. Babu. Data-free parameter pruning for
+deep neural networks. In Proceedings of the British Machine
+Vision Conference (BMVC), 2015.
+
+[45] C. Szegedy, S. Ioffe, V. Vanhoucke, and A. A. Alemi.
+Inception-v4, inception-resnet and the impact of residual
+connections on learning. In AAAI, volume 4, page 12, 2017.
+[46] C. Szegedy, W. Liu, Y. Jia, P. Sermanet, S. Reed,
+D. Anguelov, D. Erhan, V. Vanhoucke, and A. Rabinovich.
+Going deeper with convolutions.
+In Proceedings of the
+
+10724
+
+

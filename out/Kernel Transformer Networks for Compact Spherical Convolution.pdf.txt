@@ -1,0 +1,1436 @@
+Kernel Transformer Networks for Compact Spherical Convolution
+
+Yu-Chuan Su
+
+The University of Texas at Austin
+
+Kristen Grauman
+
+Facebook AI Research
+
+The University of Texas at Austin
+
+Abstract
+
+Ideally, 360◦ imagery could inherit the deep convolu-
+tional neural networks (CNNs) already trained with great
+success on perspective projection images. However, exist-
+ing methods to transfer CNNs from perspective to spheri-
+cal images introduce signiﬁcant computational costs and/or
+degradations in accuracy. We present the Kernel Trans-
+former Network (KTN) to efﬁciently transfer convolution
+kernels from perspective images to the equirectangular pro-
+jection of 360◦ images. Given a source CNN for perspective
+images as input, the KTN produces a function parameter-
+ized by a polar angle and kernel as output. Given a novel
+360◦ image, that function in turn can compute convolutions
+for arbitrary layers and kernels as would the source CNN
+on the corresponding tangent plane projections. Distinct
+from all existing methods, KTNs allow model transfer: the
+same model can be applied to different source CNNs with
+the same base architecture. This enables application to mul-
+tiple recognition tasks without re-training the KTN. Validat-
+ing our approach with multiple source CNNs and datasets,
+we show that KTNs improve the state of the art for spherical
+convolution. KTNs successfully preserve the source CNN’s
+accuracy, while offering transferability, scalability to typi-
+cal image resolutions, and, in many cases, a substantially
+lower memory footprint1.
+
+1. Introduction
+
+The 360◦ camera is an increasingly popular technol-
+ogy gadget, with sales expected to grow by 1500% before
+2022 [41]. As a result, the amount of 360◦ data is increasing
+rapidly. For example, users uploaded more than a million
+360◦ videos to Facebook in less than 3 years [2]. Besides
+videography, 360◦ cameras are also gaining attention for
+self-driving cars, automated drones, and VR/AR. Because
+almost any application depends on semantic visual features,
+this rising trend prompts an unprecedented need for visual
+recognition algorithms on 360◦ images.
+
+Today’s wildly successful recognition CNNs are the re-
+sult of tremendous data curation and annotation effort [6,
+
+1Code and data available at http://vision.cs.utexas.edu/projects/ktn/
+
+360◦ image
+
+(A) Apply directly
+
+fΩ1
+(
+
+)
+
+(B) Apply on tangent planes
+
+fΩ2
+(
+
+)
+
+(C) Proposed KTN
+
+Figure 1: Our goal is to transfer CNNs trained on planar
+images to 360◦ images. Common approaches either (A) ap-
+ply CNNs directly on the equirectangular projection of a
+360◦ image or (B) project the content to tangent planes and
+apply the models on the tangent planes. In contrast, Kernel
+Transformer Network (KTN) adapts the kernels in CNNs to
+account for the distortion in 360◦ images.
+
+14, 16, 30, 35, 40], but they all assume perspective pro-
+jection imagery. How can they be repurposed for 360◦
+data? Existing methods often take an off-the-shelf model
+trained on perspective images and either 1) apply it repeat-
+edly to multiple perspective projections of the 360◦ im-
+age [10,37,39,42] or 2) apply it once to a single equirectan-
+gular projection [19, 29]. See Fig. 1(A,B). These two strate-
+gies, however, have severe limitations. The ﬁrst is expensive
+because it has to project the image and apply the recogni-
+tion model repeatedly. The second is inaccurate because the
+visual content is distorted in equirectangular projection.
+
+To overcome these challenges, recent work designs CNN
+models speciﬁcally for spherical data [11, 12, 15, 36, 45].
+Broadly speaking, they pursue one of three approaches.
+The ﬁrst adapts the network architecture for equirectangu-
+lar projection and trains kernels of variable size to account
+for its distortions [36]. While accurate, this approach suf-
+fers from signiﬁcant model bloat. The second approach
+instead adapts the kernels on the sphere, resampling the
+kernels or projecting their tangent plane features [12, 45].
+While allowing kernel sharing and hence smaller mod-
+
+19442
+
+els, this approach degrades accuracy—especially for deeper
+networks—due to an implicit interpolation assumption, as
+we will explain below. The third approach deﬁnes convo-
+lution in the spectral domain [11, 15], which has signiﬁcant
+memory overhead and thus far limited applicability to real-
+world data. All of the above require retraining to handle a
+new recognition task.
+
+In light of these shortcomings, we propose the Ker-
+nel Transformer Network (KTN). The KTN adapts source
+CNNs trained on perspective images to 360◦ images. In-
+stead of learning a new CNN on 360◦ images for a speciﬁc
+task, KTN learns a function that takes a kernel in the source
+CNN as input and transforms it to be applicable to a 360◦
+image in its equirectangular projection. See Fig. 1 (C). The
+function accounts for the distortion in 360◦ images, return-
+ing different transformations depending on both the polar
+angle θ and the source kernel. The model is trained to re-
+produce the outputs of the source CNN on the perspective
+projection for each tangent plane on an arbitrary 360◦ im-
+age. Hence, KTN learns to behave similarly to the source
+CNN while avoiding repeated projection of the image.
+
+Key highlights of the proposed KTN are its transferabil-
+ity and compactness—both of which owe to our function-
+based design. Once trained for a base architecture, the same
+KTN can transfer multiple source CNNs to 360◦ images.
+For example, having trained a KTN for VGG [35] on Ima-
+geNet classiﬁcation, we can transfer the same KTN to run
+a VGG-based Pascal object detector on 360◦ panoramas.
+This is possible because the KTN takes the source CNN as
+input rather than embed the CNN kernels into its own pa-
+rameters (unlike [11, 12, 15, 36, 45]). Furthermore, since the
+KTN factorizes source kernels from transformations, it is
+implementable with a lightweight network (e.g., increasing
+the footprint of a VGG network by only 25%).
+
+Results show KTN models are orders of magnitude
+smaller than the most accurate competitor, SphConv [36].
+Compared with Spherical U-Net [45] and SphereNet [12],
+KTN is much more data efﬁcient because it does not require
+any annotated 360◦ images for training, and it is more accu-
+rate because it avoids their feature interpolation assumption.
+
+2. Related Work
+
+360◦ vision Ongoing work explores new projection mod-
+els optimized for image display [5, 25, 43] or video stor-
+age [1, 4, 27, 28, 38]. We adopt the most common equirect-
+angular projection so our algorithm can be readily applied
+to existing data. Other work explores how to improve the
+display of 360◦ video via video stabilization [22, 23, 26],
+new display interfaces [31–33], and automatic view selec-
+tion [7, 10, 19, 29, 37, 39, 42]. The latter all rely on applying
+CNNs to 360◦ data, and could beneﬁt from our method.
+
+CNNs on spherical data As discussed above, early meth-
+ods take either the expensive but accurate reprojection ap-
+
+proach [37, 39, 42, 44], or the inaccurate but fast direct
+equirectangular approach [19, 29]. Recent work improves
+accuracy by training vanilla CNNs on the cubemap projec-
+tion, which introduces less distortion [3, 7], but the model
+still suffers from cubemap distortion and discontinuities and
+has sub-optimal accuracy for tasks such as object detection.
+In the last year, several methods develop new spherical
+CNN models. Some design CNN architectures that account
+for the distortion in 360◦ images [12, 36, 45]. SphConv [36]
+learns separate kernels for each row of the equirectangular
+projection, training to reproduce the behavior of an off-the-
+shelf CNN and adjusting the kernel shape based on its lo-
+cation on the sphere. While more accurate than a vanilla
+CNN, SphConv increases the model size signiﬁcantly be-
+cause it unties kernel weights along the rows. In contrast,
+SphereNet [12] deﬁnes the kernels on the tangent plane and
+projects features to the tangent planes before applying the
+kernels. Similarly, Spherical U-Net [45] deﬁnes the kernels
+on the sphere and resamples the kernels on the grid points
+for every location in the equirectangular projection. Both
+allow weight sharing, but they implicitly assume that fea-
+tures deﬁned on the sphere can be interpolated in the 2D
+plane deﬁned by equirectangular projection, which we show
+is problematic. Instead of learning independent kernels or
+using a ﬁxed 2D transformation, our KTN learns a transfor-
+mation that considers both spatial and cross-channel corre-
+lation. Our model is more compact than SphConv by shar-
+ing the kernels, and it is more accurate than SphereNet and
+Spherical U-Net by learning a more generic transformation.
+Another strategy is to deﬁne convolution in the spectral
+domain in order to learn rotation invariant CNNs. One ap-
+proach is to apply graph convolution and design the graph
+structure [24] such that the outputs are rotation invariant.
+Another approach transforms both the feature maps and
+kernels into the spectral domain and applies convolution
+there [11, 15]. However, orientation is often semantically
+signiﬁcant in real data (e.g., cars are rarely upside down)
+and so removing orientation can unnecessarily restrict dis-
+crimination. In addition, these approaches require caching
+the basis functions and the frequency domain feature maps
+in order to achieve efﬁcient computation. This leads to sig-
+niﬁcant memory overhead and limits the viable input res-
+olution. Both constraints limit the spectral methods’ accu-
+racy on real world 360◦ images. Finally, unlike any of the
+above prior work [3,7,11,12,15,36,45], our KTN can trans-
+fer across different source CNNs with the same architecture
+to perform new tasks without re-training; all other methods
+require training a new model for each task.
+
+CNNs with geometric transformations For perspective
+images, too, there is interest in encoding geometric trans-
+formations in CNN architectures. Spatial transformer net-
+works [20] transform the feature map into a canonical
+view to achieve transformation invariance. Active convo-
+lution [21] and deformable convolution [13] model geomet-
+
+9443
+
+ric transformations using the receptive ﬁeld of the kernel.
+While these methods account for geometric transformations
+in the input data, they are not suitable for 360◦ images be-
+cause the transformation is location dependent rather than
+content dependent in 360◦ images. Furthermore, all of them
+model only geometric transformation and ignore the cor-
+relation between different channels in the feature map. In
+contrast, our method captures the properties of 360◦ images
+and the cross channel correlation in the features.
+
+3. Approach
+
+In this section, we introduce the Kernel Transformer Net-
+work for transferring convolutions to 360◦ images. We ﬁrst
+introduce the KTN module, which can replace the ordinary
+convolution operation in vanilla CNNs. We then describe
+the architecture and objective function of KTN. Finally, we
+discuss the difference between KTN and existing methods
+for learning CNNs on 360◦ data.
+
+3.1. KTN for Spherical Convolution
+
+Our KTN can be considered as an generalization of or-
+dinary convolutions in CNNs. In the convolution layers of
+vanilla CNNs, the same kernel is applied to the entire in-
+put feature map to generate the output feature map. The
+assumption underlying the convolution operation is that the
+feature patterns, i.e., the kernels, are translation invariant
+and should remain the same over the entire feature map.
+This assumption, however, does not hold in 360◦ images. A
+360◦ image is deﬁned by the visual content projected on the
+sphere centered at the camera’s optical center. To represent
+the image in digital format, the sphere has to be unwrapped
+into a 2D pixel array, e.g., with equirectangular projection
+or cubemaps. Because all sphere-to-plane projections in-
+troduce distortion, the feature patterns are not translation
+invariant in the pixel space, and ordinary CNNs trained for
+perspective images do not perform well on 360◦ images.
+
+To overcome this challenge, we propose the Kernel
+Transformer Network, which can generate kernels that ac-
+count for the distortion. Assume an input feature map
+I ∈ RH×W ×C and a source kernel K ∈ Rk×k×C deﬁned
+in undistorted images (i.e., perspective projection). Instead
+of applying the source kernel directly
+
+F [x, y] = Σi,jK[i, j] ∗ I[x − i, y − j],
+
+(1)
+
+we learn the KTN (f ) that generates different kernels for
+different distortions:
+
+KΩ = f (K, Ω)
+
+F [x, y] = Σi,jKΩ[i, j] ∗ I[x − i, y − j]
+
+(2)
+
+(3)
+
+where the distortion is parameterized by Ω. Because the dis-
+tortion in 360◦ images is location dependent, we can deﬁne
+Ω as a function on the sphere
+
+Ω = g(θ, φ),
+
+(4)
+
+where θ and φ are the polar and azimuthal angle in spheri-
+cal coordinates, respectively. Given the KTNs and the new
+deﬁnition of convolution, our approach permits applying an
+ordinary CNN to 360◦ images by replacing the convolution
+operation in Eq. 1 with Eq. 3.
+
+KTNs make it possible to take a CNN trained for some
+target task (recognition, detection, segmentation, etc.) on
+ordinary perspective images and apply it directly to 360
+panoramas. Critically, KTNs do so without using any an-
+notated 360◦ images. Furthermore, as we will see below,
+once trained for a given architecture (e.g., VGG), the same
+KTN is applicable for a new task using that architecture
+without retraining the KTN. For example, we could train
+the KTN according to a VGG network trained for ImageNet
+classiﬁcation, then apply the same KTN to transfer a VGG
+network trained for Pascal object detection; with the same
+KTN, both tasks can be translated to 360◦ images.
+
+3.2. KTN Architecture
+
+In this work, we consider 360◦ images that are un-
+wrapped into 2D rectangular images using equirectangular
+projection. Equirectangular projection is the most popular
+format for 360◦ images and is part of the 360◦ video com-
+pression standard [8]. The main beneﬁt of equirectangu-
+lar projection for KTNs is that the distortion depends only
+on the polar angle. Because the polar angle has an one-to-
+one correspondence with the image row (y=θH/π) in the
+equirectangular projection pixel space, the distortion can be
+parameterized easily using Ω = g(θ, φ) = y. Furthermore,
+we can generate one kernel and apply it to the entire row
+instead of generating one kernel for each location, which
+leads to more efﬁcient computation.
+
+A KTN instance is based on a given CNN architecture.
+There are two basic requirements for the KTN module.
+First, it has to be lightweight in terms of both model size
+and computational cost. A large KTN module would in-
+cur a signiﬁcant overhead in both memory and computation,
+which would limit the resolution of input 360◦ images dur-
+ing both training and test time. Because 360◦ images by
+nature require a higher resolution representation in order to
+capture the same level of detail compared with ordinary im-
+ages, the accuracy of the model would degrade signiﬁcantly
+if we were forced to use lower resolution inputs.
+
+Second, KTNs need to generate output kernels with vari-
+able size, because the appropriate kernel shape may vary in
+a single 360◦ image. A common way to generalize convo-
+lution kernels on the 2D plane to 360◦ images is to deﬁne
+the kernels on the tangent plane of the sphere. As a result,
+the receptive ﬁeld of the kernel on the 360◦ image is the
+back projection of the receptive ﬁeld on the tangent plane,
+which varies at different polar angles [12,36,45]. While one
+could address this naively by always generating the kernels
+in the largest possible size, doing so would incur signiﬁcant
+overhead in both computation and memory.
+
+9444
+
+Channel-wise
+
+Projection
+
+Depth-wise
+Convolution
+
+1x1 Convolution
+
+Kθ
+
+⊕
+
+θ
+
+θ
+
+K
+
+θ
+
+360◦ Image
+
+Equirectangular Projection
+
+Figure 2: KTN consists of row dependent channel-wise
+projections that resize the kernel to the target size and depth
+separable convolution blocks. It takes a source kernel K
+and θ as input and generates an output kernel KΩ. KΩ is
+then applied to the 360◦ image in its equirectangular projec-
+tion at row y=θH/π. The transformation accounts for the
+distortion in equirectangular projection, while maintaining
+cross-channel interactions.
+
+We address the ﬁrst requirement (size and cost) by em-
+ploying depthwise separable convolutions [9, 18] within the
+KTN. Instead of learning 3D (i.e., height×width×channels)
+kernels, KTN alternates between pointwise convolution that
+captures cross-channel correlation and depthwise convolu-
+tion that captures spatial correlation. Using the same 3x3
+depthwise convolutions as in MobileNet [18], the computa-
+tion cost is about 8 to 9 times less than standard convolution.
+Furthermore, the model size overhead for KTN is roughly
+1/k2 of the source kernels, where most of the parameters
+are in the 1x1 convolution. The size overhead turns out to
+be necessary, because cross channel correlation is captured
+only by the 1x1 convolution in KTN, and removing it re-
+duces the ﬁnal spherical convolution accuracy signiﬁcantly.
+
+To address the second requirement (variable-sized ker-
+nels), we learn a row dependent depthwise projection to re-
+size the source kernel. The projection consists of h projec-
+tion matrices Pi, for i ∈ [1, h], where h is the number of
+rows in the 360◦ image. Let ri = hi × wi be the target
+kernel receptive ﬁeld at row i. The projection matrix has
+the size Pi ∈ Rri×k2
+, which projects the source kernel into
+the target size. Similar to the depthwise convolution, we
+perform channel-wise projection to reduce the model size.
+
+The complete architecture for KTN is in Fig. 2. We use a
+Residual Network [17]-like architecture. For both the resid-
+ual and shortcut branches, we ﬁrst apply the row depen-
+dent projection to resize the kernel to the target size. The
+residual branch then applies depthwise separable convolu-
+tion twice. Our depthwise separable convolution block con-
+sists of ReLU-pointwise conv-ReLU-depthwise conv. This
+
+design removes the batch normalization used in MobileNet
+to reduce the model size and memory consumption. The
+two branches are added together to generate the output ker-
+nel, which is then applied to a 360◦ feature map as in Eq. 3.
+Note that while the KTN can be applied to different kernels,
+the structure of a KTN depends on Pi, which is determined
+by the receptive ﬁeld of the source kernel. Therefore, we
+need one KTN for each layer of a source CNN.
+
+3.3. KTN Objective and Training Process
+
+Having introduced the KTN module and how to apply it
+for CNNs on 360◦ images, we now describe the KTN ob-
+jective function and training process. The goal of the KTN
+is to adapt the source kernel to the 360◦ domain. Therefore,
+we train the model to reproduce the outputs of the source
+kernels. Let F l ∈ RH×W ×C l
+and F l+1 ∈ RH×W ×C l+1
+be the feature maps generated by the l-th and (l+1)-th layer
+of a source CNN respectively. Our goal is to minimize the
+difference between the feature map generated by the source
+kernels K l and that generated by the KTN module:
+
+L = ∥F l+1 − f l(K l, Ω) ∗ F l∥2
+
+(5)
+
+for any 360◦ image. Note that during training the feature
+maps F l are not generated by applying the source CNN di-
+rectly on the equirectangular projection of the 360◦ images.
+Instead, for each point (x, y) in the 360◦ image, we project
+the image content to the tangent plane of the sphere at
+
+(θ, φ) = (
+
+π × y
+
+H
+
+,
+
+2π × x
+
+W
+
+)
+
+(6)
+
+and apply the source CNN on the tangent plane. This en-
+sures that the target training values are accurately computed
+on undistorted image content. F l[x, y] is deﬁned as the l-th
+layer outputs generated by the source CNN at the point of
+tangency. Our objective function is similar to that of Sph-
+Conv [36], but, importantly, we optimize the model over the
+entire feature map instead of on a single polar angle in order
+to factor the kernel itself out of the KTN weights.
+
+The objective function depends only on the source pre-
+trained CNN and does not require any annotated data for
+training. In fact, it does not require image data speciﬁc to
+the target task, because the loss is deﬁned over 360◦ images.
+In practice, we sample arbitrary 360◦ images for training
+regardless of the source CNN. For example, in experiments
+we train a KTN on YouTube video frames and then apply it
+for a Pascal object detection task. Our goal is to fully repro-
+duce the behavior of the source kernel. Therefore, even if
+the training images do not contain the same objects, scenes,
+etc. as are seen in the target task, the KTN should still mini-
+mize the loss in Eq. 5. Although KTN takes only the source
+kernels and θ as input, the exact transformation f may de-
+pend on all the feature maps F l, F l−1, . . . , F 1 to resolve
+the error introduced by non-linearities. Our KTN learns the
+important components of those transformations from data.
+
+9445
+
+Table 1: Comparison of different approaches. EQUIRECTANGULAR and CUBEMAP refer to applying the given CNN directly
+to the equirectangular and cubemap projection, respectively. Supervised training means that the method requires annotated
+360 images. The model size is the size for a single layer, where c, k, H refer to the number of channels, kernel size, and input
+resolution (bandwidth) respectively. Note that c ∼ H ≫ k for real images and source CNNs, and we keep only the leading
+term for each method.
+
+Translation
+Invariance
+
+Rotation
+Invariance
+
+Supervised
+
+Training
+
+EQUIRECTANGULAR
+CUBEMAP
+S 2CNN [11]
+SPHERICAL CNN [15]
+SPHERICAL U-NET [45]
+SPHERENET [12]
+SPHCONV [36]
+
+KTN
+
+No
+No
+Yes
+Yes
+Yes
+Yes
+Yes
+
+Yes
+
+No
+No
+Yes
+Yes
+No
+No
+No
+
+No
+
+KTN’s transferability across source kernels is analogous to
+the generalizability of visual features across natural images.
+In general, the more visual diversity in the unlabeled train-
+ing data, the more accurately we can expect the KTN to be
+trained. While one could replace all convolution layers in a
+CNN with KTNs and train the entire model end-to-end us-
+ing annotated 360◦ data, we believe that Eq. 5 is a stronger
+condition while also enjoying the advantage of bypassing
+any annotated training data.
+
+3.4. Discussion
+
+Compared to existing methods for convolution for 360◦
+images, the main beneﬁts of KTN are its compactness and
+transferability. The information required to solve the target
+task is encoded in the source kernel, which is fed into the
+KTN as an input rather than part of the model. As a result,
+the same KTN can be applied to another CNN having the
+same base architecture but trained for a different target task.
+In other words, without additional training, the same KTN
+model can be used to solve multiple vision tasks on 360◦
+images by replacing the source kernels, provided that the
+source CNNs for each task have the same base architecture.
+Most related to our work is the spherical convolution ap-
+proach (SphConv) [36]. SphConv learns the kernels adapted
+to the distortion in equirectangular projection. Instead of
+learning the transformation function f in Eq. 2, SphConv
+learns KΩ directly, and hence must learn one KΩ for every
+different row of the equirectangular image. While SphConv
+should be more accurate than KTN theoretically (i.e., re-
+moving any limitations on memory and training time and
+data) our experimental results show that the two methods
+perform similarly in terms of accuracy. Furthermore, the
+number of parameters in SphConv is hundreds of times
+larger than KTN, which makes SphConv much more dif-
+ﬁcult to train and deploy. The difference in model size be-
+comes even more signiﬁcant when there are multiple mod-
+els to be evaluated:
+the same KTN can apply to multi-
+ple source CNNs and thus incurs only constant overhead,
+
+Model
+Size
+
+c2k2
+c2k2
+c2H
+c2H
+c2k2
+c2k2
+c2k2H
+
+c2k2 + c2
+
+Transferable
+
+Across Models
+
+No
+No
+No
+No
+No
+No
+No
+
+Yes
+
+w2σ(w1x1)
+
+c(x)
+
+w2σ(w1x2)
+
+No
+No
+Yes
+Yes
+Yes
+Yes
+No
+
+No
+
+w2
+
+σ(x)
+
+w1
+
+x1
+
+a
+
+x
+
+b
+
+x2
+
+Figure 3: Beyond the ﬁrst CNN layer, the feature interpo-
+lation assumption in SphereNet [12] yields only approxi-
+mated results. See text for details.
+
+whereas SphConv must fully retrain and store a new model
+for each source CNN. For example, if we want to apply
+ﬁve different VGG-based CNNs to 360◦ images, SphConv
+will take 29×5=145GB of space, while KTN takes only
+56×5+14=294MB (cf. Sec. 4.3). In addition, since Sph-
+Conv trains KΩ for a single source kernel K, the model
+does not generalize to different source CNNs.
+
+SphereNet [12] formulates the transformation function f
+using the sphere-to-tangent-plane image projection. While
+the projection transformation leads to an analytical solution
+for f , it implicitly assumes that CNN feature maps can be
+interpolated like pixels. This assumption is only true for
+the ﬁrst layer in a network because of non-linear activation
+functions used in modern CNNs between convolution lay-
+ers. Consider a two layer 1D convolution with a kernel of
+size 1, as sketched in Fig. 3. If we interpolate the pixel ﬁrst
+and apply the kernels, the output of at location x is
+
+c(x) = w2 × σ(w1(ax1 + bx2)).
+
+(7)
+
+However, if we apply the kernels and then interpolate the
+features, the result is
+
+c(x) = aw2 × σ(w1x1) + bw2 × σ(w1x2).
+
+(8)
+
+These two values are not equal because σ is non-linear, and
+the error will propagate as the network becomes deeper. The
+interpolated feature can at most be an approximation for the
+exact feature. Our experimental results show that a projec-
+tion transformation for f leads to sub-optimal performance.
+
+9446
+
+Finally, other methods attempt to reduce distortion by
+unwrapping a single 360◦ image into multiple images using
+perspective projection locally [3,7], e.g., with cubemap pro-
+jection. It is non-trivial to deﬁne convolution across multi-
+ple image planes, where two cube faces meet. Prior work
+addresses this problem by “cube-padding” the feature maps
+using output from adjacent image planes [3, 7], but exper-
+imental results indicate that the resultant features are not
+accurate enough and degrade the accuracy. The reason is
+that the same object may have different appearance on dif-
+ferent tangent planes, especially when the ﬁeld-of-view is
+large and introduces signiﬁcant perspective distortion. Al-
+ternatively, one could sample the tangent planes densely and
+apply convolution on each tangent plane independently, but
+doing so incurs unrealistic computational overhead [37].
+
+Table 1 summarizes the tradeoffs between existing
+spherical convolution models.
+In short, KTN is distinct
+from all others in its ability to transfer to new tasks without
+any labeled data. Furthermore, KTN has the favorable prop-
+erties of a highly compact model and the ability to preserve
+orientation-speciﬁc features (typically desirable for recog-
+nition and other high-level tasks).
+
+4. Experiments
+
+We evaluate KTN on multiple datasets and multiple
+source models. The goal is to 1) validate the accuracy of
+KTN as compared to other methods for learning CNNs on
+360◦ images, 2) demonstrate KTN’s ability to generalize to
+novel source models, and 3) examine KTN’s memory and
+computation overhead compared to existing techniques.
+
+Datasets Our experiments make use of both unannotated
+360◦ videos and 360◦ images with annotation.
+
+Spherical MNIST is constructed from the MNIST dataset
+by back projecting the digits into equirectangular projection
+with 160×80 resolution. The digit labels are used to train
+the source CNN (recognition model), but they are not used
+to train the KTN. Classiﬁcation accuracy on the 360◦-iﬁed
+test set is used as the evaluation metric.
+
+Pano2Vid is a real world 360◦ video dataset [39]. We
+sample frames from non-overlapping videos for training
+and testing, and the frames are resized to 640×320 reso-
+lution. The models are trained to reproduce the convolution
+outputs of the source model, so no labels are required for
+training. The root-mean-square error (RMSE) of the ﬁnal
+convolution outputs is used as the evaluation metric.
+
+Pascal VOC 2007 is a perspective image dataset with
+object annotations. We backproject the object bounding
+boxes to equirectangular projection with 640×320 resolu-
+tion. Following [36], we use the accuracy of the detector
+network in Faster R-CNN on the validation set as the eval-
+uation metric. This dataset is used for evaluation only.
+
+Source Models For Spherical MNIST, we train the source
+CNN on the MNIST training set. The model consists
+
+of three convolution layers followed by one fully con-
+nected layer. Each convolution layer consists of 5x5Conv-
+MaxPool-ReLU, and the number of kernels is 32, 64, and
+128, respectively. For Pano2Vid and Pascal VOC, we take
+off-the-shelf Faster R-CNN [34] models with VGG archi-
+tecture [35] as the source model. The Faster R-CNN is
+trained on Pascal VOC if not mentioned speciﬁcally. Source
+models are not ﬁne-tuned on 360◦ data in any form.
+
+Baselines We compare to the following existing methods:
+
+• EQUIRECTANGULAR—Apply ordinary CNNs on the
+
+360◦ image in its equirectangular projection.
+
+• CUBEMAP—Apply ordinary CNNs on the 360◦ image in
+
+its cubemap projection.
+
+• S 2CNN [11]—We train S 2CNN using the authors’ im-
+plementation. For Pano2Vid and Pascal VOC, we reduce
+the input resolution to 64×64 due to memory limits (see
+Supp). We add a linear read-out layer at the end of the
+model to generate the ﬁnal feature map.
+
+• SPHERICAL CNN [15]—We train SPHERICAL CNN us-
+ing the authors’ implementation. Again, the resolution of
+input is scaled down to 80×80 due to memory limits for
+Pano2Vid and Pascal VOC.
+
+• SPHERICAL U-NET [45]—We use the spherical convo-
+lution layer in Spherical U-Net to replace ordinary con-
+volution in CNN. Input resolution is reduced to 160×80
+for Pano2Vid and Pascal VOC due to memory limits.
+
+• SPHERENET [12]—We implement SPHERENET using
+row dependent channel-wise projection.2 We derive the
+weights of the projection matrices using the feature pro-
+jection operation and train the source kernels. For the
+Pano2Vid dataset, we train each layer independently us-
+ing the same objective as KTN due to memory limits.
+• SPHCONV [36]—We use the authors’ implementation.
+• PROJECTED—Similar to SPHERENET, except that it uses
+
+the source kernels without training.
+
+The network architecture for EQUIRECTANGULAR and
+CUBEMAP is the same as the source model. For all meth-
+ods, the number of layers and kernels are the same as the
+source model.
+
+Note that the resolution reductions speciﬁed above were
+necessary to even run those baseline models on the non-
+MNIST datasets, even with state-of-the-art GPUs. All ex-
+periments were run on NVIDIA V100 GPU with 16GB
+memory—the largest in any generally available GPU to-
+day. Therefore, the restriction is truly imposed by the latest
+hardware technology. Compatible with these limits, the res-
+olution in the authors’ own reported results is restricted to
+60 × 60 [11], 64 × 64 [15], or 150 × 300 [45]. On the
+SphericalMNIST dataset, all methods use the exact same
+
+2The authors’ code and data were not available at the time of publication.
+
+9447
+
+Table 2: Model accuracy.
+
+MNIST
+(Acc.↑)
+
+Pano2Vid
+(RMSE ↓)
+
+Pascal VOC
+
+(Acc.↑)
+
+EQUIRECTANGULAR
+CUBEMAP
+
+S 2CNN [11]
+SPHERICAL CNN [15]
+SPHERICAL U-NET [45]
+SPHERENET [12]
+SPHCONV [36]
+PROJECTED
+
+KTN
+
+95.24
+68.53
+
+95.79
+97.48
+98.43
+87.20
+98.72
+10.70
+
+97.94
+
+3.44
+3.57
+
+2.37
+2.36
+2.54
+2.46
+1.50
+4.24
+
+1.53
+
+41.63
+49.29
+
+4.32
+6.06
+24.98
+46.68
+63.54
+6.15
+
+69.48
+
+image resolution. The fact that KTN scales to higher res-
+olutions is precisely one of its technical advantages, which
+we demonstrate on the other datasets.
+
+For Spherical MNIST, the baselines are trained to predict
+the digit projected to the sphere except SPHCONV. SPH-
+CONV and our KTN are trained to reproduce the conv3
+outputs of the source model. For Pano2Vid, all methods
+are trained to reproduce the conv5 3 outputs.
+Please see Supp. ﬁle for additional details.
+
+4.1. Model Accuracy
+
+Table 2 summarizes the methods’ CNN accuracy on all
+three 360◦ datasets. KTN performs on par with the best
+baseline method (SPHCONV) on Spherical MNIST. The re-
+sult veriﬁes that KTN can transfer the source kernels to the
+entire sphere by learning to reproduce the feature maps, and
+it can match the accuracy of existing models trained with
+annotated 360◦ images.
+
+KTN and SPHCONV perform signiﬁcantly better than
+the other baselines on the high resolution datasets, i.e.,
+Pano2Vid and Pascal VOC. S2CN N , SPHERICAL CNN,
+and SPHERICAL U-NET suffer from their memory con-
+straints, which as discussed above restricts them to lower
+resolution inputs. Their accuracy is signiﬁcantly worse
+on realistic full resolution datasets. These models cannot
+take higher resolution inputs even after using model paral-
+lelism over four GPUs with a total of 64GB of memory.
+Although EQUIRECTANGULAR and CUBEMAP are trained
+and applied on the full resolution inputs, they do not account
+for the distortion in 360◦ images and yield lower accuracy.
+Finally, the performance of PROJECTED and SPHERENET
+suggests that the transformation f cannot be modeled by a
+tangent plane-to-sphere projection. Although SPHERENET
+shows that the performance can be signiﬁcantly improved
+by training the source kernels on 360◦ images, the accu-
+racy is still worse than KTN because feature interpolation
+introduces error. The error accumulates across layers, as
+discussed in Sec. 3.4, which substantially degrades the ac-
+curacy when applying a deep CNN. Note that the number of
+learnable parameters in KTN is much smaller than that in
+
+Figure 4: KTN object detection examples on Pano2Vid.
+See Supp. for detection examples on Pascal VOC.
+
+SPHERENET, but it still achieves a much higher accuracy.
+
+although
+
+Similarly,
+
+Interestingly, although SPHCONV performs better in
+RMSE on Pano2Vid, KTN peforms better in terms of object
+classiﬁcation accuracy on Pascal VOC. We attribute this to
+KTN’s inherent generalizability. SPHCONV has a larger
+number of parameters, and the kernels at different θ are
+trained independently. In contrast, the parameters in KTN
+are shared across different θ and thus trained with richer in-
+formation. Therefore, SPHCONV is more prone to overﬁt
+the training loss, which is to minimize the RMSE for both
+models. Furthermore, our KTN has a signiﬁcant compact-
+ness advantage over SPHCONV, as discussed above.
+SPHERICAL U-NET
+
+and
+SPHERENET perform slightly worse than S 2CN N
+and SPHERICAL CNN on Pano2Vid, they are signiﬁcantly
+better than those baselines on Pascal VOC. This result
+reinforces the practical limitations of imposing rotation
+invariance. S 2CN N and SPHERICAL CNN require full
+rotation invariance; the results show that orientation infor-
+mation is in fact important in tasks like object recognition.
+Thus, the additional rotational invariance constraince limits
+the expressiveness of the kernels and degrades the perfor-
+mance of S 2CN N and SPHERICAL CNN. Furthermore,
+the kernels in S 2CN N and SPHERICAL CNN may span
+the entire sphere, whereas spatial locality in kernels has
+proven important in CNNs for visual recognition.
+
+Fig. 4 shows example outputs of KTN with a Faster R-
+CNN source model. The detector successfully detects ob-
+jects despite the distortion. On the other hand, KTN can fail
+when a very close object cannot be captured in the ﬁeld-of-
+view of perspective images.
+
+4.2. Transferability
+
+Next, we evaluate the transferability of KTN across dif-
+ferent source models on Pano2Vid. In particular, we eval-
+uate whether KTNs trained with a Faster R-CNN that is
+trained on COCO can be applied to another Faster R-CNN
+(both using VGG architecture) that is trained on Pascal
+VOC and vice versa. We denote KTN trained on a different
+source CNN than it is being tested on as KTN-TRANSFER
+and KTN otherwise.
+
+9448
+
+COCO
+
+Pascal VOC
+
+4
+
+2
+
+E
+S
+M
+R
+
+4
+
+3
+
+2
+
+1
+
+0
+18◦
+
+36◦
+
+54◦
+
+72◦
+
+90◦
+
+0
+18◦
+
+36◦
+
+54◦
+
+72◦
+
+90◦
+
+KTN
+
+KTN-Transfer
+
+Projected
+
+Figure 5: Model transferability. The title indicates the
+source CNN being tested. KTN performs almost identi-
+cally regardless of the source network it is trained on. The
+results show we can learn a single KTN and apply it to other
+source CNNs with the same architecture, even if that source
+model is trained for a different task.
+
+Fig. 5 shows the results.
+
+The accuracy of KTN-
+TRANSFER is almost identical to KTN. The results demon-
+strate that KTN indeed learns a task-independent transfor-
+mation and can be applied to different source models with
+the same base architecture. None of the existing mod-
+els [11, 12, 15, 36, 45] are equipped to perform this kind
+of transfer, because they learn ﬁxed kernels for a speciﬁc
+task in some form. Hence, the PROJECTED baseline is the
+only baseline shown in Fig. 5. Although PROJECTED can
+be applied to any source CNN without training, the per-
+formance is signiﬁcantly worse than KTN. Again, the re-
+sults indicate that a projection operation is not sufﬁcient to
+model the required transformation f . The proposed KTN
+is the ﬁrst approach to spherical convolution that translates
+across models without requiring labeled 360◦ images or re-
+training. We also perform the same experiments between
+VGG trained for ImageNet classiﬁcation and Faster R-CNN
+trained for Pascal object detection, and the results are simi-
+lar. See Supp.
+
+4.3. Size and Speed
+
+Finally, we compare the overhead introduced by KTN
+versus that required by the baseline methods. In particular,
+we measure the model size and speed for the convolution
+layers in the VGG architecture. For the model size, we com-
+pute the total size of the parameters using 32-bit ﬂoating
+point numbers for the weights. While there exist algorithms
+that compress neural networks, they are equally applicable
+for all methods. For the speed, we measure the average pro-
+cessing time (I/O excluded) of an image for computing the
+conv5 3 outputs. All methods are evaluated on a dedicated
+AWS p3.8xlarge instance. Because the model size for SPH-
+CONV is 29GB and cannot ﬁt in GPU memory (16GB), it is
+run on CPUs. Other methods are run on GPUs.
+
+Fig. 6 shows the results. We can see that the model size
+of KTN is very similar to EQUIRECTANGULAR, CUBEMAP
+and PROJECTED. In fact, it is only 25% (14MB) larger than
+
+y
+c
+a
+r
+u
+c
+c
+A
+
+y
+c
+a
+r
+u
+c
+c
+A
+
+80
+
+60
+
+40
+
+20
+
+0
+
+80
+
+60
+
+40
+
+20
+
+0
+
+102
+
+103
+
+104
+
+Size (MB)
+
+EQUIRECTANGULAR
+CUBEMAP
+S 2CN N [11]
+SPHERICAL CNN [15]
+SPHERENET [12]
+SPHERICAL U-NET [45]
+SPHCONV [36]
+PROJECTED
+KTN (Ours)
+
+101
+
+10−1
+Time (s) / Image
+
+103
+
+Figure 6: Model size (top) and speed (bottom) vs. accu-
+racy for VGG. KTN is orders of magnitude smaller than
+SPHCONV, and it is similarly or more compact as all other
+models, while being signiﬁcantly more accurate.
+
+the source CNN. At the same time, KTN achieves a much
+better accuracy compared with all the models that have a
+comparable size. Compared with SPHCONV, KTN not only
+achieves a higher accuracy but is also orders of magnitude
+smaller. Similarly, S 2CNN and SPHERICAL CNN increase
+model size by 131% and 727% while performing worse in
+terms of accuracy. Note that we do not include parame-
+ters that can be computed analytically, such as the bases
+for S 2CN N and the projection matrices for SPHERENET,
+though in practice they also add further memory overhead
+for those baselines.
+
+On the other hand, the computational cost of KTN is
+naturally much higher than EQUIRECTANGULAR. The lat-
+ter only needs to run the source CNN on an equirectangular
+image, whereas the convolution kernels are generated at run
+time for KTN. However, as all the results show, KTN is
+much more accurate. Furthermore, KTN is 26 times faster
+than SPHCONV, since the smaller model size allows the
+model to be evaluated on GPU.
+
+5. Conclusion
+
+We propose the Kernel Transformer Network for trans-
+fering CNNs from perspective images to 360◦ images. KTN
+learns a function that transforms a kernel to account for the
+distortion in the equirectangular projection of 360◦ images.
+The same KTN model can transfer to multiple source CNNs
+with the same architecture, signiﬁcantly streamlining the
+process of visual recognition for 360◦ images. Our results
+show KTN outperforms existing methods while providing
+superior scalability and transferability.
+
+Acknowledgement. We thank Carlos Esteves for the help
+on SPHERICAL CNN experiments. This research is sup-
+ported in part by NSF IIS-1514118, an AWS gift, a Google
+PhD Fellowship, and a Google Faculty Research Award.
+
+9449
+
+References
+
+[1] David Newman Adeel Abbas. A novel projection for omni-
+
+directional video. In Proc.SPIE 10396, 2017. 2
+
+[2] Brent Ayrey and Christopher Wong.
+
+Introducing face-
+book 360 for gear vr. https://newsroom.fb.com/news/2017/03/
+introducing-facebook-360-for-gear-vr/, March 2017. 1
+
+[3] Wouter Boomsma and Jes Frellsen. Spherical convolutions
+and their application in molecular modelling. In NIPS, 2017.
+2, 6
+
+[4] Chip Brown.
+
+VR video.
+bringing-pixels-front-and-center-vr-video/, March 2017. 2
+
+Bringing pixels front and center
+in
+https://www.blog.google/products/google-vr/
+
+[5] Che-Han Chang, Min-Chun Hu, Wen-Huang Cheng, and
+Yung-Yu Chuang. Rectangling stereographic projection for
+wide-angle image visualization. In ICCV, 2013. 2
+
+[6] Liang-Chieh Chen, Yukun Zhu, George Papandreou, Florian
+Schroff, and Hartwig Adam. Encoder-decoder with atrous
+separable convolution for semantic image segmentation. In
+ECCV, 2018. 1
+
+[7] Hsien-Tzu Cheng, Chun-Hung Chao, Jin-Dong Dong, Hao-
+Kai Wen, Tyng-Luh Liu, and Min Sun. Cube padding for
+weakly-supervised saliency prediction in 360◦ videos.
+In
+CVPR, 2018. 2, 6
+
+[8] Byeongdoo Choi, Ye-Kui Wang, and Miska M. Hannuksela.
+Wd on iso/iec 23000-20 omnidirectional media application
+format. ISO/IEC JTC1/SC29/WG11, 2017. 3
+
+[9] Franc¸ois Chollet. Xception: Deep learning with depthwise
+
+separable convolutions. In CVPR, 2017. 4
+
+[10] Shih-Han Chou, Yi-Chun Chen, Kuo-Hao Zeng, Hou-Ning
+Hu, Jianlong Fu, and Min Sun. Self-view grounding given a
+narrated 360◦ video. In AAAI, 2018. 1, 2
+
+[11] Taco Cohen, Mario Geiger, Jonas K¨ohler, and Max Welling.
+
+Spherical cnns. In ICLR, 2018. 1, 2, 5, 6, 7, 8
+
+[12] Benjamin Coors, Alexandru Paul Condurache, and Andreas
+Geiger. Spherenet: Learning spherical representations for
+detection and classiﬁcation in omnidirectional images.
+In
+ECCV, 2018. 1, 2, 3, 5, 6, 7, 8
+
+[13] Jifeng Dai, Haozhi Qi, Yuwen Xiong, Yi Li, Guodong
+Zhang, Han Hu, and Yichen Wei. Deformable convolutional
+networks. In ICCV, 2017. 2
+
+[14] Jia Deng, Wei Dong, Richard Socher, Li-Jia Li, Kai Li,
+and Li Fei-Fei. Imagenet: a large-scale hierarchical image
+database. In CVPR, 2009. 1
+
+[15] Carlos Esteves, Christine Allen-Blanchette, Ameesh Maka-
+dia, and Kostas Daniilidis. Learning so(3) equivariant repre-
+sentations with spherical cnns. In ECCV, 2018. 1, 2, 5, 6, 7,
+8
+
+[16] Christoph Feichtenhofer, Axel Pinz, and Andrew Zisserman.
+Convolutional two-stream network fusion for video action
+recognition. In CVPR, 2016. 1
+
+[17] Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun.
+In CVPR,
+
+Deep residual learning for image recognition.
+2016. 4
+
+[18] Andrew G Howard, Menglong Zhu, Bo Chen, Dmitry
+Kalenichenko, Weijun Wang, Tobias Weyand, Marco An-
+dreetto, and Hartwig Adam. Mobilenets: Efﬁcient convolu-
+tional neural networks for mobile vision applications. arXiv
+preprint arXiv:1704.04861, 2017. 4
+
+[19] Hou-Ning Hu, Yen-Chen Lin, Ming-Yu Liu, Hsien-Tzu
+Cheng, Yung-Ju Chang, and Min Sun. Deep 360 pilot:
+Learning a deep agent for piloting through 360◦ sports video.
+In CVPR, 2017. 1, 2
+
+[20] Max Jaderberg, Karen Simonyan, Andrew Zisserman, et al.
+Spatial transformer networks. In Advances in Neural Infor-
+mation Processing Systems, pages 2017–2025, 2015. 2
+
+[21] Yunho Jeon and Junmo Kim. Active convolution: Learning
+the shape of convolution for image classiﬁcation. In CVPR,
+2017. 2
+
+[22] Mostafa Kamali, Atsuhiko Banno, Jean-Charles Bazin, In So
+Kweon, and Katsushi Ikeuchi. Stabilizing omnidirectional
+videos using 3d structure and spherical image warping. In
+IAPR MVA, 2011. 2
+
+[23] Shunichi Kasahara, Shohei Nagai, and Jun Rekimoto. First
+person omnidirectional video: System design and implica-
+tions for immersive experience. In ACM TVX, 2015. 2
+
+[24] Renata Khasanova and Pascal Frossard. Graph-based clas-
+In ICCV Workshops,
+
+siﬁcation of omnidirectional images.
+2017. 2
+
+[25] Yeong Won Kim, Chang-Ryeol Lee, Dae-Yong Cho,
+Yong Hoon Kwon, Hyeok-Jae Choi, and Kuk-Jin Yoon. Au-
+tomatic content-aware projection for 360◦ videos. In ICCV,
+2017. 2
+
+[26] Johannes Kopf. 360◦ video stabilization. ACM Transactions
+
+on Graphics (TOG), 35(6):195, 2016. 2
+
+[27] Evgeny Kuzyakov and David Pio. Under the hood: Building
+360 video. https://code.facebook.com/posts/1638767863078802/
+under-the-hood-building-360-video/, October 2015. 2
+
+encoding
+
+[28] Evgeny Kuzyakov and David Pio.
+
+Next-generation
+and
+video
+VR.
+https://code.facebook.com/posts/1126354007399553/
+next-generation-video-encoding-techniques-for-360-video-and-vr/,
+January 2016. 2
+
+techniques
+
+video
+
+360
+
+for
+
+[29] Wei-Sheng Lai, Yujia Huang, Neel Joshi, Chris Buehler,
+Ming-Hsuan Yang, and Sing Bing Kang. Semantic-driven
+generation of hyperlapse from 360◦ video. IEEE Transac-
+tions on Visualization and Computer Graphics, PP(99):1–1,
+2017. 1, 2
+
+[30] Tsung-Yi Lin, Michael Maire, Serge Belongie, James Hays,
+Pietro Perona, Deva Ramanan, Piotr Doll´ar, and C. Lawrence
+Zitnick. Microsoft coco: Common objects in context.
+In
+ECCV, 2014. 1
+
+[31] Yen-Chen Lin, Yung-Ju Chang, Hou-Ning Hu, Hsien-Tzu
+Cheng, Chi-Wen Huang, and Min Sun. Tell me where to
+look: Investigating ways for assisting focus in 360 video. In
+CHI, 2017. 2
+
+[32] Yung-Ta Lin, Yi-Chi Liao, Shan-Yuan Teng, Yu-Ju Chung,
+Liwei Chan, and Bing-Yu Chen. Outside-in: Visualizing
+out-of-sight regions-of-interest in a 360◦ video using spatial
+picture-in-picture previews. In UIST, 2017. 2
+
+[33] Amy Pavel, Bj¨orn Hartmann, and Maneesh Agrawala. Shot
+orientation controls for interactive cinematography with 360
+video. In UIST, 2017. 2
+
+[34] Shaoqing Ren, Kaiming He, Ross Girshick, and Jian Sun.
+Faster r-cnn: Towards real-time object detection with region
+proposal networks. In NIPS, 2015. 6
+
+9450
+
+[35] Karen Simonyan and Andrew Zisserman. Very deep convo-
+lutional networks for large-scale image recognition. In ICLR,
+2015. 1, 2, 6
+
+[36] Yu-Chuan Su and Kristen Grauman. Learning spherical con-
+volution for fast features from 360◦ imagery. In NIPS, 2017.
+1, 2, 3, 4, 5, 6, 7, 8
+
+[37] Yu-Chuan Su and Kristen Grauman. Making 360◦ video
+watchable in 2d: Learning videography for click free view-
+ing. In CVPR, 2017. 1, 2, 6
+
+[38] Yu-Chuan Su and Kristen Grauman. Learning compressible
+
+360◦ video isomers. In CVPR, 2018. 2
+
+[39] Yu-Chuan Su, Dinesh Jayaraman, and Kristen Grauman.
+Pano2vid: Automatic cinematography for watching 360◦
+videos. In ACCV, 2016. 1, 2, 6
+
+[40] Du Tran, Lubomir Bourdev, Rob Fergus, Lorenzo Torresani,
+and Manohar Paluri. Learning spatiotemporal features with
+3d convolutional networks. In ICCV, 2015. 1
+
+[41] Ville Ukonaho.
+
+Global
+2016
+
+360
+to
+
+camera
+
+sales
+https:
+
+by
+
+segment:
+
+2022.
+forecast
+//www.strategyanalytics.com/access-services/devices/
+mobile-phones/emerging-devices/market-data/report-detail/
+global-360-camera-sales-forecast-by-segment-2016-to-2022,
+March 2017. 1
+
+[42] Youngjae Yu, Sangho Lee, Joonil Na, Jaeyun Kang, and
+Gunhee Kim. A deep ranking model for spatio-temporal
+highlight detection from a 360◦ video. In AAAI, 2018. 1,
+2
+
+[43] Lihi Zelnik-Manor, Gabriele Peters, and Pietro Perona.
+
+Squaring the circle in panoramas. In ICCV, 2005. 2
+
+[44] Yinda Zhang, Shuran Song, Ping Tan, and Jianxiong Xiao.
+Panocontext: A whole-room 3d context model for panoramic
+scene understanding. In ECCV, 2014. 2
+
+[45] Ziheng Zhang, Yanyu Xu, Jingyi Yu, and Shenghua Gao.
+In ECCV, 2018. 1, 2,
+
+Saliency detection in 360◦ videos.
+3, 5, 6, 7, 8
+
+9451
+
+

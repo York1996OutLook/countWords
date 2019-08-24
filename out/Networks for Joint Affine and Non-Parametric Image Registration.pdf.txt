@@ -1,0 +1,1367 @@
+Networks for Joint Afﬁne and Non-parametric Image Registration
+
+Zhengyang Shen
+UNC Chapel Hill
+
+Xu Han
+
+Zhenlin Xu
+
+UNC Chapel Hill
+
+UNC Chapel Hill
+
+Marc Niethammer
+UNC Chapel Hill
+
+zyshen@cs.unc.edu
+
+xhs400@cs.unc.edu
+
+zhenlinx@cs.unc.edu
+
+mn@cs.unc.edu
+
+Abstract
+
+We introduce an end-to-end deep-learning framework
+for 3D medical image registration.
+In contrast to ex-
+isting approaches, our framework combines two regis-
+tration methods:
+an afﬁne registration and a vector
+momentum-parameterized stationary velocity ﬁeld (vSVF)
+model. Speciﬁcally, it consists of three stages. In the ﬁrst
+stage, a multi-step afﬁne network predicts afﬁne transform
+parameters. In the second stage, we use a U-Net-like net-
+work to generate a momentum, from which a velocity ﬁeld
+can be computed via smoothing. Finally, in the third stage,
+we employ a self-iterable map-based vSVF component to
+provide a non-parametric reﬁnement based on the current
+estimate of the transformation map. Once the model is
+trained, a registration is completed in one forward pass. To
+evaluate the performance, we conducted longitudinal and
+cross-subject experiments on 3D magnetic resonance im-
+ages (MRI) of the knee of the Osteoarthritis Initiative (OAI)
+dataset. Results show that our framework achieves compa-
+rable performance to state-of-the-art medical image regis-
+tration approaches, but it is much faster, with a better con-
+trol of transformation regularity including the ability to pro-
+duce approximately symmetric transformations, and com-
+bining afﬁne as well as non-parametric registration.
+
+1. Introduction
+
+Registration is a fundamental task in medical image anal-
+ysis to establish spatial correspondences between different
+images. To allow, for example, localized spatial analyses of
+cartilage changes over time or across subject populations,
+images are ﬁrst registered to a common anatomical space.
+
+Traditional image registration algorithms, such as elas-
+tic [3, 25], ﬂuid [5, 12, 29, 8, 31] or B-spline models [24],
+are based on the iterative numerical solution of an optimiza-
+tion problem. The objective of the optimization is to mini-
+mize image mismatch and transformation irregularity. The
+sought-for solution is then a spatial transformation which
+aligns a source image well to a target image while assur-
+ing that the transformation is sufﬁciently regular. To this
+
+end, a variety of different similarity measures to assess im-
+age mismatch have been proposed. For image pairs with a
+similar intensity distribution, Mean Square Error (MSE) on
+intensity differences is widely used. For multi-modal regis-
+tration, however, Normalized Cross Correlation (NCC) and
+Mutual Information (MI) usually perform better. Besides,
+smooth transformation maps are typically desirable. Meth-
+ods encouraging or enforcing smoothness use, for exam-
+ple, rigidity penalties [26] or penalties that encourage vol-
+ume preservation [27, 22] to avoid folds in the transforma-
+tion. Diffeomorphic transformations can also be achieved
+by optimizing over sufﬁciently smooth velocity ﬁelds from
+which the spatial transformation can be recovered via inte-
+gration. Such methods include Large Displacement Diffeo-
+morphic Metric Mapping (LDDMM)
+[5, 12] and Diffeo-
+morphic Demons [29]. As optimizations are typically over
+very high-dimensional parameter spaces, they are computa-
+tionally expensive.
+
+Recently, taking advantage of deep learning, research
+has focused on replacing costly numerical optimization
+with a learned deep regression model. These methods
+are extremely fast as only the evaluation of the regression
+model is required at test time. They imitate the behavior
+of conventional, numerical optimization-based registration
+algorithms as they predict the same types of registration pa-
+rameters: displacement ﬁelds, velocity ﬁelds or momen-
+tum ﬁelds. Depending on the predicted parameters, theo-
+retical properties of the original registration model can be
+retained. For example, in Quicksilver [33], a network is
+learned to predict the initial momentum of LDDMM, which
+can then be used to ﬁnd a diffeomorphic spatial transfor-
+mation via LDDMM’s shooting equations. While earlier
+work has focused on training models based on previously
+obtained registration parameters via costly numerical opti-
+mization [6, 32], recent work has shifted to end-to-end for-
+mulations1 [10, 14, 4, 9]. These end-to-end approaches inte-
+grate image resampling into their network and were inspired
+
+1For these end-to-end approaches, the sought-for registration param-
+eterization is either the ﬁnal output of the network (for the prediction of
+displacement ﬁelds) or an intermediate output (for the prediction of veloc-
+ity ﬁelds) from which the transformation map can be recovered. The rest
+of the formulation stays the same.
+
+4224
+
+by the spatial-transformer work of Jaderberg et al. [13].
+Non end-to-end approaches require the sought-for registra-
+tion parameters at training time. To obtain such data via
+numerical optimization for large numbers of image pairs
+can be computationally expensive, whereas end-to-end ap-
+proaches effectively combine the training of the network
+with the implicit optimization over the registration parame-
+ters (as part of the network architecture).
+
+Existing deep learning approaches to image registration
+exhibit multiple limitations. First, they assume that images
+have already been pre-aligned, e.g., by rigid or afﬁne reg-
+istration. These pre-alignment steps can either be done via
+a speciﬁcally trained network [7] or via standard numeri-
+cal optimization. In the former case the overall registration
+approach is no longer end-to-end, while in the latter the pre-
+registration becomes the computational bottleneck. Second,
+many approaches are limited by computational memory and
+hence either only work in 2D or resort to small patches
+in 3D. Though some work explores end-to-end formula-
+tions for entire 3D volumes [4, 9], these approaches per-
+form computations based on the full resolution transforma-
+tion map, in which case a very simple network can easily
+exhaust the memory and thus limit extensions of the model.
+Third, they do not explore iterative reﬁnement.
+
+Our proposed approach addresses these shortcomings.
+
+Speciﬁcally, our contributions are:
+
+• A novel vector momentum-parameterized stationary
+velocity ﬁeld registration model (vSVF). The vec-
+tor momentum ﬁeld allows decoupling transformation
+smoothness and the prediction of the transformation
+parameters. Hence, sufﬁcient smoothness of the re-
+sulting velocity ﬁeld can be guaranteed and diffeomor-
+phisms can be obtained even for large displacements.
+• An end-to-end registration method, merging afﬁne and
+vSVF registration into a single framework. This frame-
+work achieves comparable performance to the corre-
+sponding optimization-based method and state-of-the-
+art registration approaches while dramatically reduc-
+ing the computational cost.
+
+• A multi-step approach for the afﬁne and the vSVF reg-
+istration components in our model, which allows reﬁn-
+ing registration results.
+
+• An entire registration model via map compositions to
+
+avoid unnecessary image interpolations.
+
+• An inverse consistency loss both for the afﬁne and the
+vSVF registration components thereby encouraging the
+regression model to learn a mapping which is less de-
+pendent on image ordering. I.e., registering image A
+to B will result in similar spatial correspondences as
+registering B to A.
+
+Our approach facilitates image registration including
+afﬁne pre-registration within one uniﬁed regression model.
+
+Figure 1. Our framework consists of afﬁne (left) and vSVF (right)
+registration components. The afﬁne part outputs the afﬁne map
+and the afﬁnely warped source image. The afﬁne map initializes
+the map of the vSVF registration. The afﬁnely warped image and
+the target image are input into the momentum generation network
+to predict the momentum of the vSVF registration model. The
+outputs of the vSVF component are the composed transformation
+map and the warped source image, which can be either taken as
+the ﬁnal registration result or fed back (indicated by the dashed
+line) into the vSVF component to reﬁne the registration solution.
+
+In what follows, we refer to our approach as AVSM (Afﬁne-
+vSVF-Mapping). Fig. 1 shows an overview of the AVSM
+framework illustrating the combination of the afﬁne and the
+vSVF registration components. The afﬁne and the vSVF
+components are designed independently, but easy to com-
+bine. In the afﬁne stage, a multi-step afﬁne network predicts
+afﬁne parameters for an image pair. In the vSVF stage, a
+U-Net-like network generates a momentum, from which a
+velocity ﬁeld can be computed via smoothing. The initial
+map and the momentum are then fed into the vSVF compo-
+nent to output the sought-for transformation map. A spec-
+iﬁed number of iterations can also be used to reﬁne the re-
+sults. The entire registration framework operates on maps
+and uses map compositions. In this way, the source image
+is only interpolated once thereby avoiding image blurring.
+Furthermore, as the transformation map is assumed to be
+smooth, interpolations to up-sample the map are accurate.
+Therefore, we can obtain good registration results by pre-
+dicting a down-sampled transformation. However, the simi-
+larity measure is evaluated at full resolution during training.
+Computing at low resolution greatly reduces the computa-
+tional cost and allows us to compute on larger image vol-
+umes given a particular memory budget. E.g., a map with
+1/2 the size only requires 1/8 of the computations and 1/8
+of the memory in 3D.
+
+We compare AVSM to publicly available optimization-
+based methods [20, 17, 24, 19, 2] on longitudinal and cross-
+subject registrations of 3D image pairs of the OAI dataset.
+
+The manuscript is organized as follows: Sec. 2 describes
+our ASVM approach; Sec. 3 shows experimental results;
+Sec. 4 presents conclusions and avenues for future work.
+
+4225
+
+formation. Fig. 2 shows the network architecture. To avoid
+numerical instabilities and numerical dissipation due to suc-
+cessive trilinear interpolations, we directly update the afﬁne
+registration parameters rather than resampling images in in-
+termediate steps. Speciﬁcally, at each step we take the target
+image and the warped source image (obtained via interpola-
+tion from the source image using the previous afﬁne param-
+eters) as inputs and then output the new afﬁne parameters
+for the transformation reﬁnement. Let the afﬁne parameters
+
+be Γ = (cid:0)A b(cid:1) , where A ∈ Rd×d represents the linear
+
+transformation matrix; b ∈ Rd denotes the translation and d
+is the image dimension. The update rule is as follows:
+
+A(t) = ˜A(t)A(t−1), b(t) = ˜A(t)b(t−1) + ˜b(t),
+s.t. A(0) = I, b(0) = 0.
+
+(1)
+
+Here, ˜A(t), A(t) represent the linear transformation matrix
+output and the composition result at the t-th step, respec-
+tively. Similarly, ˜b(t) denotes the afﬁne translation param-
+eter output at the t-th step and b(t) the composition result.
+Finally, if we consider the registration from the source im-
+age to the target image in the space of the target image, the
+afﬁne map is obtained by Φ−1
+a (x, Γ) = A(tlast)x + b(tlast).
+
+Loss: The loss of the multi-step afﬁne network consists of
+three parts: an image similarity loss La-sim, a regularization
+loss La-reg and a loss encouraging transformation symme-
+try La-sym. Let us denote I0 as the source image and I1 as
+the target image. The superscripts st and ts denote registra-
+tions from I0 to I1 and I1 to I0, respectively2.
+
+The image similarity loss La-sim(I0, I1, Φ−1
+
+a ) can be
+any standard similarity measure, e.g., Normalized Cross
+Correlation (NCC), Localized NCC (LNCC), or Mean
+Square Error (MSE). Here we generalize LNCC to a multi-
+kernel LNCC formulation (mk-LNCC). Standard LNCC is
+computed by averaging NCC scores of overlapping sliding
+windows centered at sampled voxels. Let V be the vol-
+ume of the image; xi, yi refer to the ith (i ∈ {1, .., |V |})
+voxel in the warped source and target volumes, respectively.
+Ns refers to the number of sliding windows with cubic size
+j refer to the window centered at the jth voxel
+s×s×s. Let ζ s
+and ¯xj, ¯yj to the average image intensity values over ζ s
+j in
+the warped source and target image, respectively. LNCC
+with window size s, denoted as κs, is deﬁned by
+
+κs(x, y) =
+
+1
+
+Ns Xj
+
+(xi − ¯xj)(yi − ¯yj)
+
+j
+
+Pi∈ζ s
+r Pi∈ζ s
+(xi − ¯xj)2 Pi∈ζ s
+
+j
+
+j
+
+.
+
+(yi − ¯yj)2
+
+(2)
+We deﬁne mk-LNCC as a weighted sum of LNCCs with dif-
+ferent window sizes. For computational efﬁciency LNCC
+can be evaluated over windows centered over a subset of
+
+Figure 2. Multi-step afﬁne network structure. As in a recurrent
+network, the parameters of the afﬁne network are shared by all
+steps. At each step, the network outputs the parameters to reﬁne
+the previously predicted afﬁne transformation. I.e., the current es-
+timate is obtained by composition (indicated by dashed line). The
+overall afﬁne transformation is obtained at the last step.
+
+2. Methods
+
+This section explains our overall approach.
+
+It is di-
+vided into two parts. The ﬁrst part explains the afﬁne reg-
+istration component which makes use of a multi-step net-
+work to reﬁne predictions of the afﬁne transformation pa-
+rameters. The second part explains the vector momentum-
+parameterized stationary velocity ﬁeld (vSVF) which ac-
+counts for local deformations. Here, a momentum gener-
+ation network ﬁrst predicts the momentum parameterizing
+the vSVF model and therefore the transformation map. The
+vSVF component can also be applied in a multi-step way
+thereby further improving registration results.
+
+2.1. Multi step Afﬁne Network
+
+Most existing non-parametric registration approaches
+are not invariant to afﬁne transformations as they are penal-
+ized by the regularizers. Hence, non-parametric registration
+approaches typically start from pre-registered image pairs,
+most typically based on afﬁne registration, to account for
+large, global displacements or rotations. Therefore, in the
+ﬁrst part of our framework, we use a multi-step afﬁne net-
+work directly predicting the afﬁne registration parameters
+and the corresponding transformation map.
+
+The network needs to be ﬂexible enough to adapt to both
+small and large afﬁne deformations. Although deep convo-
+lutional networks can have large receptive ﬁelds, our exper-
+iments show that training a single afﬁne network does not
+perform well in practice. Instead, we compose the afﬁne
+transformation from several steps. This strategy results in
+signiﬁcant improvements in accuracy and stability.
+
+Network: Our multi-step afﬁne network is a recurrent net-
+work, which progressively reﬁnes the predicted afﬁne trans-
+
+2To simplify the notation, we omit st (source to target registration) in
+
+what follows and only emphasize ts (target to source registration).
+
+4226
+
+voxels of V . The image similarity loss is then
+
+La-sim(I0, I1, Γ) = Xi
+
+ωiκsi (I0 ◦ Φ−1
+
+a , I1),
+
+s.t. Φ−1
+
+a (x, Γ) = Ax + b and Xi
+
+ωi = 1, wi ≥ 0.
+
+(3)
+
+The regularization loss La-reg(Γ) penalizes deviations
+
+of the composed afﬁne transform from the identity:
+
+2),
+
+F + ||b||2
+
+La-reg(Γ) = λar(||A − I||2
+
+(4)
+where k · kF denotes the Frobenius norm and λar ≥ 0 is
+an epoch-dependent weight factor designed to be large at
+the beginning of the training to constrain large deformations
+and then gradually decaying to zero. See Eq. 13 for details.
+The symmetry loss La-sym(Γ, Γts) encourages the reg-
+istration to be inverse consistent. I.e., we want to encourage
+that the transformation computed from source to target im-
+age is the inverse of the transformation computed from the
+target to the source image (i.e., Ats(Ax + b) + bts = x):
+La-sym(Γ, Γts) = λas(||AtsA−I||2
+where λas ≥ 0 is a chosen constant.
+
+F +||Atsb+bts||2
+
+2), (5)
+
+The complete loss La(I0, I1, Γ, Γts) is then:
+La(I0, I1, Γ, Γts) =ℓa(I0, I1, Γ) + ℓa(I1, I0, Γts)
+
+(6)
+
++ La-sym(Γ, Γts),
+
+where ℓa(I0, I1, Γ) = La-sim(I0, I1, Γ) + La-reg(Γ).
+
+2.2. Vector Momentum parameterized SVF
+
+This section presents the momentum based stationary ve-
+locity ﬁeld method followed by the network to predict the
+momentum. For simplicity, we describe the one step vSVF
+here, which forms the basis of the multi-step approach.
+
+vSVF Method: To capture large deformations and to
+guarantee diffeomorphic transformations, registration algo-
+rithms motivated by ﬂuid mechanics are frequently em-
+ployed. Here, the transformation map Φ 3 in source im-
+age space is obtained via time-integration of a velocity ﬁeld
+v(x, t), which needs to be estimated. The governing dif-
+ferential equation is: Φt(x, t) = v(Φ(x, t), t), Φ(x, 0) =
+Φ(0)(x), where Φ(0) is the initial map. For a sufﬁciently
+smooth velocity ﬁeld v one obtains a diffeomorphic trans-
+formation. Sufﬁcient smoothness is achieved by penalizing
+non-smoothness of v. Speciﬁcally, the optimization prob-
+lem is
+
+kvk2
+
+L dt + Sim[I0 ◦ Φ−1(1), I1],
+
+λvrZ 1
+
+0
+
+v∗ = argmin
+
+v
+s.t. Φ−1
+
+t + DΦ−1v = 0 and Φ−1(0) = Φ−1
+
+(0) ,
+
+(7)
+
+where D denotes the Jacobian and kvk2
+L = hL†Lv, vi is
+a spatial norm deﬁned by specifying the differential opera-
+tor L and its adjoint L†. As the vector-valued momentum
+m is equivalent to m = L†Lv, one can express the norm
+
+3The subscript v of Φv is omitted, where v refers to vSVF method.
+
+Figure 3. vSVF registration framework illustration (one step), in-
+cluding the momentum generation network and the vSVF registra-
+tion. The network outputs a low-resolution momentum. The mo-
+mentum and the down-sampled initial map are input to the vSVF
+unit outputting a low-resolution transformation map, which is then
+up-sampled to full resolution before warping the source image.
+
+m0
+
+L = hm, vi.
+
+as kvk2
+In the LDDMM approach [5], time-
+dependent vector ﬁelds v(x, t) are estimated. A slightly
+simpler approach is to use a stationary velocity ﬁeld (SVF)
+v(x) [18]. The rest of the formulation remains the same.
+While the SVF registration algorithms optimize directly
+over the velocity ﬁeld v, we propose a vector momentum
+SVF (vSVF) formulation which is computed as
+m∗ = argmin
+
+λvrhm0, v0i + Sim[I0 ◦ Φ−1(1), I1], s.t.
+
+Φ−1
+
+t + DΦ−1v = 0, Φ−1(0) = Φ−1
+
+(8)
+(0), v0 = (L†L)−1m0,
+where m0 denotes the vector momentum and λvr > 0 is
+a constant. This formulation can be considered a simpli-
+ﬁed version of the vector momentum-parameterized LD-
+DMM formulation [30]. The beneﬁt of such a formulation
+is that it allows us to explicitly control spatial smoothness
+as the deep network predicts the momentum which gets sub-
+sequently smoothed to obtain the velocity ﬁeld, instead of
+predicting the velocity ﬁeld v directly which would then re-
+quire the network to learn to predict a smooth vector ﬁeld.
+Fig. 3 illustrates the framework of the vector momentum-
+parameterized stationary velocity ﬁeld (vSVF) registration.
+We compute using a low-resolution velocity ﬁeld, which
+greatly reduces memory consumption. The framework con-
+sists of two parts: 1) a momentum generation network tak-
+ing as the input the warped source image, together with the
+target image, outputting the low-resolution momentum; 2)
+the vSVF registration part. Speciﬁcally, the predicted mo-
+mentum and the down-sampled initial map are input into
+the vSVF unit, the output of which is ﬁnally up-sampled
+to obtain the full resolution transformation map. Inside the
+vSVF unit, a velocity ﬁeld is obtained by smoothing the
+momentum and then used to solve the advection equation,
+Φ−1
+(τ )t + DΦ−1
+(τ )v = 0, for unit time (using several discrete
+time points). This then results in the sought-for transfor-
+mation map. The initial map mentioned here can be the
+afﬁne map or the map obtained from a previous vSVF step,
+
+4227
+
+namely for the τ -th step, set Φ−1
+
+(τ )(x, 0) = Φ−1
+
+(τ −1)(x, 1).
+
+Momentum Generation Network: We implement a deep
+neural network to generate the vector momentum. As our
+work does not focus on the network architecture, we simply
+implement a four-level U-Net with residual links [23, 16].
+During training, the gradient is ﬁrst backpropagated through
+the integrator for the advection equation followed by the
+momentum generation network. This can require a lot of
+memory. We use a fourth order Runge-Kutta method for
+time-integration and discretize all spatial derivatives with
+central differences. Therefore, to reduce memory require-
+ments, the network outputs a low-resolution momentum. In
+practice, we remove the last decoder level of the U-Net. In
+this case, the remaining vSVF component also operates on
+the low-resolution map.
+
+Loss: Similar to the loss in the afﬁne network, the loss for
+the vSVF part of the network also consists of three terms:
+a similarity loss Lv-sim, a regularization loss Lv-reg and a
+symmetry loss Lv-sym.
+
+The similarity loss Lv-sim(I0, I1, Φ−1) is the same as
+
+for the afﬁne network. I.e., we also use mk-LNCC.
+
+The regularization loss Lv-reg(m0) penalizes the veloc-
+
+ity ﬁeld. Thus, we have
+
+Lv-reg(m0) = λvrkvk2
+
+(9)
+where v0 = (L†L)−1m0. We implement (L†L)−1 as a
+convolution with a multi-Gaussian kernel [21].
+
+L = λvrhm0, v0i,
+
+The symmetric loss is deﬁned as
+
+Lv-sym(Φ−1, (Φts)−1) = λvskΦ−1◦(Φts)−1−idk2
+2, (10)
+where id denotes the identity map, λvs ≥ 0 refers to the
+symmetry weight factor, (Φts)−1 denotes the map obtained
+from registering the target to the source image in the space
+of the source image and Φ−1 denotes the map obtained from
+registering the source image to the target image in the space
+of the target image. Consequentially, the composition also
+lives in the target image space.
+
+The complete loss Lv(I0, I1, Φ−1, (Φts)−1, m0, mts
+0 )
+
+for vSVF registration with one step is as follows:
+Lv(I0, I1,Φ−1, (Φts)−1, m0, mts
+
+0 ) = ℓv(I0, I1, Φ−1, m0)
+
++ ℓv(I1, I0, (Φts)−1, mts
+0 )
++ Lv-sym(Φ−1, (Φts)−1),
+
+(11)
+
+where:
+ℓv(I0, I1, Φ−1, m0) = Lv-sim(I0, I1, Φ−1) + Lv-reg(m0).
+For the vSVF model with T steps, the complete loss is:
+
+T
+
+Xτ =1
+
+Lv(I0, I1, Φ−1
+
+(τ ), Φts
+
+(τ )
+
+−1
+
+, m0(τ ), mts
+
+0(τ ))
+
+s.t.
+
+(τ )(x, 0) = Φ−1
+Φ−1
+(τ ))−1(x, 0) = (Φts
+(Φts
+
+(τ −1)(x, 1),
+
+(τ −1))−1(x, 1).
+
+(12)
+
+3. Experiments and Results
+
+Dataset: The Osteoarthritis Initiative (OAI) dataset con-
+sists of 176 manually labeled magnetic resonance (MR) im-
+ages from 88 patients (2 longitudinal scans per patient) and
+22,950 unlabeled MR images from 2,444 patients. Labels
+are available for femoral and tibial cartilage. All images
+are of size 384 × 384 × 160, where each voxel is of size
+0.36 × 0.36 × 0.7mm3. We normalize the intensities of
+each image such that the 0.1th percentile and the 99.9th per-
+centile are mapped to 0, 1 and clamp values that are smaller
+to 0 and larger to 1 to avoid outliers. All images are down-
+sampled to size 192 × 192 × 80.
+
+Evaluation: We evaluate on both longitudinal and cross-
+subject registrations. We divide the unlabeled patients into
+a training and a validation group, with a ratio of 7:3. For
+the longitudinal registrations, 4,200 pairs from the training
+group (obtained by swapping the source and the target from
+2,100 pairs of images) are randomly selected for training,
+and 50 pairs selected from the validation group are used for
+validation. All 176 longitudinal pairs with labels are used
+as our test set. For the cross-subject registrations, we ran-
+domly pick 2,800 (from 1,400 pairs) cross-subject training
+pairs and 50 validation pairs; 300 pairs (from 150 pairs) are
+randomly selected as the test set. We use the average Dice
+score [11] over all testing pairs as the evaluation metric.
+
+Training details: The training stage includes two parts:
+
+1) Training multi-step afﬁne net: It is difﬁcult to train the
+multi-step afﬁne network from scratch. Instead, we train a
+single-step network ﬁrst and use its parameters to initialize
+the multi-step network. For longitudinal registration, we
+train with a three-step afﬁne network, but use a seven-step
+network during testing. This results in better testing per-
+formance than a three-step network. Similarly, for cross-
+subject registration we train with a ﬁve-step network and
+test with a seven-step one. The afﬁne symmetry factor λas
+is set to 10.
+
+2) Training momentum generation network: During
+training, the afﬁne part is ﬁxed. For vSVF, we use 10
+time-steps and a multi-Gaussian kernel with standard devia-
+tions {0.05, 0.1, 0.15, 0.2, 0.25} and corresponding weights
+{0.067, 0.133, 0.2, 0.267, 0.333} (spacing is scaled so that
+the image is in [0, 1]3). We train with two steps for both lon-
+gitudinal and cross-subject registrations. The vSVF regular-
+ization factor λvr is set to 10 and the symmetry factor λvs
+is set to 1e-4. For both parts, we use the same training strat-
+egy: 1 pair per batch, 400 batches per epoch, 200 epochs
+per experiment; we set a learning rate of 5e-4 with a decay
+factor of 0.5 after every 60 epochs. We use mk-LNCC as the
+similarity measure with (ω, s) = {(0.3, S/4), (0.7, S/2)},
+where S refers to the smallest image dimension. Besides, in
+our implementation of mk-LNCC, we set the sliding win-
+dow stride to S/4 and kernel dilation to 2.
+
+4228
+
+Additionally,
+
+the afﬁne regularization factor λar is
+
+epoch-dependent during training and deﬁned as:
+
+space gives similar results. Hence, we choose the more nat-
+ural isotropic regularization in physical space.
+
+λar:=
+
+CarKar
+
+Kar + en/Kar
+
+,
+
+(13)
+
+where Car is a constant, Kar controls the decay rate, and
+n is the epoch count. In both longitudinal and cross-subject
+experiments, Kar is set to 4 and Car is set to 10.
+
+Figure 4.
+Illustration of registration results achieved by AVSM,
+each column refers to an example. The ﬁrst ﬁve rows refer to
+source, target, warped image by AVSM, warped image with defor-
+mation grid (visualizing Φ−1), warped image by multi-step afﬁne
+respectively, followed by source label, target label and warped la-
+bel by AVSM separately. There is high similarity between the
+warped and the target labels and the deformations are smooth.
+
+Baseline methods: We implement the corresponding nu-
+merically optimized versions (e.g., directly optimizing the
+momentum) of afﬁne (afﬁne-opt) and vSVF (vSVF-opt)
+registrations. We compare with three widely-used public
+registration methods: SyN [2, 1], Demons [29, 28] and
+NiftyReg [20, 17, 24, 19]. We also compare to the most
+recent VoxelMorph variant [9]. We report the performance
+of these methods after an in-depth search for good param-
+eters. For Demons, SyN and NiftyReg, we use isotropic
+voxel spacing 1 × 1 × 1 mm3 as this gives improved re-
+sults compared to using physical spacing. This implies
+anisotropic regularization in physical space. For our ap-
+proaches, isotropic or anisotropic regularization in physical
+
+Optimization-based multi-scale afﬁne registration: In-
+stead of optimizing for the afﬁne parameters on a single
+image scale, we use a multi-scale strategy. Speciﬁcally,
+we start at a low image-resolution, where afﬁne parameters
+are roughly estimated, and then use them as the initializa-
+tion for the next higher scale. Stochastic gradient descent
+is used with a learning rate of 1e-4. Three image scales
+{0.25, 0.5, 1.0} are used, each with {200, 200, 50} itera-
+tions. We use mk-LNCC as the similarity measure. At each
+scale k, let image size (smallest length among image dimen-
+sions) be Sk, here k ∈ {0.25, 0.5, 1.0}. At scale 1.0, param-
+eters are set to (ω, s) = {(0.3, Sk/4), (0.7, Sk/2)}, i.e., the
+same parameters as for the network version; at scales 0.5
+and 0.25, (ω, s) = {(1.0, Sk/2)}.
+
+Optimization-based multi-scale vSVF registration: We
+take the afﬁne map (resulting from the optimization-based
+multi-scale afﬁne registration) as the initial map and then
+numerically optimize the vSVF model. The same multi-
+scale strategy as for the afﬁne registration is used. The
+momentum is up-sampled between scales. We use L-
+BGFS [15] for optimization.
+In our experiments, we
+use three scales {0.25, 0.5, 1.0} with 60 iterations per
+scale. The same mk-LNCC similarity measure as for the
+optimization-based multi-scale afﬁne registration is used.
+The number of time steps for the integration of the advec-
+tion equation and the settings for the multi-Gaussian kernel
+are the same as for the proposed deep network model.
+
+NiftyReg: We run two registration phases: afﬁne fol-
+lowed by B-spline registration. Three scales are used in
+each phase and the interval of the B-spline control points is
+set to 10 voxels. In addition, we ﬁnd that using LNCC as the
+similarity measure, with a standard deviation of 40 for the
+Gaussian kernel, performs better than the default Normal-
+ized Mutual Information, but introduces folds in the trans-
+formation. In LNCC experiments, we therefore use a log of
+the Jacobi determinant penalty of 0.01 to reduce folds.
+
+Demons: We take the afﬁne map obtained from NiftyReg
+as the initial map and use the Fast Symmetric Forces
+Demons Algorithm [29] via SimpleITK. The Gaussian
+smoothing standard deviation for the displacement ﬁeld is
+set to 1.2. We use MSE as the similarity measure.
+
+SyN: We compare with Symmetric Normalization (SyN),
+a widely used registration method implemented in the
+ANTs software package [1]. We take Mattes as the met-
+ric for afﬁne registration, and take CC with sampling radius
+set to 4 for SyN registration. We use multi-resolution op-
+timization with four scales with {2100, 1200, 1200, 20}
+iterations; the standard deviation for Gaussian smoothing at
+each level is set to {3, 2, 1, 0}. The ﬂow standard deviation
+to smooth the gradient ﬁeld is set to 3.
+
+VoxelMorph: We compare with the most recent Voxel-
+
+4229
+
+Method
+
+Longitudinal
+
+Cross-subject
+
+Dice
+
+Folds
+
+Dice
+
+Folds
+
+Time (s)
+
+afﬁne-NiftyReg
+
+afﬁne-opt
+
+afﬁne-net (7-step)
+
+75.07 (6.21)
+78.61 (4.48)
+77.75 (4.77)
+
+0
+0
+0
+
+30.43 (12.11)
+34.49 (18.07)
+44.58 (7.74)
+
+0
+0
+0
+
+————–
+
+Demons
+
+SyN
+
+NiftyReg-NMI
+NiftyReg-LNCC
+
+vSVF-opt
+
+83.43 (2.64) 10.7 [0.56] 63.47 (9.52)
+83.13 (2.67)
+65.71 (15.01)
+59.65 (7.62)
+83.17 ( 2.76)
+67.92 (5.24) 203.3 [35.19]
+83.35 (2.70)
+82.99 (2.68)
+67.35 (9.73)
+
+19.0 [0.56]
+
+0
+0
+0
+0
+
+0
+0
+
+0
+
+VoxelMorph(w/o aff) 71.25 (9.54) 2.72 [1.57] 46.06 (14.94) 83.0 [18.13]
+39.0 [3.31]
+VoxelMorph(with aff) 82.54 (2.78) 5.85 [0.59] 66.08 (5.13)
+67.59 (4.47)
+5.5 [0.39]
+68.40 (4.35)
+14.3 [1.07]
+
+AVSM (2-step)
+AVSM (3-step)
+
+82.60 (2.73)
+82.67 (2.74)
+
+3.4 [0.12]
+
+0
+
+45
+8
+
+0.20
+
+114
+1330
+143
+270
+79
+0.12
+0.31
+0.62
+0.83
+
+Table 1. Dice scores (standard deviation) of different registra-
+tion methods for longitudinal and cross-subject registrations on the
+OAI dataset. Afﬁne-opt and vSVF-opt refer to optimization-based
+multi-scale afﬁne and vSVF registrations. AVSM (n-step) refers
+to a seven-step afﬁne network and an n-step vSVF model. Folds
+(|{x : Jφ(x) < 0}|) refers to the average number of folds and cor-
+responding absolute Jacobi determinant value in square brackets;
+Time refers to the average time per image registration.
+
+Morph variant [9], which is also based on deep-learning.
+VoxelMorph assumes that images are pre-aligned. For a
+fair comparison, we therefore used our proposed multi-step
+afﬁne network for initial alignment. Best parameters are
+determined via grid search.
+
+NiftyReg, Demons and SyN are run on a server with i9-
+7900X (10 cores @ 3.30GHz) , while all other methods run
+on a single NVIDIA GTX 1080Ti.
+
+Figure 5. Box-plots of the performance of the different reg-
+istration methods for longitudinal registration (green) and cross-
+subject registration (orange). Both AVSM and NiftyReg (LNCC)
+show high performance and small variance.
+
+Tab.1 compares the performance of our framework with
+its corresponding optimization version and public regis-
+tration tools. Overall, our AVSM framework performs
+best in cross-subject registration and achieves slightly bet-
+ter performance than optimization-based methods, both for
+afﬁne and non-parametric registrations. NiftyReg with
+LNCC shows similar performance. For longitudinal regis-
+tration, AVSM shows good performance, but slightly lower
+
+than the optimization-based methods, including vSVF-opt
+which AVSM is based on. A possible explanation is that
+for longitudinal registrations deformations are subtle and
+source/target image pairs are very similar in appearance.
+Hence, numerical optimization can very accurately align
+such image-pairs at convergence. VoxelMorph runs fastest
+among all the methods. Without initial afﬁne registration,
+it unsurprisingly performs poorly. Once the input pair is
+well pre-aligend, VoxelMorph shows competitive results for
+longitudinal registrations, but is outperformed by our ap-
+proach for the more challenging cross-subject registrations.
+To evaluate the smoothness of the transformation map, we
+compute the determinant of the Jacobian of the estimated
+map, Jφ(x) := |Dφ−1(x)|, and count folds deﬁned by
+|{x : Jφ(x) < 0}| in each image (192 × 192 × 80 voxels in
+total). We also report the absolute value of the determinant
+of the Jacobian in these cases indicating the severity of the
+fold. Even though the regularization is used, numerical op-
+timization (vSVF-opt) always results in diffeomorphisms,
+but very few folds remain in AVSM for cross-subject reg-
+istration. This may be caused by numerical discretization
+artifacts, by very large predicted momenta, or by inaccu-
+racies of the predictions with respect to the numerical opti-
+mization results. Fig. 5 shows the corresponding boxplot re-
+sults. AVSM achieves small variance and high performance
+in both registration tasks and exhibits less registration fail-
+ures (outliers). As AVSM only requires one forward pass
+to complete both the afﬁne and the vSVF registration, it is
+much faster than using iterative numerical optimization.
+
+Tab. 2 shows results for an ablation study on AVSM. For
+the afﬁne part, it is difﬁcult to train the single-step afﬁne
+network without the regularization term. Hence, registra-
+tions fail.
+Introducing multi-step and inverse consistency
+boosts the afﬁne performance. Compared with using NCC
+as similarity measure, our implementation of mk-LNCC im-
+proves results greatly. In the following vSVF part, we ob-
+serve a large difference between methods IV and VI, illus-
+trating that vSVF registration results in large improvements.
+Adding mk-LNCC and multi-step training in methods VII
+and VIII further improves performance. The exception is
+the vSVF symmetry loss which slightly worsens the perfor-
+mance for both longitudinal and cross-subject registration,
+but results in good symmetry measures (see Fig. 6).
+
+We still retain the symmetric loss as it helps the network
+to converge to solutions with smoother maps as shown in
+Fig. 6. Instead of using larger Gaussian kernels, which can
+remove local displacements, penalizing asymmetry helps
+regularize the deformation without smoothing the map too
+much and without sacriﬁcing too much performance. To nu-
+merically evaluate the symmetry, we compute ln( 1
+|V | kΦ−1◦
+(Φts)−1 −idk2
+2) for all registration methods, where V refers
+to the volume size and Φ the map obtained via composition
+of the afﬁne and the deformable transforms. Since differ-
+
+4230
+
+✓
+
+✓
+
+✓
+
+Method Af-Reg Af-Multi Af-Sym Af-MK vSVF vSVF-MK vSVF-Multi
+I
+II
+III
+IV
+V
+VI
+VII
+VIII
+IV
+
+✓
+
+✓
+
+✓
+
+✓
+
+✓
+
+✓
+
+✓
+
+✓
+
+✓
+
+✓
+
+✓
+
+✓
+
+✓
+
+✓
+
+✓
+
+✓
+
+✓
+
+✓
+
+✓
+
+✓
+
+✓
+
+✓
+
+✓
+
+✓
+
+✓
+
+✓
+
+✓
+
+✓
+
+✓
+
+✓
+
+✓
+
+vSVF-Sym Longitudinal
+
+Better? Cross-subject
+
+Better?
+
+-
+
+55.41
+64.78
+68.87
+77.75
+80.71
+81.64
+82.81
+82.67
+
+✓
+
+✓
+
+✓
+
+✓
+
+✓
+
+✓
+
+✓
+
+✗
+
+-
+
+28.68
+36.31
+37.54
+44.58
+59.21
+64.56
+69.08
+68.40
+
+✓
+
+✓
+
+✓
+
+✓
+
+✓
+
+✓
+
+✓
+
+✗
+
+✓
+
+Table 2. Ablation study of AVSM using different combinations of methods. Af- and vSVF- separately refer to the afﬁne and to the vSVF
+related methods; Reg refers to adding epoch-dependent regularization; Multi refers to multi-step training and testing; Sym refers to adding
+the symmetric loss; MK refers to using mk-LNCC as similarity measure (default NCC). Except for the last approach which uses vSVF-Sym
+(last row) and encourages symmetric vSVF solutions, all other approaches result in performance improvements.
+
+Illustration of symmetric loss for AVSM. The left col-
+Figure 6.
+umn shows the source and target images. The right column shows
+the warped image from a network trained with and without sym-
+metric loss. The deformation with symmetric loss is smoother.
+
+ent methods treat boundaries differently, we only evaluate
+this measure in the interior of the image volume (10 voxels
+away from the boundary). Fig. 7 shows the results. AVSM
+obtains low values for both registration tasks, conﬁrming
+its good symmetry properties. Both Demons and SyN also
+encourage symmetry, but only AVSM shows a nice compro-
+mise between accuracy and symmetry.
+
+Fig. 8 shows the average Dice sores over the number of
+test iteration steps of vSVF. The model is trained using a
+two-step vSVF. It can be observed that iterating the model
+for more than two steps can increase performance as these
+iterations result in registration reﬁnements. However, the
+average number of folds also increases, mostly at boundary
+regions and in regions of anatomical inconsistencies. Ex-
+amples are shown in the supplementary material.
+
+4. Conclusions and Future Work
+
+We introduced an end-to-end 3D image registration ap-
+proach (AVSM) consisting of a multi-step afﬁne network
+and a deformable registration network using a momentum-
+based SVF algorithm. AVSM outputs a transformation map
+which includes an afﬁne pre-registration and a vSVF non-
+parametric deformation in a single forward pass. Our re-
+sults on cross-subject and longitudinal registration of knee
+MR images show that our method achieves comparable and
+sometimes better performance to popular registration tools
+
+Figure 7. Box-plots of the symmetry evaluation (the lower the
+better) of different registration methods for longitudinal registra-
+tion (green) and cross-subject registration (orange). AVSM (tested
+with two-step vSVF) shows good results.
+
+Figure 8. Multi-step vSVF registration results for two-step vSVF
+training. Performance increases with steps (left), but the number
+of folds also increases (right).
+
+with a dramatically reduced computation time and with ex-
+cellent deformation regularity and symmetry. Future work
+will focus on also learning regularizers and evaluations on
+other registration tasks, e.g. in the brain and the lung.
+Acknowledgements: Research reported in this publication
+was supported by the National Institutes of Health (NIH)
+and the National Science Foundation (NSF) under award
+numbers NSF EECS1711776 and NIH 1R01AR072013.
+The content is solely the responsibility of the authors and
+does not necessarily represent the ofﬁcial views of the NIH
+or the NSF.
+
+4231
+
+References
+
+[1] Brian B Avants, Charles L Epstein, Murray Grossman, and
+James C Gee. Symmetric diffeomorphic image registration
+with cross-correlation: evaluating automated labeling of el-
+derly and neurodegenerative brain. Medical image analysis,
+12(1):26–41, 2008.
+
+[2] Brian B Avants, Nick Tustison, and Gang Song. Advanced
+
+normalization tools (ANTS). Insight j, 2:1–35, 2009.
+
+[3] Ruzena Bajcsy and Stane Kovaˇciˇc. Multiresolution elastic
+
+matching. CVGIP, 46(1):1–21, 1989.
+
+[4] Guha Balakrishnan, Amy Zhao, Mert R Sabuncu, John Gut-
+tag, and Adrian V Dalca. An unsupervised learning model
+for deformable medical image registration. In CVPR, pages
+9252–9260, 2018.
+
+[5] M Faisal Beg, Michael I Miller, Alain Trouv´e, and Laurent
+Younes. Computing large deformation metric mappings via
+geodesic ﬂows of diffeomorphisms.
+IJCV, 61(2):139–157,
+2005.
+
+[6] Xiaohuan Cao, Jianhua Yang, Jun Zhang, Qian Wang, Pew-
+Thian Yap, and Dinggang Shen. Deformable image regis-
+tration using a cue-aware deep regression network.
+IEEE
+Transactions on Biomedical Engineering, 65(9):1900–1911,
+2018.
+
+[7] Evelyn Chee and Joe Wu. Airnet: Self-supervised afﬁne reg-
+istration for 3d medical images using neural networks. arXiv
+preprint arXiv:1810.02583, 2018.
+
+[8] Zhuoyuan Chen, Hailin Jin, Zhe Lin, Scott Cohen, and Ying
+Wu. Large displacement optical ﬂow from nearest neighbor
+ﬁelds. In CVPR, pages 2443–2450, 2013.
+
+[9] Adrian V Dalca, Guha Balakrishnan, John Guttag, and
+fast
+arXiv preprint
+
+Mert R Sabuncu.
+probabilistic diffeomorphic registration.
+arXiv:1805.04605, 2018.
+
+Unsupervised learning for
+
+[10] Bob D de Vos, Floris F Berendsen, Max A Viergever, Mar-
+ius Staring, and Ivana Iˇsgum. End-to-end unsupervised de-
+formable image registration with a convolutional neural net-
+work. In MLCDS, pages 204–212. Springer, 2017.
+
+[11] Lee R Dice. Measures of the amount of ecologic association
+
+between species. Ecology, 26(3):297–302, 1945.
+
+[12] Gabriel L Hart, Christopher Zach, and Marc Niethammer.
+An optimal control approach for deformable registration. In
+CVPR, pages 9–16. IEEE, 2009.
+
+[13] Max Jaderberg, Karen Simonyan, Andrew Zisserman, et al.
+In NIPS, pages 2017–2025,
+
+Spatial transformer networks.
+2015.
+
+[14] Hongming Li and Yong Fan. Non-rigid image registra-
+tion using fully convolutional networks with deep self-
+supervision. arXiv preprint arXiv:1709.00799, 2017.
+
+[15] Dong C Liu and Jorge Nocedal. On the limited memory
+BFGS method for large scale optimization. Mathematical
+programming, 45(1-3):503–528, 1989.
+
+[16] Fausto Milletari, Nassir Navab, and Seyed-Ahmad Ahmadi.
+V-net: Fully convolutional neural networks for volumetric
+medical image segmentation.
+In 3D Vision (3DV), 2016
+Fourth International Conference on, pages 565–571. IEEE,
+2016.
+
+[17] Marc Modat, David M Cash, Pankaj Daga, Gavin P Winston,
+John S Duncan, and S´ebastien Ourselin. Global image regis-
+tration using a symmetric block-matching approach. Journal
+of Medical Imaging, 1(2):024003, 2014.
+
+[18] Marc Modat, Pankaj Daga, M Jorge Cardoso, Sebastien
+Ourselin, Gerard R Ridgway, and John Ashburner. Paramet-
+ric non-rigid registration using a stationary velocity ﬁeld. In
+2012 IEEE Workshop on Mathematical Methods in Biomed-
+ical Image Analysis (MMBIA), pages 145–150. IEEE, 2012.
+[19] Marc Modat, Gerard R Ridgway, Zeike A Taylor, Manja
+Lehmann, Josephine Barnes, David J Hawkes, Nick C Fox,
+and S´ebastien Ourselin. Fast free-form deformation using
+graphics processing units. Computer methods and programs
+in biomedicine, 98(3):278–284, 2010.
+
+[20] S´ebastien Ourselin, Alexis Roche, G´erard Subsol, Xavier
+Pennec, and Nicholas Ayache. Reconstructing a 3D structure
+from serial histological sections. Image and vision comput-
+ing, 19(1-2):25–31, 2001.
+
+[21] Laurent Risser, Franc¸ois-Xavier Vialard, Robin Wolz, Dar-
+ryl D Holm, and Daniel Rueckert. Simultaneous ﬁne and
+coarse diffeomorphic registration: application to atrophy
+measurement in Alzheimers disease. In MICCAI, pages 610–
+617. Springer, 2010.
+
+[22] Torsten Rohlﬁng, Calvin R Maurer, David A Bluemke, and
+Michael A Jacobs. Volume-preserving nonrigid registration
+of MR breast images using free-form deformation with an
+incompressibility constraint. TMI, 22(6):730–741, 2003.
+
+[23] Olaf Ronneberger, Philipp Fischer, and Thomas Brox. U-net:
+Convolutional networks for biomedical image segmentation.
+In MICCAI, pages 234–241. Springer, 2015.
+
+[24] Daniel Rueckert, Luke I Sonoda, Carmel Hayes, Derek LG
+Hill, Martin O Leach, and David J Hawkes. Nonrigid reg-
+istration using free-form deformations: application to breast
+MR images. TMI, 18(8):712–721, 1999.
+
+[25] Dinggang Shen and Christos Davatzikos. HAMMER: hierar-
+chical attribute matching mechanism for elastic registration.
+TMI, 21(11):1421–1439, 2002.
+
+[26] Marius Staring, Stefan Klein, and Josien PW Pluim. A rigid-
+ity penalty term for nonrigid registration. Medical physics,
+34(11):4098–4108, 2007.
+
+[27] Christine Tanner,
+
+Julia A Schnabel, Daniel Chung,
+Matthew J Clarkson, Daniel Rueckert, Derek LG Hill, and
+David J Hawkes. Volume and shape preservation of enhanc-
+ing lesions when applying non-rigid registration to a time
+series of contrast enhancing MR breast images. In MICCAI,
+pages 327–337. Springer, 2000.
+
+[28] Tom Vercauteren, Xavier Pennec, Aymeric Perchant, and
+Nicholas Ayache. Symmetric log-domain diffeomorphic reg-
+istration: A demons-based approach.
+In MICCAI, pages
+754–761. Springer, 2008.
+
+[29] Tom Vercauteren, Xavier Pennec, Aymeric Perchant, and
+Nicholas Ayache. Diffeomorphic demons: Efﬁcient non-
+parametric image registration. NeuroImage, 45(1):S61–S72,
+2009.
+
+[30] Franc¸ois-Xavier Vialard, Laurent Risser, Daniel Rueckert,
+and Colin J Cotter. Diffeomorphic 3d image registration
+via geodesic shooting using an efﬁcient adjoint calculation.
+
+4232
+
+International Journal of Computer Vision, 97(2):229–241,
+2012.
+
+[31] Jonas Wulff and Michael J Black. Efﬁcient sparse-to-dense
+optical ﬂow estimation using a learned basis and layers. In
+CVPR, pages 120–130, 2015.
+
+[32] Xiao Yang, Roland Kwitt, and Marc Niethammer. Fast pre-
+dictive image registration. In DLMIA, pages 48–57. Springer,
+2016.
+
+[33] Xiao Yang, Roland Kwitt, Martin Styner, and Marc Nietham-
+mer. Quicksilver: Fast predictive image registration–a deep
+learning approach. NeuroImage, 158:378–396, 2017.
+
+4233
+
+

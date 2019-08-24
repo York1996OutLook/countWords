@@ -1,0 +1,1287 @@
+PointFlowNet: Learning Representations for
+Rigid Motion Estimation from Point Clouds
+
+Aseem Behl
+
+Despoina Paschalidou
+
+Simon Donn´e
+
+Andreas Geiger
+
+Autonomous Vision Group, MPI for Intelligent Systems and University of T¨ubingen
+
+{aseem.behl,despoina.paschalidou,simon.donne,andreas.geiger}@tue.mpg.de
+
+Abstract
+
+Despite signiﬁcant progress in image-based 3D scene
+ﬂow estimation, the performance of such approaches has
+not yet reached the ﬁdelity required by many applications.
+Simultaneously, these applications are often not restricted to
+image-based estimation: laser scanners provide a popular
+alternative to traditional cameras, for example in the context
+of self-driving cars, as they directly yield a 3D point cloud.
+In this paper, we propose to estimate 3D motion from such
+unstructured point clouds using a deep neural network. In
+a single forward pass, our model jointly predicts 3D scene
+ﬂow as well as the 3D bounding box and rigid body motion
+of objects in the scene. While the prospect of estimating 3D
+scene ﬂow from unstructured point clouds is promising, it is
+also a challenging task. We show that the traditional global
+representation of rigid body motion prohibits inference by
+CNNs, and propose a translation equivariant representation
+to circumvent this problem. For training our deep network,
+a large dataset is required. Because of this, we augment real
+scans from KITTI with virtual objects, realistically modeling
+occlusions and simulating sensor noise. A thorough compar-
+ison with classic and learning-based techniques highlights
+the robustness of the proposed approach.
+
+1. Introduction
+
+For intelligent systems such as self-driving cars, the pre-
+cise understanding of their surroundings is key. Notably, in
+order to make predictions and decisions about the future,
+tasks like navigation and planning require knowledge about
+the 3D geometry of the environment as well as about the 3D
+motion of other agents in the scene.
+
+3D scene ﬂow is the most generic representation of this
+3D motion; it associates a velocity vector with 3D motion
+to each measured point. Traditionally, 3D scene ﬂow is
+estimated based on two consecutive image pairs of a cali-
+brated stereo rig [17, 39, 40]. While the accuracy of scene
+ﬂow methods has greatly improved over the last decade [24],
+image-based scene ﬂow methods have rarely made it into
+robotics applications. The reasons for this are two-fold. First
+
+of all, most leading techniques take several minutes or hours
+to predict 3D scene ﬂow. Secondly, stereo-based scene ﬂow
+methods suffer from a fundamental ﬂaw, the “curse of two-
+view geometry”: it can be shown that the depth error grows
+quadratically with the distance to the observer [20]. This
+causes problems for the baselines and object depths often
+found in self-driving cars, as illustrated in Fig. 1 (top).
+
+Consequently, most modern self-driving car platforms
+rely on LIDAR technology for 3D geometry perception. In
+contrast to cameras, laser scanners provide a 360 degree
+ﬁeld of view with just one sensor, are generally unaffected
+by lighting conditions, and do not suffer from the quadratic
+error behavior of stereo cameras. However, while LIDAR
+provides accurate 3D point cloud measurements, estimat-
+ing the motion between two such scans is a non-trivial task.
+Because of the sparse and non-uniform nature of the point
+clouds, as well as the missing appearance information, the
+data association problem is complicated. Moreover, charac-
+teristic patterns produced by the scanner, such as the circular
+rings in Fig. 1 (bottom), move with the observer and can
+easily mislead local correspondence estimation algorithms.
+To address these challenges, we propose PointFlowNet,
+a generic model for learning 3D scene ﬂow from pairs of
+unstructured 3D point clouds. Our main contributions are:
+
+• We present an end-to-end trainable model for joint 3D
+scene ﬂow and rigid motion prediction and 3D object
+detection from unstructured LIDAR data, as captured
+from a (self-driving) car.
+
+• We show that a global representation is not suitable for
+rigid motion prediction, and propose a local translation-
+equivariant representation to mitigate this problem.
+
+• We augment the KITTI dataset with virtual cars, taking
+into account occlusions and simulating sensor noise, to
+provide more (realistic) training data.
+
+• We demonstrate that our approach compares favorably
+
+to the state-of-the-art.
+
+Our code and dataset are available at the project webpage1.
+
+1https://github.com/aseembehl/pointflownet
+
+7962
+
+]
+3
+[
+F
+S
+I
+
+t
+e
+N
+w
+o
+l
+F
+
+t
+n
+i
+o
+P
+
+Figure 1: Motivation. To motivate the use of LIDAR sensors in the context of autonomous driving, we provide a qualitative
+comparison of the state-of-the-art image-based scene ﬂow method ISF [3] (top) to our LIDAR-based PointFlowNet (bottom)
+using a scene from the KITTI 2015 dataset [24]. The left column shows the output of the two methods. The right column shows
+a zoomed-in version of the inlet. While the image-based result suffers from the “curse of two-view geometry” (with noisy
+geometry, and non-uniform background movement), our LIDAR-based approach is also accurate in distant regions. Moreover,
+ISF relies on instance segmentation in the image space for detecting objects: depth estimation errors at the boundaries lead to
+objects being split into two 3D clusters (e.g., the red car). For clarity, we visualize only a subset of the points.
+
+2. Related Work
+
+In the following discussion, we ﬁrst group related meth-
+ods based on their expected input; we ﬁnish this section with
+a discussion of learning-based solutions.
+
+Scene Flow from Image Sequences: The most common
+approach to 3D scene ﬂow estimation is to recover corre-
+spondences between two calibrated stereo image pairs. Early
+approaches solve the problem using coarse-to-ﬁne varia-
+tional optimization [2, 17, 37, 39–41, 44]. As coarse-to-ﬁne
+optimization often performs poorly in the presence of large
+displacements, slanted-plane models which decompose the
+scene into a collection of rigidly moving 3D patches have
+been proposed [22, 24, 25, 42]. The beneﬁt of incorporating
+semantics has been demonstrated in [3]. While the state-of-
+the-art in image-based scene ﬂow estimation has advanced
+signiﬁcantly, its accuracy is inherently limited by the geomet-
+ric properties of two-view geometry as previously mentioned
+and illustrated in Figure 1.
+
+Scene Flow from RGB-D Sequences: When per-pixel
+depth information is available, two consecutive RGB-D
+frames are sufﬁcient for estimating 3D scene ﬂow. Initially,
+
+the image-based variational scene ﬂow approach was ex-
+tended to RGB-D inputs [15, 30, 45]. Franke et al. [11] in-
+stead proposed to track KLT feature correspondences using
+a set of Kalman ﬁlters. Exploiting PatchMatch optimiza-
+tion on spherical 3D patches, Hornacek et al. [16] recover
+a dense ﬁeld of 3D rigid body motions. However, while
+structured light scanning techniques (e.g., Kinect) are able to
+capture indoor environments, dense RGB-D sequences are
+hard to acquire in outdoor scenarios like ours. Furthermore,
+structured light sensors suffer from the same depth error
+characteristics as stereo techniques.
+
+Scene Flow from 3D Point Clouds:
+In the robotics com-
+munity, motion estimation from 3D point clouds has so far
+been addressed primarily with classical techniques. Sev-
+eral works [6, 34, 36] extend occupancy maps to dynamic
+scenes by representing moving objects via particles which
+are updated using particle ﬁlters [6, 34] or EM [36]. Others
+tackle the problem as 3D detection and tracking using mean
+shift [1], RANSAC [7], ICP [26], CRFs [38] or Bayesian
+networks [14]. In contrast, Dewan et al. [8] propose a 3D
+scene ﬂow approach where local SHOT descriptors [35] are
+associated via a CRF that incorporates local smoothness and
+
+7963
+
+rigidity assumptions. While impressive results have been
+achieved, all the aforementioned approaches require signiﬁ-
+cant engineering and manual model speciﬁcation. In addi-
+tion, local shape representations such as SHOT [35] often
+fail in the presence of noisy or ambiguous inputs. In contrast,
+we address the scene ﬂow problem using a generic end-to-
+end trainable model which is able to learn local and global
+statistical relationships directly from data. Accordingly, our
+experiments show that our model compares favorably to the
+aforementioned classical approaches.
+
+Learning-based Solutions: While several learning-based
+approaches for stereo [19, 21, 46] and optical ﬂow [9, 18, 33]
+have been proposed in literature, there is little prior work
+on learning scene ﬂow estimation. A notable exception
+is SceneFlowNet [23], which concatenates features from
+FlowNet [9] and DispNet [23] for image-based scene ﬂow
+estimation. In contrast, this paper proposes a novel end-
+to-end trainable approach for scene ﬂow estimation from
+unstructured 3D point clouds. More recently, Wang et al.
+[43] proposed a novel continuous convolution operation and
+applied it to 3D segmentation and scene ﬂow. However, they
+do not consider rigid motion estimation which is the main
+focus of this work.
+
+3. Method
+
+We start by formally deﬁning our problem. Let Pt ∈
+RN ×3 and Pt+1 ∈ RM ×3 denote the input 3D point clouds
+at frames t and t + 1, respectively. Our goal is to estimate
+
+• the 3D scene ﬂow vi ∈ R3 and the 3D rigid motion
+Ri ∈ R3×3, ti ∈ R3 at each of the N points in the
+reference point cloud at frame t, and
+
+• the location, orientation, size and rigid motion of every
+moving object in the scene (in our experiments, we
+focus solely on cars).
+
+The overall network architecture of our approach is illus-
+trated in Figure 2. The network comprises ﬁve main com-
+ponents: (1) feature encoding layers, (2) context encoding
+layers (3) scene ﬂow estimation, ego-motion estimation and
+3D object detection layers, (4) rigid motion estimation layers
+and (5) object motion decoder. In the following, we provide
+a detailed description for each of these components as well
+as the loss functions.
+
+3.1. Feature Encoder
+
+The feature encoding layers take a raw point cloud as
+input, partition the space into voxels, and describe each voxel
+with a feature vector. The simplest form of aggregation is
+binarization, where any voxel containing at least one point
+is set to 1 and all others are zero. However, better results
+can be achieved by aggregating high-order statistics over the
+
+voxel [5,27–29,32,48]. In this paper, we leverage the feature
+encoding recently proposed by Zhou et al. [48], which has
+demonstrated state-of-the-art results for 3D object detection
+from point clouds.
+
+We brieﬂy summarize this encoding, but refer the reader
+to [48] for more details. We subdivide the 3D space of each
+input point cloud into equally spaced voxels and group points
+according to the voxel they reside in. To reduce bias with
+respect to LIDAR point density, a ﬁxed number of T points
+is randomly sampled for all voxels containing more than T
+points. Each voxel is processed with a stack of Voxel Feature
+Encoding (VFE) layers to capture local and global geometric
+properties of its contained points. As more than 90% of the
+voxels in LIDAR scans tend to be empty, we only process
+non-empty voxels and store the results in a sparse 4D tensor.
+We remark that alternative representations, e.g., those
+that directly encode the raw point cloud [13, 43], could be a
+viable alternative to voxel representations. However, as the
+representation is not the main focus of this paper, we will
+leave such an investigation to future work.
+
+3.2. Context Encoder
+
+As objects in a street scene are restricted to the ground
+plane, we only estimate objects and motions on this plane:
+we assume that 3D objects cannot be located on top of each
+other and that 3D scene points directly above each other
+undergo the same 3D motion. This is a valid assumption
+for our autonomous driving scenario, and greatly improves
+memory efﬁciency. Following [48], the ﬁrst part of the
+context encoder vertically downsamples the voxel feature
+map by using three 3D convolutions with vertical stride 2.
+The resulting 3D feature map is reshaped by stacking the
+remaining height slices as feature maps to yield a 2D feature
+map. The resulting 2D feature map is provided to three
+blocks of 2D convolutional layers. The ﬁrst layer of each
+block downsamples the feature map via a convolution with
+stride 2, followed by a series of convolution layers with
+stride 1.
+
+3.3. 3D Detection, Ego motion and 3D Scene Flow
+
+Next, the network splits up in three branches for respec-
+tively ego-motion estimation, 3D object detection and 3D
+scene ﬂow estimation. As there is only one observer, the
+ego-motion branch further downsamples the feature map by
+interleaving convolutional layers with strided convolutional
+layers and ﬁnally using a fully connected layer to regress a
+3D ego-motion (movement in the ground-plane and rotation
+around the vertical). For the other two tasks, we upsample
+the output of the various blocks using up-convolutions: to
+half the original resolution for 3D object detection, and to the
+full resolution for 3D scene ﬂow estimation. The resulting
+features are stacked and mapped to the training targets with
+one 2D convolutional layer each. We regress a 3D vector per
+
+7964
+
+Figure 2: Network Architecture. The feature encoder takes a raw LIDAR point cloud as input, groups the points into
+W × H × 10 voxels, and outputs 128D feature maps (for clarity, the size of the feature maps is not shown in the ﬁgure)
+which are concatenated and passed to the context encoder. The context encoder learns a global representation by interleaving
+convolution with strided convolution layers and “ﬂattening” the third dimension (height above ground), i.e., we assume that
+3D objects cannot be located on top of each other and that 3D scene points that project to the same location in the ground
+plane undergo the same 3D motion. Feature maps at different resolutions are upsampled, stacked and fed into the decoding
+branches. 3D scene ﬂow is computed for every input voxel in the scene ﬂow decoder and the result is passed to the rigid
+motion decoder, which infers a rigid body transformation for every point. In parallel, the ego-motion regressor, further
+downsamples the feature map by interleaving convolutional layers with strided convolutional layers and a fully connected
+layer at the end to regress rigid motion for the ego vehicle. In addition, the object decoder predicts the location and size (i.e.,
+3D bounding box) of objects in the scene. Finally, the object motion decoder takes the point-wise rigid body motions as
+input and predicts the object rigid motions by pooling the rigid motion ﬁeld over the detected 3D objects.
+
+voxel for the scene ﬂow, and follow [48] for the object detec-
+tions: regressing likelihoods for a set of proposal bounding
+boxes and regressing the residuals (translation, rotation and
+size) between the positive proposal boxes and correspond-
+ing ground truth boxes. A proposal bounding box is called
+positive if it has the highest Intersection over Union (IoU, in
+the ground plane) with a ground truth detection, or if its IoU
+with any ground truth box is larger than 0.6, as in [48].
+
+3.4. Rigid Motion Decoder
+
+We now wish to infer per-pixel and per-object rigid body
+motions from the previously estimated 3D scene ﬂow. For a
+single point in isolation, there are inﬁnitely many rigid body
+motions that explain a given 3D scene ﬂow: this ambiguity
+can be resolved by considering the local neighborhood.
+
+It is unfortunately impossible to use a convolutional neu-
+ral network to regress rigid body motions that are represented
+in global world coordinates, as the conversion between scene
+ﬂow and global rigid body motion depends on the location in
+the scene: while convolutional layers are translation equiv-
+ariant, the mapping to be learned is not. Identical regions of
+ﬂow lead to different global rigid body motions, depending
+on the location in the volume, and a fully convolutional net-
+
+work cannot model this. In the following, we ﬁrst prove that
+the rigid motion in the world coordinate system is not trans-
+lation equivariant. Subsequently, we introduce our proposed
+rigid motion representation in local coordinates and show it
+to be translation equivariant and therefore amenable to fully
+convolutional inference.
+
+Let us assume a point p in world coordinate system W
+and let A denote a local coordinate system with origin oA as
+illustrated in Fig. 3a. A scene ﬂow vector v is explained by
+rigid body motion (RA, tA), represented in local coordinate
+system A with origin oA, if and only if:
+
+v = [RA (p − oA) + tA)] − (p − oA)
+
+(1)
+
+Now assume a second world location q, also with scene
+ﬂow v as in Fig. 3a. Let B denote a second local coordinate
+system with origin oB such that p and q have the same
+local coordinates in their respective coordinate system, i.e.,
+p − oA = q − oB. We now prove the following two claims:
+
+1. There exists no rigid body motion RW , tW represented
+in world coordinate system W that explains the scene
+ﬂow v for both p and q, unless RW = I.
+
+2. Any rigid body motion (RA, tA) explaining scene ﬂow
+
+v for p in system A also does so for q in system B.
+
+7965
+
+(a) Local (A,B) and World Coordinate System (W)
+
+(b) Quantitative Comparison
+
+Figure 3: Rigid Motion Estimation. In (a), indices A and B denote the coordinate system of points p and q at origin oA and
+oB, respectively. The same scene ﬂow v can locally be explained with the same rigid body motion (RL, tL), but requires
+different translations tp
+W in the global coordinate system. A simple example (b) provides empirical evidence that
+translation cannot be learned in global coordinates with a CNN. Using global coordinates, the translation error increases
+signiﬁcantly with the magnitude of rotation (green). There is no such increase in error when using local coordinates (orange).
+
+W 6= tq
+
+Towards this goal, we introduce the notation (Rp
+W ) to
+indicate rigid motion in world coordinates W induced by vp.
+
+W , tp
+
+Claim 1
+
+∀p, q ∈ R3, p − oA = q − oB, oA 6= oB :
+
+W 6= Rq
+vp = vq =⇒ Rp
+tp
+W 6= tq
+W = Rq
+Rp
+
+W or
+W = I
+
+W or
+
+(2)
+
+Proof of Claim 1 From vp = vq we get
+
+W − p = Rq
+W = Rq
+
+Rp
+
+W p + tp
+
+W p + tp
+
+Rp
+W − Rq
+
+(Rp
+
+W − q
+
+W q + tq
+W (p − ∆o) + tq
+W ) ∆o + (tq
+
+W + ∆o
+W − tp
+W )
+
+W ) p = (I − Rq
+
+W = tq
+
+W = Rq
+where ∆o = oA − oB. Now, we assume that Rp
+W
+and that tp
+W (in all other cases the claim is already
+fulﬁlled). In this case, we have ∆o = Rp
+W ∆o. However,
+any rotation matrix representing a non-zero rotation has no
+real eigenvectors. Hence, as oA 6= oB, this equality can
+only be fulﬁlled if Rp
+(cid:4)
+
+W is the identity matrix.
+
+Claim 2
+
+∀p, q ∈ R3, p − oA = q − oB, oA 6= oB :
+
+v = R (p − oA) + t + (p − oA)
+=⇒ v = R (q − oB) + t + (q − oB)
+
+(3)
+
+We provide a simple synthetic experiment in Figure 3
+to empirically conﬁrm this analysis. Towards this goal, we
+warp a grid of 10 × 10 points by random rigid motions, and
+then try to infer these rigid motions from the resulting scene
+ﬂow: as expected, the estimation is only successful using
+local coordinates. Note that a change of reference system
+only affects the translation component while the rotation
+component remains unaffected. Motivated by the preceding
+analysis, we task our CNN to predict rigid motion in local
+coordinates, followed by a deterministic layer which trans-
+forms local coordinates into global coordinates as follows:
+
+RL = RW
+RW = RL
+
+tL = (RW − I)oL + tW
+tW = (I − RW )oL + tL
+
+(4)
+
+In our case, the origin of the world coordinate system W
+coincides with the LIDAR scanner and the origin of the local
+coordinate systems is located at the center of each voxel.
+
+3.5. Object Motion Decoder
+
+Finally, we combine the results of 3D object detection and
+rigid motion estimation into a single rigid motion for each
+detected object. We ﬁrst apply non-maximum-suppression
+(NMS) using detection threshold τ , yielding a set of 3D
+bounding boxes. To estimate the rigid body motion of each
+detection, we pool the predicted rigid body motions over the
+corresponding voxels (i.e., the voxels in the bounding box
+of the detection) by computing the median translation and
+rotation. Note that this is only possible as the rigid body
+motions have been converted back into world coordinates.
+
+Proof of Claim 2 Trivially from p − oA = q − oB.
+
+(cid:4)
+
+3.6. Loss Functions
+
+The ﬁrst proof shows the non-stationarity of rigid body
+motions represented in global coordinates, while the sec-
+ond proof shows that the rigid motion represented in local
+coordinates is stationary and can therefore be learned by a
+translation equivariant convolutional neural network.
+
+This section describes the loss functions used by our
+approach. While it seems desirable to deﬁne a rigid motion
+loss directly at object level, this is complicated by the need
+for differentiation through the non-maximum-suppression
+step and the difﬁculty associating to ground truth objects.
+
+7966
+
+vvpqoAoBFurthermore, balancing the inﬂuence of an object loss across
+voxels is much more complex than applying all loss functions
+directly at the voxel level. We therefore use auxiliary voxel-
+level loss functions. Our loss comprises four parts:
+
+L = αLf low + βLrigmo + γLego + Ldet
+
+(5)
+
+Here, α, β, γ are positive constants for balancing the rela-
+tive importance of the task speciﬁc loss functions. We now
+describe the task-speciﬁc loss functions in more detail.
+
+Scene Flow Loss: The scene ﬂow loss is deﬁned as the
+average ℓ1 distance between the predicted scene ﬂow and
+the true scene ﬂow at every voxel
+
+Figure 4: Augmentation. Simulating LIDAR measure-
+ments based on 3D meshes would result in measurements
+at transparant surfaces such as windows (left), wheres a
+real LIDAR scanner measures interior points instead. Our
+simulation replicates the behavior of LIDAR scanners by tak-
+ing into account model transparency and learning the noise
+model from real KITTI scans (right).
+
+Lf low =
+
+1
+K X
+
+j
+
+j (cid:13)(cid:13)1
+(cid:13)(cid:13)vj − v∗
+
+(6)
+
+j ∈ R3 denote the regression estimate
+where vj ∈ R3 and v∗
+and ground truth scene ﬂow at voxel j, and K is the number
+of non-empty voxels.
+
+Rigid Motion Loss: The rigid motion loss is deﬁned as the
+average ℓ1 error between the predicted translation tj ∈ R2
+j ∈ R2 in the local coordinate system
+and its ground truth t∗
+and the average ℓ1 error between the predicted rotation θj
+around the Z-axis and its ground truth θ∗
+j at every voxel j.
+
+Lrigmo =
+
+1
+K X
+
+j
+
+(cid:13)(cid:13)tj − t∗
+
+j (cid:13)(cid:13)1
+j(cid:13)(cid:13)1 + λ (cid:13)(cid:13)θj − θ∗
+
+(7)
+
+where λ is a positive constant to balance the relative impor-
+tance of the two terms. The conversion from world coordi-
+nates to local coordinates is given by (see also Eq. 4)
+
+RL = RW (θj)
+
+tL = (RW (θj) − I) pj + tW
+
+(8)
+
+where pj ∈ R2 speciﬁes the position of voxel j in the XY-
+plane in world coordinates and RW (θj) is the rotation matrix
+corresponding to rotation θj around the Z-axis.
+
+Ego-motion Loss: Similarly, the ego-motion loss is de-
+ﬁned as the ℓ1 distance between the predicted background
+translation tBG ∈ R2 and its ground truth t∗
+BG ∈ R2 and
+the predicted rotation θBG and its ground truth θ∗
+
+BG:
+
+Lego = ktBG − t∗
+
+BGk1 + λkθBG − θ∗
+
+BGk1
+
+(9)
+
+Detection Loss: Following [48], we deﬁne the detection
+loss as follows:
+
+Ldet =
+
+1
+
+Mpos
+
+X
+
+Lcls(ppos
+
+k , 1) + Lreg(rk, r∗
+k)
+
+k
+
++
+
+1
+
+Mneg
+
+X
+
+Lcls(pneg
+
+l
+
+, 0)
+
+l
+
+(10)
+
+l
+
+k
+
+k
+
+and pneg
+
+where ppos
+represent the softmax output for posi-
+and negative proposal boxes aneg
+tive proposal boxes apos
+,
+k ∈ R7 denote the regression
+respectively. rk ∈ R7 and r∗
+estimates and ground truth residual vectors (translation, rota-
+tion and size) for the positive proposal box k, respectively.
+Mpos and Mneg represent the number of positive and nega-
+tive proposal boxes. Lcls denotes the binary cross entropy
+loss, while Lreg represents the smooth ℓ1 distance function.
+We refer to [48] for further details.
+
+l
+
+4. Experimental Evaluation
+
+We now evaluate the performance of our method on the
+KITTI object detection dataset [12] as well as an extended
+version, which we have augmented by simulating virtual
+objects in each scene.
+
+4.1. Datasets
+
+KITTI: For evaluating our approach, we use 61 sequences
+of the training set in the KITTI object detection dataset [12],
+containing a total of 20k frames. As there is no pointcloud-
+based scene ﬂow benchmark in KITTI, we perform our ex-
+periments on the original training set. Towards this goal, we
+split the original training set into 70% train, 10% validation,
+20% test sequences, making sure that frames from the same
+sequence are not used in different splits.
+
+Augmented KITTI: However, the ofﬁcial KITTI object
+detection datasets lacks cars with a diverse range of motions.
+To generate more salient training example, we generate a
+realistic mixed reality LiDAR dataset exploiting a set of
+high quality 3D CAD models of cars [10] by taking the
+characteristics of real LIDAR scans into account.
+
+We discuss our workﬂow here. We start by ﬁtting the
+ground plane using RANSAC 3D plane ﬁtting; this allows us
+to detect obstacles and hence the drivable region. In a second
+step, we randomly place virtual cars in the drivable region,
+and simulate a new LIDAR scan that includes these virtual
+cars. Our simulator uses a noise model learned from the real
+KITTI scanner by ﬁtting a Gaussian distribution conditioned
+
+7967
+
+Eval.
+
+Training
+Dataset Dataset
+
+Scene Flow (m)
+
+Object Motion
+
+Ego-motion
+
+FG
+
+BG
+
+All
+
+Rot.(rad) Tr.(m) Rot.(rad) Tr.(m)
+
+K
+K
+
+K+AK
+K+AK
+
+K
+
+K+AK
+
+K
+
+K+AK
+
+0.23
+0.18
+
+0.58
+0.28
+
+0.14
+0.14
+
+0.14
+0.14
+
+0.14
+0.14
+
+0.18
+0.16
+
+0.004
+0.004
+
+0.010
+0.011
+
+0.30
+0.29
+
+0.57
+0.48
+
+0.004
+0.004
+
+0.004
+0.004
+
+0.09
+0.09
+
+0.14
+0.12
+
+Table 1: Ablation Study on our KITTI and Augmented KITTI validation datasets, abbreviated with K and AK, respectively.
+
+Eval.
+
+Dataset
+
+K
+K
+K
+K
+K
+
+Method
+
+ICP+Det.
+
+3DMatch+Det.
+
+FPFH+Det.
+
+Dewan et al.+Det.
+
+Ours
+
+ICP+Det.
+
+3DMatch+Det.
+
+K+AK
+K+AK
+K+AK
+K+AK Dewan et al.+Det.
+K+AK
+
+FPFH+Det.
+
+Ours
+
+Scene Flow (m)
+
+Object Motion
+
+Ego-motion
+
+FG
+0.56
+0.89
+3.83
+0.55
+0.29
+0.74
+1.14
+4.00
+0.60
+0.34
+
+BG
+0.43
+0.70
+4.24
+0.41
+0.15
+0.48
+0.77
+4.39
+0.52
+0.18
+
+All
+0.44
+0.71
+4.21
+0.41
+0.16
+0.50
+0.80
+4.36
+0.52
+0.20
+
+Rot.(rad) Tr.(m) Rot.(rad) Tr.(m)
+0.44
+0.68
+4.27
+0.39
+0.12
+0.49
+0.76
+4.30
+0.46
+0.15
+
+0.004
+0.004
+0.135
+0.006
+0.005
+0.005
+0.004
+0.122
+0.006
+0.005
+
+0.22
+0.021
+0.299
+0.008
+0.004
+0.226
+0.027
+0.311
+0.014
+0.011
+
+6.27
+1.80
+14.23
+0.55
+0.19
+6.30
+1.76
+13.54
+0.75
+0.50
+
+Table 2: Comparison to Baselines on test sets of KITTI and Augmented KITTI, abbreviated with K and AK, respectively.
+
+on the horizontal and vertical angle of the rays, based on
+KITTI LIDAR scans. Our simulator also produces missing
+estimates at transparent surfaces by ignoring them with a
+probability equal to their transparency value provided by the
+CAD models, as illustrated in Figure 4. Additionally, we
+remove points in the original scan which become occluded
+by the augmented car by tracing a ray between each point and
+the LIDAR, and removing those points whose ray intersects
+with the car mesh. Finally, we sample the augmented car’s
+rigid motion using a simple approximation of the Ackermann
+steering geometry, place the car at the corresponding location
+in the next frame, and repeat the LIDAR simulation. We
+generate 20k such frames with 1 to 3 augmented moving
+cars per scene. We split the sequences into 70% train, 10%
+validation, 20% test similar to our split of the original KITTI
+dataset.
+
+4.2. Baseline Methods
+
+We compare our method to four baselines: a point cloud-
+based method using a CRF [8], two point-matching methods,
+and an Iterative Closest Point [4] (ICP) baseline.
+
+Dewan et al. [8] estimate per-point rigid motion. To arrive
+at object-level motion and ego-motion, we pool the estimates
+over our object detections and over the background. As they
+only estimate valid scene ﬂow for a subset of the points, we
+evaluate [8] only on those estimates and the comparison is
+therefore inherently biased in their favor.
+
+Method Matching 3D Descriptors yield a scene ﬂow esti-
+mate for each point in the reference point cloud by ﬁnding
+correspondences of 3D features in two timesteps. We eval-
+uate two different descriptors: 3D Match [47], a learnable
+3D descriptor trained on KITTI and Fast Point Feature His-
+togram features (FPFH) [31]. Based on the per-point scene
+ﬂow, we ﬁt rigid body motions to each of the objects and to
+the background, again using the object detections from our
+pipeline for a fair comparison.
+
+Iterative Closest Point (ICP) [4] outputs a transformation
+relating two point clouds to each other using an SVD-based
+point-to-point algorithm. We estimate object rigid motions
+by ﬁtting the points of each detected 3D object in the ﬁrst
+point cloud to the entire second point cloud.
+
+Evaluation Metrics: We quantify performance using sev-
+eral metrics applied to both the detected objects and the
+background. To quantify the accuracy of the estimates in-
+dependently from the detection accuracy, we only evaluate
+object motion on true positive detections.
+
+• For 3D scene ﬂow, we use the average endpoint error
+
+between the prediction and the ground truth.
+
+• Similarly, we list the average rotation and translation
+error averaged over all of the detected objects, and
+averaged over all scenes for the observer’s ego-motion.
+
+7968
+
+(a) Ground Truth
+
+(b) Our result
+
+(c) Dewan et al. [8]+Det.
+
+(d) ICP+Det.
+
+Figure 5: Qualitative Comparison of our method with the best performing baseline methods on an example from the
+Augmented KITTI. For clarity, we visualize only a subset of the points. Additional results can be found in the supplementary.
+
+4.3. Experimental Results
+
+The importance of simulated augmentation: To quantify
+the value of our proposed LIDAR simulator for realistic aug-
+mentation with extra cars, we compare the performance of
+our method trained on the original KITTI object detection
+dataset with our method trained on both KITTI and Aug-
+mented KITTI. Table 1 shows the results of this study. Our
+analysis shows that training using a combination of KITTI
+and augmented KITTI leads to signiﬁcant performance gains,
+especially when evaluating on the more diverse vehicle mo-
+tions in the validation set of Augmented KITTI.
+
+Direct scene ﬂow vs. object motion: We have also evalu-
+ated the difference between estimating scene ﬂow directly
+and calculating it from either dense or object-level rigid
+motion estimates. While scene ﬂow computed from rigid
+motion estimates was qualitatively smoother, there was no
+signiﬁcant difference in overall accuracy.
+
+Comparison with the baselines: Table 2 summarizes the
+complete performance comparison on the KITTI test set.
+Note that the comparison with Dewan et al. [8] is biased in
+their favor, as mentioned earlier, as we only evaluate their ac-
+curacy on the points they consider accurate. Regardless, our
+method outperforms all baselines. Additionally, we observe
+that the ICP-based method exhibits large errors for object
+motions. This is because of objects with few points: ICP
+often performs very poorly on these, but while their impact
+on the dense evaluation is small they constitute a relatively
+
+larger fraction of the object-based evaluation. Visual exam-
+ination (Fig. 5) shows that the baseline methods predict a
+reasonable estimate for the background motion, but fail to
+estimate motion for dynamic objects; in contrast, our method
+is able to estimate these motions correctly. This further rein-
+forces the importance of training our method on scenes with
+many augmented cars and challenging and diverse motions.
+Regarding execution time, our method requires 0.5 sec-
+onds to process one point cloud pair. In comparison, Dewan
+et al. (4 seconds) and the 3D Match- and FPFH-based ap-
+proaches (100 and 300 seconds, respectively) require signiﬁ-
+cantly longer, while the ICP solution also takes 0.5 seconds
+but performs considerably worse.
+
+5. Conclusion
+
+In this paper, we have proposed a learning-based solution
+for estimating scene ﬂow and rigid body motion from un-
+structured point clouds. Our model simultaneously detects
+objects in the point clouds, estimates dense scene ﬂow and
+rigid motion for all points in the cloud, and estimates object
+rigid motion for all detected objects as well as the observer.
+We have shown that a global rigid motion representation is
+not amenable to fully convolutional estimation, and propose
+to use a local representation. Our approach outperforms all
+evaluated baselines, yielding more accurate object motions
+in less time.
+
+6. Acknowledgements
+
+This work was supported by an NVIDIA research gift.
+
+7969
+
+References
+
+[1] A. Asvadi, P. Girao, P. Peixoto, and U. Nunes. 3d object
+tracking using RGB and LIDAR data. In Proc. IEEE Conf.
+on Intelligent Transportation Systems (ITSC), 2016.
+
+[2] T. Basha, Y. Moses, and N. Kiryati. Multi-view scene ﬂow es-
+timation: A view centered variational approach. International
+Journal of Computer Vision (IJCV), 101(1):6–21, 2013.
+
+[3] A. Behl, O. H. Jafari, S. K. Mustikovela, H. A. Alhaija,
+C. Rother, and A. Geiger. Bounding boxes, segmentations
+and object coordinates: How important is recognition for 3d
+scene ﬂow estimation in autonomous driving scenarios? In
+Proc. of the IEEE International Conf. on Computer Vision
+(ICCV), 2017.
+
+[4] P. Besl and H. McKay. A method for registration of 3d shapes.
+IEEE Trans. on Pattern Analysis and Machine Intelligence
+(PAMI), 14:239–256, 1992.
+
+[5] X. Chen, H. Ma, J. Wan, B. Li, and T. Xia. Multi-view 3d
+object detection network for autonomous driving. In Proc.
+IEEE Conf. on Computer Vision and Pattern Recognition
+(CVPR), 2017.
+
+[6] R. Danescu, F. Oniga, and S. Nedevschi. Modeling and
+tracking the driving environment with a particle-based occu-
+pancy grid. IEEE Trans. on Intelligent Transportation Systems
+(TITS), 12(4):1331–1342, 2011.
+
+[7] A. Dewan, T. Caselitz, G. D. Tipaldi, and W. Burgard. Motion-
+based detection and tracking in 3d lidar scans. In Proc. IEEE
+International Conf. on Robotics and Automation (ICRA),
+2016.
+
+[8] A. Dewan, T. Caselitz, G. D. Tipaldi, and W. Burgard. Rigid
+scene ﬂow for 3d lidar scans. In Proc. IEEE International
+Conf. on Intelligent Robots and Systems (IROS), 2016.
+
+[9] A. Dosovitskiy, P. Fischer, E. Ilg, P. Haeusser, C. Hazirbas,
+V. Golkov, P. v.d. Smagt, D. Cremers, and T. Brox. Flownet:
+Learning optical ﬂow with convolutional networks. In Proc.
+of the IEEE International Conf. on Computer Vision (ICCV),
+2015.
+
+[10] S. Fidler, S. Dickinson, and R. Urtasun. 3d object detec-
+tion and viewpoint estimation with a deformable 3d cuboid
+model. In Advances in Neural Information Processing Sys-
+tems (NIPS), December 2012.
+
+[11] U. Franke, C. Rabe, H. Badino, and S. Gehrig. 6D-Vision:
+fusion of stereo and motion for robust environment perception.
+In Proc. of the DAGM Symposium on Pattern Recognition
+(DAGM), 2005.
+
+[12] A. Geiger, P. Lenz, and R. Urtasun. Are we ready for au-
+tonomous driving? The KITTI vision benchmark suite. In
+Proc. IEEE Conf. on Computer Vision and Pattern Recogni-
+tion (CVPR), 2012.
+
+[13] F. Groh, P. Wieschollek, and H. P. A. Lensch.
+
+Flex-
+convolution (million-scale point-cloud learning beyond grid-
+worlds).
+In Proc. of the Asian Conf. on Computer Vision
+(ACCV), Dezember 2018.
+
+[15] E. Herbst, X. Ren, and D. Fox. RGB-D ﬂow: Dense 3D
+motion estimation using color and depth. In Proc. IEEE In-
+ternational Conf. on Robotics and Automation (ICRA), 2013.
+[16] M. Hornacek, A. Fitzgibbon, and C. Rother. SphereFlow: 6
+DoF scene ﬂow from RGB-D pairs. In Proc. IEEE Conf. on
+Computer Vision and Pattern Recognition (CVPR), 2014.
+
+[17] F. Huguet and F. Devernay. A variational method for scene
+ﬂow estimation from stereo sequences. In Proc. of the IEEE
+International Conf. on Computer Vision (ICCV), 2007.
+
+[18] E. Ilg, N. Mayer, T. Saikia, M. Keuper, A. Dosovitskiy, and
+T. Brox. Flownet 2.0: Evolution of optical ﬂow estimation
+with deep networks. Proc. IEEE Conf. on Computer Vision
+and Pattern Recognition (CVPR), 2017.
+
+[19] A. Kendall, H. Martirosyan, S. Dasgupta, and P. Henry. End-
+to-end learning of geometry and context for deep stereo regres-
+sion. In Proc. of the IEEE International Conf. on Computer
+Vision (ICCV), 2017.
+
+[20] P. Lenz, J. Ziegler, A. Geiger, and M. Roser. Sparse scene
+ﬂow segmentation for moving object detection in urban envi-
+ronments. In Proc. IEEE Intelligent Vehicles Symposium (IV),
+2011.
+
+[21] Z. Liang, Y. Feng, Y. Guo, H. Liu, L. Qiao, W. Chen, L. Zhou,
+and J. Zhang. Learning deep correspondence through prior
+and posterior feature constancy. arXiv.org, 1712.01039, 2017.
+[22] Z. Lv, C. Beall, P. Alcantarilla, F. Li, Z. Kira, and F. Dellaert.
+A continuous optimization approach for efﬁcient and accurate
+scene ﬂow.
+In Proc. of the European Conf. on Computer
+Vision (ECCV), 2016.
+
+[23] N. Mayer, E. Ilg, P. Haeusser, P. Fischer, D. Cremers, A. Doso-
+vitskiy, and T. Brox. A large dataset to train convolutional
+networks for disparity, optical ﬂow, and scene ﬂow estima-
+tion. In Proc. IEEE Conf. on Computer Vision and Pattern
+Recognition (CVPR), 2016.
+
+[24] M. Menze and A. Geiger. Object scene ﬂow for autonomous
+vehicles. In Proc. IEEE Conf. on Computer Vision and Pattern
+Recognition (CVPR), 2015.
+
+[25] M. Menze, C. Heipke, and A. Geiger. Joint 3d estimation of
+vehicles and scene ﬂow. In Proc. of the ISPRS Workshop on
+Image Sequence Analysis (ISA), 2015.
+
+[26] F. Moosmann and C. Stiller. Joint self-localization and track-
+ing of generic objects in 3d range data. In Proc. IEEE Inter-
+national Conf. on Robotics and Automation (ICRA), 2013.
+
+[27] P. Purkait, C. Zhao, and C. Zach. Spp-net: Deep absolute
+pose regression with synthetic views. arXiv.org, 1712.03452,
+2017.
+
+[28] C. R. Qi, H. Su, K. Mo, and L. J. Guibas. Pointnet: Deep
+learning on point sets for 3d classiﬁcation and segmentation.
+In Proc. IEEE Conf. on Computer Vision and Pattern Recog-
+nition (CVPR), 2017.
+
+[29] C. R. Qi, L. Yi, H. Su, and L. J. Guibas. Pointnet++: Deep
+hierarchical feature learning on point sets in a metric space. In
+Advances in Neural Information Processing Systems (NIPS),
+2017.
+
+[14] D. Held, J. Levinson, S. Thrun, and S. Savarese. Robust real-
+time tracking combining 3d shape, color, and motion. Inter-
+national Journal of Robotics Research (IJRR), 35(1-3):30–49,
+2016.
+
+[30] J. Quiroga, T. Brox, F. Devernay, and J. L. Crowley. Dense
+semi-rigid scene ﬂow estimation from RGB-D images. In
+Proc. of the European Conf. on Computer Vision (ECCV),
+2014.
+
+7970
+
+[47] A. Zeng, S. Song, M. Nießner, M. Fisher, J. Xiao, and
+T. Funkhouser. 3dmatch: Learning local geometric descrip-
+tors from rgb-d reconstructions.
+In Proc. IEEE Conf. on
+Computer Vision and Pattern Recognition (CVPR), 2017.
+
+[48] Y. Zhou and O. Tuzel. Voxelnet: End-to-end learning for
+point cloud based 3d object detection. In Proc. IEEE Conf.
+on Computer Vision and Pattern Recognition (CVPR), 2018.
+
+[31] R. B. Rusu, N. Blodow, and M. Beetz. Fast point feature
+histograms (FPFH) for 3d registration. In Proc. IEEE Inter-
+national Conf. on Robotics and Automation (ICRA), 2009.
+
+[32] H. Su, V. Jampani, D. Sun, S. Maji, E. Kalogerakis, M. Yang,
+and J. Kautz. Splatnet: Sparse lattice networks for point cloud
+processing. In Proc. IEEE Conf. on Computer Vision and
+Pattern Recognition (CVPR), 2018.
+
+[33] D. Sun, X. Yang, M.-Y. Liu, and J. Kautz. Pwc-net: Cnns
+for optical ﬂow using pyramid, warping, and cost volume. In
+Proc. IEEE Conf. on Computer Vision and Pattern Recogni-
+tion (CVPR), 2018.
+
+[34] G. Tanzmeister, J. Thomas, D. Wollherr, and M. Buss. Grid-
+based mapping and tracking in dynamic environments using a
+uniform evidential environment representation. In Proc. IEEE
+International Conf. on Robotics and Automation (ICRA),
+2014.
+
+[35] F. Tombari, S. Salti, and L. di Stefano. Unique signatures
+of histograms for local surface description. In Proc. of the
+European Conf. on Computer Vision (ECCV), 2010.
+
+[36] A. K. Ushani, R. W. Wolcott, J. M. Walls, and R. M. Eustice.
+A learning approach for real-time temporal scene ﬂow esti-
+mation from LIDAR data. In Proc. IEEE International Conf.
+on Robotics and Automation (ICRA), 2017.
+
+[37] L. Valgaerts, A. Bruhn, H. Zimmer, J. Weickert, C. Stoll,
+and C. Theobalt. Joint estimation of motion, structure and
+geometry from stereo sequences. In Proc. of the European
+Conf. on Computer Vision (ECCV), 2010.
+
+[38] J. van de Ven, F. Ramos, and G. D. Tipaldi. An integrated
+probabilistic model for scan-matching, moving object detec-
+tion and motion estimation. In Proc. IEEE International Conf.
+on Robotics and Automation (ICRA), 2010.
+
+[39] S. Vedula, S. Baker, P. Rander, R. Collins, and T. Kanade.
+Three-dimensional scene ﬂow. In Proc. IEEE Conf. on Com-
+puter Vision and Pattern Recognition (CVPR), 1999.
+
+[40] S. Vedula, P. Rander, R. Collins, and T. Kanade. Three-
+dimensional scene ﬂow. IEEE Trans. on Pattern Analysis and
+Machine Intelligence (PAMI), 27(3):475–480, 2005.
+
+[41] C. Vogel, K. Schindler, and S. Roth. 3D scene ﬂow estimation
+with a rigid motion prior. In Proc. of the IEEE International
+Conf. on Computer Vision (ICCV), 2011.
+
+[42] C. Vogel, K. Schindler, and S. Roth. 3d scene ﬂow estimation
+with a piecewise rigid scene model. International Journal of
+Computer Vision (IJCV), 115(1):1–28, 2015.
+
+[43] S. Wang, S. Suo, W.-C. Ma, A. Pokrovsky, and R. Urtasun.
+Deep parametric continuous convolutional neural networks.
+In Proc. IEEE Conf. on Computer Vision and Pattern Recog-
+nition (CVPR), June 2018.
+
+[44] A. Wedel, T. Brox, T. Vaudrey, C. Rabe, U. Franke, and
+D. Cremers. Stereoscopic scene ﬂow computation for 3D
+motion understanding. International Journal of Computer
+Vision (IJCV), 95(1):29–51, 2011.
+
+[45] A. Wedel, C. Rabe, T. Vaudrey, T. Brox, U. Franke, and
+D. Cremers. Efﬁcient dense scene ﬂow from sparse or dense
+stereo data. In Proc. of the European Conf. on Computer
+Vision (ECCV), 2008.
+
+[46] J. ˇZbontar and Y. LeCun. Stereo matching by training a con-
+volutional neural network to compare image patches. Journal
+of Machine Learning Research (JMLR), 17(65):1–32, 2016.
+
+7971
+
+

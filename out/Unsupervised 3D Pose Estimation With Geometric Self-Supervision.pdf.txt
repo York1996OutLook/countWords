@@ -1,0 +1,1049 @@
+Unsupervised 3D Pose Estimation with Geometric Self-Supervision
+
+Ching-Hang Chen1
+
+Ambrish Tyagi1
+
+Amit Agrawal1
+
+Dylan Drover1
+
+Rohith MV1
+
+Stefan Stojanov1
+
+2
+
+,
+
+James M. Rehg1
+
+2
+
+,
+
+1Amazon Lab126, 2Georgia Institute of Technology
+
+{chinghc, ambrisht, aaagrawa, droverd, kurohith}@amazon.com {sstojanov, rehg}@gatech.edu
+
+Abstract
+
+We present an unsupervised learning approach to re-
+cover 3D human pose from 2D skeletal joints extracted from
+a single image. Our method does not require any multi-
+view image data, 3D skeletons, correspondences between
+2D-3D points, or use previously learned 3D priors during
+training. A lifting network accepts 2D landmarks as inputs
+and generates a corresponding 3D skeleton estimate. Dur-
+ing training, the recovered 3D skeleton is reprojected on
+random camera viewpoints to generate new ‘synthetic’ 2D
+poses. By lifting the synthetic 2D poses back to 3D and
+re-projecting them in the original camera view, we can de-
+ﬁne self-consistency loss both in 3D and in 2D. The training
+can thus be self supervised by exploiting the geometric self-
+consistency of the lift-reproject-lift process. We show that
+self-consistency alone is not sufﬁcient to generate realistic
+skeletons, however adding a 2D pose discriminator enables
+the lifter to output valid 3D poses. Additionally, to learn
+from 2D poses ‘in the wild’, we train an unsupervised 2D
+domain adapter network to allow for an expansion of 2D
+data. This improves results and demonstrates the useful-
+ness of 2D pose data for unsupervised 3D lifting. Results on
+Human3.6M dataset for 3D human pose estimation demon-
+strate that our approach improves upon the previous un-
+supervised methods by 30% and outperforms many weakly
+supervised approaches that explicitly use 3D data.
+
+1. Introduction
+
+Estimation of 3D human pose from images and videos
+is a classical ill-posed inverse problem in computer vision
+with numerous applications [12, 17, 28, 31] in human track-
+ing, action understanding, human-robot interaction, aug-
+mented reality, video gaming, etc. Current deep learning-
+based systems attempt to learn a mapping from RGB images
+or 2D keypoints to 3D skeleton joints via some form of su-
+pervision requiring datasets with known 3D pose. However,
+obtaining 3D motion capture data is time-consuming, difﬁ-
+cult, and expensive, and as a result, only a limited amount of
+3D data is currently available. On the other hand, 2D image
+
+and video data of humans is available in abundance. How-
+ever, unsupervised learning of 3D joint locations from 2D
+pose alone remains a holy grail in the ﬁeld. In this paper, we
+take a ﬁrst step towards achieving this goal and present an
+unsupervised learning algorithm to estimate 3D human pose
+from 2D pose landmarks/keypoints. Our approach does not
+use 3D inputs in any form and does not require 2D-3D cor-
+respondences or explicit 3D priors.
+
+Due to perspective projection ambiguity, there exists an
+inﬁnite number of 3D skeletons corresponding to a given
+2D pose. However, all of these solutions are not physically
+plausible given the anthropomorphic constraints and joint
+angle limits of a human body articulation. Typically, super-
+vised learning with 2D pose and corresponding 3D skele-
+tons is used to restrict the solution space. In addition, the
+3D structure can also be regularized in a weakly-supervised
+manner by using priors such as symmetry, ratio of length of
+various skeleton elements, and kinematic constraints, which
+are learned from 3D data. In contrast, this paper addresses
+the fundamental problem of lifting 2D image coordinates
+to 3D space without the use of any additional cues such as
+video [43, 54], multi-view cameras [1, 16], or depth im-
+ages [35, 40, 52].
+
+We posit that the following properties of the 2D-3D pose
+mapping render unsupervised lifting possible: 1) Closure:
+If a 2D skeleton is lifted to 3D accurately, and then ran-
+domly rotated and reprojected, the resulting 2D skeleton
+will lie within the distribution of valid 2D poses. Con-
+versely, a lifted 3D skeleton whose random re-projection
+falls outside this distribution is likely to be inaccurate. 2)
+Invariance: 2D projections of the same 3D skeleton from
+different viewpoints, when lifted, should produce the same
+3D output.
+In other words, lifting should be invariant to
+change in the viewpoint.
+
+We employ the above properties in designing a deep neu-
+ral network, referred to as the lifting network, which is il-
+lustrated in Figure 1. We introduce a novel geometrical
+consistency loss term that allows the network to learn in
+a self-supervised mode. This self-consistency loss relies on
+the property of invariance: any 2D projection of the gen-
+
+15714
+
+5715
+
+lying on 2D-3D correspondences. Wang et al. [46] use the
+3D ground truth to train an intermediate ranking network to
+extract the depth ordering of pairwise human joints from a
+single RGB image. Sun et al. [41] use a 3D regression based
+on bone segments derived from joint locations as opposed
+to directly using joint locations. Since these methods model
+2D to 3D mappings from a given dataset, they implicitly
+incorporate dataset-speciﬁc parameters such as camera pro-
+jection matrices, distance of skeleton from the camera, and
+scale of skeletons. This enables these models to predict met-
+ric position of joints in 3D on similar datasets, but requires
+paired 2D-3D correspondences which are difﬁcult to obtain.
+
+Weakly Supervised: Approaches such as [3, 10, 44, 53,
+54, 55] do not explicitly use paired 2D-3D correspondences,
+but use unpaired 3D data to learn priors on shape (3D ba-
+sis) or pose (articulation priors). For example, Zhou et
+al. [54] use a 3D pose dictionary to learn pose priors and
+Brau et al. [3] employ an independently trained network
+that learns a prior distribution over 3D poses (kinematic and
+self-intersection priors). Tome et al. [44], Wu et al. [48]
+and Tung et al. [11] pre-train low-dimensional representa-
+tions from 3D annotations to obtain priors for plausible 3D
+poses. Another form of weak supervision is employed by
+Ronchi et al. [39], where they train a network using relative
+depth ordering of joints to predict 3D pose from images.
+Dabral et al. [8] uses supervision of 3D skeletons in con-
+junction with anatomical losses based on joint angle limits
+and limb symmetry. Rhodin et al. [37] train via 2D data,
+using multiple images of a single pose in addition to su-
+pervision in using 3D data when available. An adversarial
+training paradigm was used by Yang et al. [50] to improve
+an existing 3D pose estimation framework, lifting in-the-
+wild images with no 3D ground truth and comparing them
+to existing 3D skeletons.
+
+Similar to our work, the weakly supervised approach of
+Drover et al. [9] also makes use of 2D projections to learn a
+3D prior on human pose. However, Drover et al. utilize the
+ground-truth 3D points to generate a large amount (12M) of
+synthetic 2D joints for training, thus augmenting the orig-
+inal 1.5M 2D poses in Human3.6M by almost 10 times.
+This allows them to synthetically over-sample the space of
+camera variations/angles to learn the 3D priors from those
+poses. In contrast, we do not use any ground truth 3D pro-
+jection or 3D data in any form. The fact that we can uti-
+lize multiple 2D datasets without any 3D supervision sets
+us apart from these previous approaches, and enables our
+method to exploit the large amount of available 2D pose
+data.
+
+Unsupervised: Recently, Rhodin et al. [36] proposed an
+unsupervised method to learn a geometry-aware body rep-
+resentation. Their approach maps one view of the human to
+another view from a set of given multi-view images. It re-
+lies on synchronized multi-view images of subjects to learn
+
+an encoding of scene geometry and pose. It also uses video
+sequences to observe the same subject at multiple time in-
+stants to learn appearance. In contrast, we do not require
+multi-view images or the ability to capture the same pose at
+multiple time instants. We learn 3D pose from 2D projec-
+tions alone. Kudo et al. [23] present 3D error results (130.9
+mm) that are comparable to the trivial baseline reported in
+[9] (127.3 mm).
+
+Learning Using Adversarial Loss: Generative adver-
+sarial learning has emerged as a powerful framework for
+modeling complex data distributions, some use it to learn
+generative models [13, 15, 56], and [45] leverages it to
+synthesize hard examples, etc. Previous approaches have
+used adversarial loss for human pose estimation by using
+a discriminator to differentiate real/fake 2D poses [6] and
+real/fake 3D poses [11, 21]. To estimate 3D, these tech-
+niques still require 3D data or use a prior 3D pose models.
+In contrast, our approach applies an adversarial loss over
+randomly projected 2D poses of the generated 3D skele-
+tons. Previous works on image-to-image translation such as
+CycleGAN [56] or CyCADA [15] also rely on a cycle con-
+sistency loss in the image domain to enable unsupervised
+training. However, we use geometric self-consistency and
+utilize consistency loss in 3D and 2D joint locations, result-
+ing in a novel method for lifting.
+
+3. Unsupervised 2D-3D Lifting
+
+In this section, we describe our unsupervised learning
+approach to lift 2D pose to a 3D skeleton. Let xi =
+(xi, yi), i = 1 . . . N, denote N 2D pose landmarks of a
+skeleton with the root joint (midpoint between hip joints)
+located at the origin. Let Xi denote the corresponding 3D
+joint for each 2D joint. We assume a camera with unit fo-
+cal length centered at the origin (0, 0, 0). Note that because
+of the fundamental perspective ambiguity, absolute metric
+depths cannot be obtained from a single view. Therefore,
+we ﬁx the distance of the skeleton to the camera to a con-
+stant c units. In addition, we normalize the 2D skeletons
+such that the mean distance from the head joint to the root
+joint is 1
+c units in 2D. This ensures that 3D skeleton will
+be generated with a scale of ≈ 1 unit (head to root joint
+distance).
+
+3.1. Lifting Network
+
+The lifting network G(x) is a neural network that outputs
+
+the 3D joint for each 2D joint.
+
+GθG(x) = X,
+
+(1)
+
+where θG are the parameters of the lifter learned during
+training. Internally, the lifter estimates the depth offset di
+of each joint relative to the ﬁxed plane at c units. The 3D
+
+5716
+
+joint is computed as Xi = (xizi, yizi, zi), where
+
+zi = max (1, c + di) .
+
+(2)
+
+3.2. Random Projections
+
+The generated 3D skeletons are projected to 2D using
+random camera orientations and these 2D poses are sent to
+the lifter and discriminator. Let R be a random rotation ma-
+trix, created by uniformly sampling an azimuth angle be-
+tween [-π, π] and an elevation angle between [-π/9, π/9],
+and Xr be the location of the root joint of the generated
+skeleton. The rotated 3D skeleton Yi is obtained as
+
+Yi = Q(Xi) = R ∗ (Xi − Xr) + T,
+
+(3)
+
+where T = [0, 0, c]. Q represents the rigid transformation
+between Y and X. The rotated 3D skeleton Yi is then pro-
+jected to create a 2D skeleton yi = P (Yi), where P denotes
+perspective projection.
+
+3.3. Self Supervision via Loop Closure
+
+We now describe the symmetrical lifting and projection
+step performed on the synthesized 2D pose, yi. As shown
+in Figure 2, we lift the randomly projected pose yi to obtain
+˜Yi
+
+˜Yi = GθG (yi).
+
+(4)
+
+˜Yi is transformed to ˜Xi by applying the inverse of rigid
+transformation Q that was used while generating the ran-
+dom projection yi from Xi. The 3D skeleton ˜Xi is ﬁnally
+projected to the 2D skeleton ˜xi.
+
+Note that the lifting network G(·) remains the same in
+both the forward and backward part of the cycle as illus-
+trated in Figure 2. If the lifting network accurately recon-
+structs the 3D pose from 2D inputs, then the 3D skele-
+tons Yi and ˜Yi and the corresponding 2D projections xi
+and ˜xi should be similar. The cycle described herein pro-
+vides a strong signal for self-supervision for the lifting
+network, whose loss term can be updated by adding two
+additional components, namely, L3D = (cid:13)
+L2D = kx − ˜xk2.
+
+(cid:13)Y − ˜Y(cid:13)
+(cid:13)
+
+and
+
+2
+
+3.4. Discriminator for 2D Poses
+
+The 2D pose discriminator D is a neural network (with
+parameters θD) that takes as input a 2D pose and outputs a
+probability between 0 and 1. It classiﬁes between real 2D
+pose r (target probability of 1) and fake (projected) 2D pose
+y (target probability of 0). Note that for any training sample
+x for lifter, we do not require r to be same as x or any of it’s
+multi-view correspondences. During learning we utilize a
+standard GAN loss [13] deﬁned as
+
+min
+θG
+
+max
+θD
+
+Ladv = E(log(D(r))) + E(log(1 − D(y))). (5)
+
+x
+
+˜x
+
+G(x)
+
+P( ˜X)
+
+X
+
+˜X
+
+Q(X)
+
+Q−1( ˜Y)
+
+Y
+
+˜Y
+
+P(Y)
+
+D(y)
+
+y
+
+real/fake
+
+G(y)
+
+Figure 2. Self-supervision achieved by closing the loop between
+the generated skeleton Y, its random projection y. The recovered
+3D skeleton ˜Y is obtained by lifting y. Upon reversing the geomet-
+ric transformations, training can be self-supervised by comparing
+x with ˜x, and Y with ˜Y.
+
+The discriminator provides feedback to the lifter allowing
+it to learn priors on 3D skeletons such as the ratio of limb
+lengths and joint angles using only random 2D projections,
+thus allowing it to avoid inadequacies as shown in Sect. 4.3.
+
+3.5. Temporal Consistency
+
+Note that our approach does not require video data for
+training. However, when available, temporal 2D pose se-
+quences (e.g. video sequence of actions) can improve the
+accuracy of the single frame lifting network. We exploit
+the temporal smoothness via an additional loss function to
+reﬁne the lifting network G(·) as shown in Figure 3. We
+train an additional discriminator, T (·) that takes as input the
+difference of 2D poses adjacent in time. The real data for
+this discriminator comes from a sequence of real 2D poses
+available during training, rt − rt+1. The discriminator T (·)
+is updated to optimize the loss that can distinguish the dis-
+tribution of real 2D pose differences from those of the fake
+2D (sequential) projections yt − yt+1. Speciﬁcally,
+
+max
+θT
+
+LT =E(log(T (rt − rt+1)))+
+
+E(log(1 − T (cid:0)yt − yt+1)(cid:1)).
+
+(6)
+
+3.6. Learning from 2D Poses in the Wild
+
+To improve the 3D lifting accuracy in the target domain
+of interest (e.g. Human 3.6M, xt), we wish to augment 2D
+training data from in the wild (e.g. OpenPose joint estimates
+on Kinetics dataset, xs). Depending on the choice of 2D
+pose extraction algorithms [4, 30, 47], the position and se-
+mantics of 2D keypoints can vary greatly from the represen-
+tation adopted by the target domain (e.g. center of face vs.
+top of the head or side of the hips vs. pelvis).
+
+We train a 2D domain adapter neural network C to map
+the source domain 2D joints to target domain 2D joints (see
+Figure 4). Let xsc denote the corrected source domain 2D
+joints, such that xsc = xs + C(xs). Note that we do not
+assume any correspondences between the 2D joints in the
+source and target domains. Thus, we cannot train C using
+any form of supervised loss. In absence of any supervision,
+
+5717
+
+5718
+
+4.1. Dataset and Metrics
+
+Supervision
+
+Algorithm
+
+Human3.6M Dataset: Human3.6M is one of the largest
+3D human pose datasets, consisting of 3.6 million 3D hu-
+man poses. The dataset contains video and motion capture
+(MoCap) data from 5 female and 6 male subjects. Data is
+captured from 4 different viewpoints, while subjects per-
+form typical activities such as talking on phone, walking,
+eating, etc.
+MPI-INF-3DHP: The MPI-INF-3DHP [27] is a large hu-
+man pose dataset containing >1.3M frames taken from di-
+verse viewpoints. The dataset has 4 male and 4 female ac-
+tors performing an array of actions similar to but more di-
+verse than the Human3.6M dataset.
+Kinetics dataset: The Kinetics dataset contains 400 video
+clips each for 400 activities involving one or more persons.
+The video clips are sourced from Youtube and each clip
+is approximately 10 seconds in duration. We did not use
+any of the class annotations from the dataset for our train-
+ing. Instead, we extracted 2D pose landmarks using Open-
+Pose [4] on sampled frames from this dataset. We retained
+only those frames in which all the landmarks on a person
+were estimated with sufﬁcient conﬁdence. After this ﬁlter-
+ing, approximately 9 million 2D skeletons were obtained.
+Evaluation Metric: We report the Mean Per Joint Posi-
+tion Error (MPJPE) in millimeters after scaling and rigid
+alignment to the ground truth skeleton. Similar to previ-
+ous works [9, 11, 24, 26, 36, 43, 54], we report results on
+subjects S9 and S11. Also, following the convention as
+in [26, 36], we only use data from subjects S1, S5, S6, S7,
+and S8 for training. We do not train class speciﬁc mod-
+els or leverage any motion information during inference to
+improve the results. The reported metrics are taken from
+the respective papers for comparisons. We also compare
+our method to [27, 53] which uses the adapted Percentage
+of Correct Keypoints (PCK) and corresponding Area Under
+Curve (AUC) metrics.
+
+4.2. Quantitative Results
+
+We summarize our results for Human3.6M and MPI-
+INF-3DHP in Table 1 and Table 2, respectively.
+In ad-
+dition to comparing with the state-of-the-art unsupervised
+3D pose estimation method of Rhodin et al. [36], we also
+show results from top fully supervised and weakly super-
+vised methods. Results from [36] uses images as input and
+are hence comparable to Ours(SH) results which use 2D
+joints extracted from the same input images using SH de-
+tector [30]. Our method reduces error by 30% compared
+to [36] (68mm vs. 98.2mm).
+
+Table 3 shows the results of an ablation study on lifter
+with various algorithmic components using ground truth
+2D points. SS denotes self-consistency (Sect. 3.3), Adv
+adds the 2D pose discriminator (Sect. 3.4), DA augments
+the training data by adapting 2D poses from Kinetics
+
+Full
+
+Weak
+
+Chen et al. [5]
+Martinez et al. [26]
+
+3DInterpreter [48]
+AIGN [11]
+Drover et al. [9]
+
+Unsupervised Rhodin et al. [36]
+
+Ours
+
+Error (mm)
+GT IMG
+
+57.5
+37.1
+
+88.6
+79.0
+38.2
+
+-
+51
+
+82.7
+52.1
+
+98.4
+97.2
+64.6
+
+98.2
+68
+
+Table 1. Comparison to the state-of-the-art unsupervised method
+of Rhodin et al. [36] on Human3.6M. Comparable metrics for
+fully/weakly supervised methods are included for reference. Our
+approach outperforms [36] and several weakly supervised ap-
+proaches [11, 48] by a signiﬁcant margin. GT and IMG denote
+results using ground truth 2D pose and estimated 2D pose by
+SH/CPM [30, 47], respectively.
+
+Supervision
+
+Algorithm
+
+Trainset
+
+PCK AUC
+
+Full
+
+Mehta [27]
+Mehta [27]
+
+MPI
+
+72.5
+H36M 64.7
+
+36.9
+31.7
+
+Weak
+
+Zhou [53]
+
+H36M 69.2
+
+32.5
+
+Unsupervised Ours
+Ours
+
+MPI
+
+71.1
+H36M 64.3
+
+36.3
+31.6
+
+Table 2. Our results (14-joint) on MPI-INF-3DHP with metrics
+as in Mehta et al. [27]. The proposed unsupervised approach
+achieves similar performance as [27] and [53].
+
+Type
+
+Ablation
+
+Error (mm)
+
+Architecture/
+Loss Variations
+
+SS
+SS + Symm
+Adv
+Adv+DA
+Adv+SS
+Adv+SS+DA
+Adv+SS+DA+TD
+
+Supervised Fine-Tuning
+with 3D Data
+
+0%
+5%
+
+162
+168
+61
+59
+58
+55
+51
+
+55
+37
+
+Table 3. Ablation studies.The architecture/loss ablations show the
+effect of various components on the unsupervised training. Su-
+pervised ﬁne-tuning with only 5% of randomly sampled Hu-
+man3.6M 3D data gives similar performance as compared to fully-
+supervised results of [26].
+
+(Sect. 3.6), and TD leverages temporal cues during training
+(Sect. 3.5), when available. As further analyzed in Sect. 4.3,
+just using self consistency loss can lead to unrealistic skele-
+tons without the additional discriminator. Augmenting our
+approach with additional 2D poses obtained from the Ki-
+netics dataset (Ours: Adv + SS + DA) further reduces the
+error down to 55mm. Lastly, we exploit temporal informa-
+
+5719
+
+tion during training (Ours: Adv + SS + DA + TD), when
+available, to obtain an error of 51mm on Human3.6M. It
+should be noted that the inference for the TD experiment
+is still done on single frames and the results can be further
+improved by applying temporal smoothness techniques on
+video sequences.
+
+4.3. Inadequacy of Geometric Self Supervision
+
+At ﬁrst glance, it may appear that self supervision is suf-
+ﬁcient to learn a good lifter, without the need for a discrim-
+inator. However, we found that in absence of the 2D pose
+discriminator, network can produce outputs which are ge-
+ometrically self-consistent, but not realistic (see Figure 7).
+We present an analysis of the 3D outputs that the lifting net-
+work can generate with only self-supervision. Speciﬁcally,
+we examine the ratios of upper to lower arm and leg, both
+for the left and right side of human body (4 ratios).
+
+Figure 6 (Left) shows the distribution of the 4 ratios, for
+a lifter trained using self-consistency loss alone. Note that
+the lifter produces different limb length ratios for the left
+and right side of the body. Thus self-consistency loss alone
+may not produce symmetric (realistic) skeletons without
+any 3D priors. Figure 6 (Middle) shows that after impos-
+ing symmetry constraints, the distributions of the left and
+right limbs are better aligned. However, the distributions
+are ﬂatter since enforcing the same ratios for left and right
+sides does not ensure that these ratios are realistic (con-
+forming to a human body). In other words, the lifter may
+choose different ratios for different training examples. Fig-
+ure 6 (Right) shows the distributions when a discriminator
+that gives feedback to the lifter using real 2D poses is used.
+Notice that the ratio distributions become sharper and closer
+to distributions of real ratios in the training set. This is the
+reason that using self-supervision loss (SS) alone performs
+worse in our ablation studies as shown in Table 1. How-
+ever, the self-consistency further improves the performance
+in conjunction with 2D pose discriminator (Adv+SS).
+
+Note that we do not use symmetry ratios in our frame-
+work when the discriminator is present. Our lifting network
+can learn higher order 3D skeleton statistics (beyond sym-
+metry) based on the feedback from geometric self consis-
+tency and the 2D pose discriminator.
+
+4.4. Semi supervised 3D Pose Estimation
+
+Other methods have shown improvement in accuracy
+when a small amount of 3D data is used for supervised
+ﬁne-tuning. We ﬁne tuned our baseline model (from unsu-
+pervised training) using 5% of randomly sampled 3D data
+available in Human3.6M dataset. With this, our method
+could achieve performance comparable to fully supervised
+method (37mm) as shown in Table 3.
+
+4.5. Qualitative Results
+
+Figure 8 shows some of the 3D pose reconstruction re-
+sults on Human3.6M dataset using our lifting network. The
+ground truth 3D skeleton is depicted in gray. Some of the
+failures are shown in Figure 9. Most of these can be at-
+tributed to self-occlusions or ﬂip ambiguities in viewing di-
+rection (for more details see Suppl. materials).
+
+To demonstrate generalization, we show some examples
+of 3D skeletons estimated on MPII [2] and the Leeds Sports
+Pose (LSP) [20] datasets, in Figures 10 and 11 respectively.
+MPII has images extracted from short Youtube videos. LSP
+dataset consists of images of sport activities sampled from
+Flickr. Our unsupervised method successfully recovers 3D
+poses on these datasets without being trained on them.
+
+4.6. Discussion
+
+Previous unsupervised and weakly supervised methods
+use additional constraints on training data in lieu of 3D an-
+notations. For example, [9, 51] leverage synthetic 2D poses
+obtained from known 3D skeletons to improve results. Sim-
+ilarly, Rhodin et al. [36] derive an appearance and geo-
+metric model by choosing different frames from temporal
+sequences and multi-view images involving the same per-
+son. However, in theory, if multi-view images from syn-
+chronized cameras are available, one could triangulate the
+detected 2D joints to get 3D joints and train a supervised
+network. In contrast, our method treats each 2D skeleton
+as an individual training example, without requiring any
+multi-view correspondence. Hence, there is no restriction
+on where the 2D input pose originates; it could be obtained
+from a single image, video, or multi-view sequences. Our
+work explores the innate geometry of human pose itself,
+whereas [36] exploits the consistency in camera geome-
+try and appearance of speciﬁc individuals. As shown in
+Sect. 4.2, our approach is able to augment the training data
+from other datasets (e.g. Kinetics) with 2D skeletons cap-
+tured in the wild.
+
+Our current approach cannot handle occluded/missing
+joints during training or testing phases. This limits the
+amount of external domain data that can be used for train-
+ing. For example, using OpenPose on Kinetics dataset re-
+sults in 17M skeletons with at least 10 joints, but only 9M
+complete skeletons (14 joints). Though not the main focus
+of the paper, we did a small experiment to ﬁll-in missing
+joints to further augment our training data. We trained a
+two-layer fully connected neural network which takes in-
+complete OpenPose 2D pose estimates on Human3.6M im-
+ages as input and outputs completed 14 joints. The network
+was trained using the corresponding 2D ground-truth joints
+from Human3.6M in a supervised manner. Using the com-
+pleted poses (17M skeletons) from the Kinetic dataset, our
+method achieved a MPJPE of 48mm on Human3.6M test
+data. This experiment further underscores the importance
+
+5720
+
+5721
+
+References
+
+[1] Sikandar Amin, Mykhaylo Andriluka, Marcus
+Rohrbach, and Bernt Schiele. Multi-view pictorial
+structures for 3d human pose estimation. In BMVC,
+2013. 1
+
+[2] Mykhaylo Andriluka, Leonid Pishchulin, Peter
+Gehler, and Bernt Schiele. 2d human pose estima-
+tion: New benchmark and state of the art analysis. In
+CVPR, 2014. 5, 7
+
+[3] Ernesto Brau and Hao Jiang. 3d human pose estima-
+tion via deep learning from 2d annotations. In Fourth
+International Conference on 3D Vision, 2016. 3
+
+[4] Zhe Cao, Tomas Simon, Shih-En Wei, and Yaser
+Sheikh. Realtime multi-person 2d pose estimation us-
+ing part afﬁnity ﬁelds. In CVPR, 2017. 2, 4, 6
+
+[5] C.-H. Chen and D. Ramanan. 3d human pose estima-
+tion = 2d pose estimation + matching. In IEEE Con-
+ference on Computer Vision and Pattern Recognition
+(CVPR), 2017. 2, 6
+
+[6] Yu Chen, Chunhua Shen, Xiu-Shen Wei, Lingqiao
+Liu, and Jian Yang. Adversarial posenet: A structure-
+aware convolutional network for human pose estima-
+tion. In IEEE International Conference on Computer
+Vision (ICCV), Oct 2017. 3
+
+[7] Xiao Chu and Alan Yuille. Orinet: A fully convo-
+In
+
+lutional network for 3d human pose estimation.
+BMVC, 2018. 2
+
+[8] Rishabh Dabral, Anurag Mundhada, Uday Kusupati,
+Safeer Afaque, Abhishek Sharma, and Arjun Jain.
+Learning 3d human pose from structure and motion.
+In Proceedings of the European Conference on Com-
+puter Vision (ECCV), pages 668–683, 2018. 3
+
+[9] Dylan Drover, Rohith MV, Ching-Hang Chen, Amit
+Agrawal, Ambrish Tyagi, and Cong Phuoc Huynh.
+Can 3D pose be learned from 2D projections alone? In
+European Conference of Computer Vision Workshop,
+2018. 2, 3, 6, 7
+
+[10] Hao-Shu Fang, Yuanlu Xu, Wenguan Wang, Xiaobai
+Liu, and Song-Chun Zhu. Learning pose grammar to
+encode human body conﬁguration for 3d pose estima-
+tion.
+In AAAI Conference on Artiﬁcial Intelligence,
+2018. 3
+
+[11] Hsiao-Yu Fish Tung, Adam W. Harley, William Seto,
+and Katerina Fragkiadaki. Adversarial inverse graph-
+ics networks: Learning 2d-to-3d lifting and image-to-
+image translation from unpaired supervision. In IEEE
+International Conference on Computer Vision (ICCV),
+Oct 2017. 2, 3, 6
+
+[13] I Goodfellow, J Pouget-Abadie, M Mirza, B Xu, D
+Warde-Farley, and S Ozair. Generative adversarial
+nets. In NIPS, pages 2672–2680, 2014. 3, 4, 5
+
+[14] Kaiming He, Georgia Gkioxari, Piotr Doll´ar, and Ross
+In Computer Vision (ICCV),
+Girshick. Mask r-cnn.
+2017 IEEE International Conference on, pages 2980–
+2988. IEEE, 2017. 2
+
+[15] Judy Hoffman, Eric Tzeng, Taesung Park, Jun-Yan
+Zhu, Phillip Isola, Kate Saenko, Alexei A. Efros, and
+Trevor Darrell. CyCADA: Cycle-consistent adversar-
+ial domain adaptation.
+International Conference on
+Machine Learning (ICML), 2018. 3
+
+[16] Michael Hofmann and Dariu M Gavrila. Multi-view
+3d human pose estimation in complex environment.
+IJCV, 2012. 1
+
+[17] David Hogg. Model-based vision: a program to see a
+walking person. Image and Vision computing, 1983. 1
+
+[18] Catalin Ionescu, Dragos Papava, Vlad Olaru, and Cris-
+tian Sminchisescu. Human3.6M: Large scale datasets
+and predictive methods for 3d human sensing in nat-
+ural environments. IEEE Trans. Pattern Analysis and
+Machine Intelligence, 36(7):1325–1339, Jul 2014. 5
+
+[19] Hao Jiang. 3d human pose reconstruction using mil-
+In Pattern Recognition (ICPR),
+
+lions of exemplars.
+2010 20th International Conference on, 2010. 2
+
+[20] Sam Johnson and Mark Everingham. Clustered pose
+and nonlinear appearance models for human pose esti-
+mation. In Proceedings of the British Machine Vision
+Conference, pages 12.1–12.11. BMVA Press, 2010.
+doi:10.5244/C.24.12. 5, 7
+
+[21] Angjoo Kanazawa, Michael Black, David Jacobs, and
+Jitendra Malik. End-to-end recovery of human shape
+and pose. In Computer Vision and Pattern Recognition
+(CVPR), 2018. 3
+
+[22] Will Kay, Jo˜ao Carreira, Karen Simonyan, Brian
+Zhang, Chloe Hillier, Sudheendra Vijayanarasimhan,
+Fabio Viola, Tim Green, Trevor Back, Apostol Nat-
+sev, Mustafa Suleyman, and Andrew Zisserman.
+The kinetics human action video dataset. CoRR,
+abs/1705.06950, 2017. 5
+
+[23] Yasunori Kudo, Keisuke Ogaki, Yusuke Matsui, and
+Yuri Odagiri. Unsupervised adversarial learning of 3d
+human pose from 2d joint locations. arXiv preprint
+arXiv:1803.08244, 2018. 3
+
+[24] Sijin Li and Antoni B Chan. 3d human pose estima-
+tion from monocular images with deep convolutional
+neural network. In ACCV, 2014. 6
+
+[12] David A Forsyth, Okan Arikan, and Leslie Ikemoto.
+Computational Studies of Human Motion: Tracking
+and Motion Synthesis. Now Publishers Inc, 2006. 1
+
+[25] Sijin Li, Weichen Zhang, and Antoni B. Chan.
+Maximum-margin structured learning with deep net-
+works for 3d human pose estimation. In IEEE Inter-
+
+5722
+
+national Conference on Computer Vision (ICCV), De-
+cember 2015. 2
+
+[26] Julieta Martinez, Rayat Hossain, Javier Romero, and
+James Little. A simple yet effective baseline for 3d
+human pose estimation. In ICCV, 2017. 2, 5, 6
+
+[27] Dushyant Mehta, Helge Rhodin, Dan Casas, Pascal
+Fua, Oleksandr Sotnychenko, Weipeng Xu, and Chris-
+tian Theobalt. Monocular 3d human pose estimation
+in the wild using improved cnn supervision. In 3D Vi-
+sion (3DV), 2017 Fifth International Conference on.
+IEEE, 2017. 2, 6
+
+[28] Thomas B Moeslund and Erik Granum. A survey of
+computer vision-based human motion capture. Com-
+puter Vision and Image Understanding, 2001. 1
+
+[29] Francesc Moreno-Noguer. 3d human pose estimation
+from a single image via distance matrix regression.
+In IEEE Conference on Computer Vision and Pattern
+Recognition (CVPR), July 2017. 2
+
+[30] Alejandro Newell, Kaiyu Yang, and Jia Deng. Stacked
+hourglass networks for human pose estimation. In Eu-
+ropean Conference on Computer Vision, pages 483–
+499. Springer, 2016. 2, 4, 6
+
+[31] Joseph O’Rourke and Norman I Badler. Model-
+based image analysis of human motion using con-
+straint propagation.
+IEEE Transactions on Pattern
+Analysis and Machine Intelligence, 1980. 1
+
+[32] Sungheon Park, Jihye Hwang, and Nojun Kwak. 3d
+human pose estimation using convolutional neural net-
+works with 2d pose information. In European Confer-
+ence on Computer Vision, pages 156–169. Springer,
+2016. 2
+
+[33] Sungheon Park and Nojun Kwak. 3d human pose es-
+timation with relational networks. In BMVC, 2018. 2
+
+[34] Georgios Pavlakos, Xiaowei Zhou, Konstantinos G.
+Derpanis, and Kostas Daniilidis. Coarse-to-ﬁne vol-
+umetric prediction for single-image 3d human pose.
+In CVPR, July 2017. 2
+
+[35] Umer Raﬁ, Juergen Gall, and Bastian Leibe. A seman-
+tic occlusion model for human pose estimation from a
+single depth image. In Proceedings of the IEEE Con-
+ference on CVPR Workshops, 2015. 1
+
+[36] Helge Rhodin, Mathieu Salzmann, and Pascal Fua.
+Unsupervised geometry-aware representation for 3D
+human pose estimation.
+In European Conference of
+Computer Vision, 2018. 3, 6, 7
+
+[37] Helge Rhodin, J¨org Sp¨orri, Isinsu Katircioglu, Vic-
+tor Constantin, Fr´ed´eric Meyer, Erich M¨uller, Mathieu
+Salzmann, and Pascal Fua. Learning monocular 3d hu-
+man pose estimation from multi-view images. In Pro-
+ceedings of the IEEE Conference on Computer Vision
+and Pattern Recognition, pages 8437–8446, 2018. 3
+
+[38] Gregory Rogez, Philippe Weinzaepfel, and Cordelia
+Localization-classiﬁcation-
+Schmid.
+regression for human pose.
+In IEEE Conference on
+Computer Vision and Pattern Recognition (CVPR),
+July 2017. 2
+
+Lcr-net:
+
+[39] Matteo Ruggero Ronchi, Oisin Mac Aodha, Robert
+Eng, and Pietro Perona. It’s all relative: Monocular 3d
+human pose estimation from weakly supervised data.
+In BMVC, 2018. 3
+
+[40] Jamie Shotton, Toby Sharp, Alex Kipman, Andrew
+Fitzgibbon, Mark Finocchio, Andrew Blake, Mat
+Cook, and Richard Moore. Real-time human pose
+recognition in parts from single depth images. Com-
+munications of the ACM, 2013. 1
+
+[41] Xiao Sun, Jiaxiang Shang, Shuang Liang, and Yichen
+Wei. Compositional human pose regression. In Pro-
+ceedings of the IEEE International Conference on
+Computer Vision, pages 2602–2611, 2017. 3
+
+[42] Bugra Tekin, Pablo Marquez-Neila, Mathieu Salz-
+mann, and Pascal Fua. Learning to fuse 2d and 3d im-
+age cues for monocular body pose estimation. In IEEE
+International Conference on Computer Vision (ICCV),
+Oct 2017. 2
+
+[43] Bugra Tekin, Artem Rozantsev, Vincent Lepetit, and
+Pascal Fua. Direct prediction of 3d body poses from
+motion compensated sequences.
+In Proceedings of
+the IEEE Conference on Computer Vision and Pattern
+Recognition, pages 991–1000, 2016. 1, 6
+
+[44] Denis Tome, Chris Russell, and Lourdes Agapito.
+Lifting from the deep: Convolutional 3d pose esti-
+mation from a single image.
+In IEEE Conference
+on Computer Vision and Pattern Recognition (CVPR),
+July 2017. 3
+
+[45] Shashank Tripathi,
+
+Siddhartha Chandra, Amit
+Agrawal, Ambrish Tyagi,
+James M. Rehg, and
+Visesh Chari. Learning to generate synthetic data via
+compositing. In Proceedings of the IEEE Conference
+on Computer Vision and Pattern Recognition, 2019. 3
+
+[46] Min Wang, Xipeng Chen, Wentao Liu, Chen Qian,
+Liang Lin, and Lizhuang Ma. Drpose3d: Depth rank-
+ing in 3d human pose estimation. In Proceedings of
+the Twenty-Seventh International Joint Conference on
+Artiﬁcial Intelligence, IJCAI 2018, July 13-19, 2018,
+Stockholm, Sweden., pages 978–984, 2018. 3
+
+[47] Shih-En Wei, Varun Ramakrishna, Takeo Kanade, and
+In
+
+Yaser Sheikh. Convolutional pose machines.
+CVPR, pages 4724–4732, 2016. 2, 4, 6
+
+[48] J. Wu, T. Xue, J. J. Lim, Y. Tian, J. B. Tenenbaum, A.
+Torralba, and W. T. Freeman. Single image 3d inter-
+preter network. In ECCV, pages 365–382, 2016. 3,
+6
+
+5723
+
+[49] Bruce Xiaohan Nie, Ping Wei, and Song-Chun Zhu.
+Monocular 3d human pose estimation by predicting
+depth on joints. In IEEE International Conference on
+Computer Vision (ICCV), Oct 2017. 2
+
+[50] Wei Yang, Wanli Ouyang, Xiaolong Wang, Jimmy
+S. J. Ren, Hongsheng Li, and Xiaogang Wang. 3D hu-
+man pose estimation in the wild by adversarial learn-
+ing. In IEEE Conference on Computer Vision and Pat-
+tern Recognition (CVPR), July 2018. 3
+
+[51] Hashim Yasin, Umar Iqbal, Bjorn Kruger, Andreas
+Weber, and Juergen Gall. A dual-source approach for
+3d pose estimation from a single image. In IEEE Con-
+ference on Computer Vision and Pattern Recognition
+(CVPR), June 2016. 2, 7
+
+[52] Ho Yub Jung, Soochahn Lee, Yong Seok Heo, and Il
+Dong Yun. Random tree walk toward instantaneous
+3d human pose estimation. In CVPR, 2015. 1
+
+[53] Xingyi Zhou, Qixing Huang, Xiao Sun, Xiangyang
+Xue, and Yichen Wei. Towards 3d human pose esti-
+mation in the wild: a weakly-supervised approach. In
+IEEE International Conference on Computer Vision,
+2017. 3, 6
+
+[54] Xiaowei Zhou, Menglong Zhu, Spyridon Leonar-
+dos, Konstantinos G. Derpanis, and Kostas Daniilidis.
+Sparseness meets deepness: 3d human pose estima-
+tion from monocular video. In CVPR, 2016. 1, 3, 6
+
+[55] Xiaowei Zhou, Menglong Zhu, Georgios Pavlakos,
+Spyridon Leonardos, Kostantinos G Derpanis, and
+Kostas Daniilidis. Monocap: Monocular human mo-
+tion capture using a cnn coupled with a geometric
+prior. IEEE Transactions on Pattern Analysis and Ma-
+chine Intelligence, 2018. 3
+
+[56] Jun-Yan Zhu, Taesung Park, Phillip Isola, and
+Alexei A. Efros. Unpaired image-to-image translation
+using cycle-consistent adversarial networks. In ICCV,
+2017. 3
+
+5724
+
+

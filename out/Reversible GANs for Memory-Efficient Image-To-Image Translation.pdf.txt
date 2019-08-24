@@ -1,0 +1,1294 @@
+Reversible GANs for Memory-efﬁcient Image-to-Image Translation
+
+Tycho F.A. van der Ouderaa
+
+Daniel E. Worrall
+
+University of Amsterdam
+
+University of Amsterdam
+
+tychovdo@gmail.com
+
+d.e.worrall@uva.nl
+
+Abstract
+
+The Pix2pix [15] and CycleGAN [31] losses have vastly
+improved the qualitative and quantitative visual quality of
+results in image-to-image translation tasks. We extend this
+framework by exploring approximately invertible architec-
+tures which are well suited to these losses. These architec-
+tures are approximately invertible by design and thus par-
+tially satisfy cycle-consistency before training even begins.
+Furthermore, since invertible architectures have constant
+memory complexity in depth, these models can be built ar-
+bitrarily deep. We are able to demonstrate superior quan-
+titative output on the Cityscapes and Maps datasets at near
+constant memory budget.
+
+1. Introduction
+
+Computer vision was once considered to span a great
+many disparate problems, such as superresolution [11], col-
+orization [7], denoising and inpainting [29], or style transfer
+[12]. Some of these challenges border on computer graph-
+ics (e.g. style transfer), while others are more closely related
+to numerical problems in the sciences (e.g. superresolution
+of medical images [28]). With the new advances of modern
+machine learning, many of these tasks have been uniﬁed
+under the term of image-to-image translation [15].
+
+Mathematically, given two image domains X and Y , the
+task is to ﬁnd or learn a mapping F : X → Y , based
+on either paired examples {(xi, yi)} or unpaired examples
+{xi} ∪ {yj}. Let’s take the example of image superreso-
+lution. Here X may represent the space of low-resolution
+images, and Y would represent the corresponding space
+of high-resolution images. We might equivalently seek to
+learn a mapping G : Y → X. To learn both F and
+G it would seem sufﬁcient to use the standard supervised
+learning techniques on offer, using convolutional neural net-
+works (CNNs) for F and G. For this, we require paired
+training data and a loss function ℓ to measure performance.
+In the absence of paired training data, we can instead exploit
+the reciprocal relationship between F and G. Note how we
+expect the compositions G ◦ F ≃ Id and F ◦ G ≃ Id,
+
+where Id is the identity. This property is known as cycle-
+consistency [31]. The unpaired training objective is then to
+minimize ℓ(G◦F (x), x) or ℓ(F ◦G(y), y) with respect to F
+and G, across the whole training set. Notice how in both of
+these expressions, we never require explicit pairs (xi, yi).
+Naturally, in superresolution exact equality to the identity is
+impossible, because the upsampling task F is one-to-many,
+and the downsampling task G is many-to-one.
+
+The problem with the cycle-consistency technique is that
+while we can insert whatever F and whatever G we deem
+appropriate into the model, we avoid making use of the fact
+that F and G are approximate inverses of one another. In
+this paper, we consider constructing F and G as approxi-
+mate inverses, by design. This is not a replacement to cycle-
+consistency, but an adjunct to it. A key beneﬁt of this is that
+we need not have a separate X → Y and Y → X map-
+ping, but just a single X → Y model, which we can run in
+reverse to approximate Y → X. Furthermore, note by ex-
+plicitly weight-tying the X → Y and Y → X models, we
+can see that training in the X → Y direction will also train
+the reverse Y → X direction, which does not necessarily
+occur with separate models. Lastly, there is also a compu-
+tational beneﬁt that invertible networks are very memory-
+efﬁcient [13]; intermediate activations do not need to be
+stored to perform backpropagation. As a result, invertible
+networks can be built arbitrarily deep, while using a ﬁxed
+memory-budget—this is relevant because recent work has
+suggested a trend of wider and deeper networks perform-
+ing better in image generation tasks [4]. Furthermore, this
+enables dense pixel-wise translation models to be shifted to
+memory-intensive arenas, such as 3D (see Section 5.3 for
+our experiements on dense MRI superresolution).
+
+Our results indicate that by using invertible networks
+as the central workhorse in a paired or unpaired image-to-
+image translation model such as Pix2pix [15] or CycleGAN
+[31], we can not only reduce memory overhead, but also
+increase ﬁdelity of the output. We demonstrate this on the
+Cityscapes and Maps datasets in 2D and on a diffusion ten-
+sor image MRI dataset for the 3D scenario (see Section 5).
+
+14720
+
+2. Background and Related Work
+
+In this section, we recap the basics behind Generative
+Adversarial Networks (GANs), cycle-consistency, and re-
+versible/invertible networks.
+
+2.1. Generative Adversarial Networks (GANs)
+
+Generative adversarial networks (GANs) [14] enjoy
+huge success in tasks such as image generation [4], image
+interpolation [17], and image re-editing [26]. They consist
+of two components, a generator F : Z → Y mapping ran-
+dom noise z ∈ Z to images y ∈ Y and a discriminator
+D : Y → [0, 1] mapping images y ∈ Y to probabilities.
+Given a set of training images {y1, y2, ...}, the generator
+produces ‘fake’ images y∗ = F (z), z ∼ p(z), where p(z)
+is a simple distribution such as a standard Gaussian, and the
+discriminator tries to predict the probability that the image
+was from the true image distribution. For training, an ad-
+versarial loss LGAN is deﬁned:
+LGAN(F, D) = Ey log D(y) + Ez log(1 − D(F (z))) (1)
+This loss is trained using a minimax regime where intu-
+itively we encourage the generator to fool the discrimina-
+tor, while also training the discriminator to guess whether
+the generator created an image or not. Mathematically this
+game [14] is
+
+F ∗ = arg min
+
+F
+
+max
+
+D
+
+LGAN(F, D).
+
+(2)
+
+At test time, the discriminator is discarded and the trained
+generator is used to hallucinate fake images from the same
+distribution [2] as the training set. The generator can be
+conditioned on an input image as well. This setup is called
+a conditional GAN [24].
+
+This was ﬁrst performed in the Pix2pix model [15], which
+is for paired image-to-image translation problems. Pix2pix
+replaces F with a conditional generator F : X × Z → Y ,
+where Z is the domain of the random noise; although, in
+practice, we usually ignore the additional noise input [31].
+The model combines a L1-loss that enforces the model to
+map images to the paired translations in a supervised man-
+ner with an adversarial loss that enforces the model to adopt
+the style of the target domain. The loss is
+
+F ∗ = arg min
+
+F
+
+max
+
+D
+
+LcGAN(F, D) + λLL1(F )
+
+(4)
+
+where
+
+LL1(F ) = Ex,yky − F (x)k1
+
+(5)
+
+LcGAN(F, D) = Ex [log D(x) + log(1 − D(F (x))] .
+λ is a tuneable hyperparameter typically set in the range
+10 − 100 [15].
+2.3. Cycle consistency
+
+(6)
+
+The CycleGAN model was proposed as an alternative
+to Pix2pix for unpaired domains [31]. The model uses
+two generators F and G for the respective mappings be-
+tween the two domains X and Y (so, F : X → Y and
+G : Y → X), and two discriminators DX : X → [0, 1] and
+DY : Y → [0, 1] trained to distinguish real and generated
+images in both domains. Since there are no image pairings
+between domains, we cannot invoke the Pix2pix loss and in-
+stead CycleGAN uses a separate cycle-consistency loss that
+penalizes the distances Lcycle(G, F, x) = kG ◦ F (x) − xk1
+and Lcycle(F, G, y) = kF ◦ G(y) − yk1 across the training
+set. This encourages that the mappings F and G are loose
+inverses of one another. This allows the model to train on
+unpaired data. The total loss is
+
+2.2. Image to Image Translation
+
+LcycleGAN = LcGAN(F, DY ) + LcGAN(G, DX )
+
+In a standard (paired) image-to-image translation prob-
+lem [15], we seek to learn the mapping F : X → Y , where
+X and Y are corresponding spaces of images. It is natural
+to model F with a convolutional neural network (CNN). To
+train this CNN we minimize a loss function
+
+L(F ) =
+
+1
+n
+
+n
+
+X
+
+i=1
+
+ℓ(F (xi), yi)
+
+(3)
+
+where ℓ is a loss function deﬁned in the pixel-space between
+the prediction F (xi) and the target yi. Traditional image-
+to-image translation tasks relying on pixel-level loss func-
+tions are hampered by the fact that these losses do not typ-
+ically account for inter-pixel correlations [30], for instance,
+L1-losses treat each pixel as independent.
+Instead, since
+GANs do not apply the loss per-pixel, they can account for
+these inter-pixel correlational structures. GANs can be co-
+opted for image-to-image translation by adding the adver-
+sarial loss on top of a standard pixel-level L1 loss function.
+
++ ExLcycle(G, F, x) + EyLcycle(F, G, y). (7)
+
+Given that F and G are loose inverses of one another, it
+seems wasteful to use separate models to model each. In
+this paper, we model F and G as approximate inverses of
+one another. For this, we make use of the new area of in-
+vertible neural networks.
+
+2.4. Invertible Neural Networks (INNs)
+
+In recent years, several studies have proposed invertible
+neural networks (INNs) in the context of normalizing ﬂow-
+based methods [27] [20]. It has been shown that INNs are
+capable of generating high quality images [19], perform
+image classiﬁcation without information loss in the hidden
+layers [16] and analyzing inverse problems [1]. Most of the
+work on INNs, including this study, heavily relies upon the
+transformations introduced in NICE [9] later extended in
+RealNVP [10]. Although INNs share interesting properties
+they remain relatively unexplored.
+
+4721
+
+x1
+
+x2
+
++
+
+y1
+
+x1
+
+−
+
+NN1
+
+NN2
+
+NN1
+
+NN2
+
++
+
+y2
+
+x2
+
+(a)
+
+−
+
+(b)
+
+y1
+
+y2
+
+Figure 1. Illustration of forward (a) and backward (b) pass of a
+residual block in a reversible residual layer. Note, functions NN1
+and NN2 need not be invertible, hence the layer is very ﬂexible and
+in practical terms very easy to implement.
+
+Additive Coupling
+In our model, we obtain an invertible
+residual layer, as used in [13], using a technique called addi-
+tive coupling [9]: ﬁrst we split an input x (typically over the
+channel dimension) into (x1, x2) and then transform them
+using arbitrary complex functions NN1 and NN2 (such as a
+ReLU-MLPs) in the form (left):
+
+y1 = x1 + NN1(x2)
+
+y2 = x2 + NN2(y1)
+
+x1 = y1 − NN1(x2)
+x2 = y2 − NN2(y1).
+
+(8)
+
+(9)
+
+The inverse mappings can be seen on the right. Figure 1
+
+shows a schematic of these equations.
+
+Memory efﬁciency
+Interestingly, invertible residual lay-
+ers are very memory-efﬁcient because intermediate acti-
+vations do not have to be stored to perform backpropaga-
+tion [13]. During the backward pass, input activations that
+are required for gradient calculations can be (re-)computed
+from the output activations because the inverse function is
+accessible. This results in a constant spatial complexity
+(O(1)) in terms of layer depth (see Table 1).
+3. Method
+
+Our goal is to create a memory-efﬁcient image-to-image
+translation model, which is approximately invertible by de-
+sign. Below we describe the basic outline of our approach
+of how to create an approximately-invertible model, which
+can be inserted into the existing Pix2pix and CycleGAN
+frameworks. We call our model RevGAN.
+
+Technique
+
+Spatial Complexity
+(Activations)
+O(L)
+Naive
+O(√L)
+Checkpointing [22]
+O(log L)
+Recursive [6]
+Additive Coupling [13] O(1)
+Table 1. Comparison of Spatial and Computational Complexity
+copied from [13]. L denotes number of residual layers. Notice
+how the spatial complexity of additive coupling is O(1) versus
+O(L) for a naive implementation.
+
+Computational
+Complexity
+O(L)
+O(L)
+O(L log L)
+O(L)
+
+Lifting and Projection In general, image-to-image trans-
+lation tasks are not one-to-one. As such, a fully invertible
+treatment is undesirable, and sometimes in the case of di-
+mensionality mismatches, impossible. Furthermore, it ap-
+pears that the high-dimensional, overcomplete representa-
+tions used by most modern networks lead to faster train-
+ing [25] and better all-round performance [4]. We therefore
+split the forward F : X → Y and backward G : Y → X
+mappings into three components. With each domain, X
+and Y , we associate a high-dimensional feature space ˜X
+and ˜Y , respectively. There are individual, non-invertible
+mappings between each image space and its correspond-
+ing high-dimensional feature-space; for example, for image
+
+space X we have EncX : X → ˜X and DecX : ˜X → X.
+
+EncX lifts the image into a higher dimensionality space
+and DecX projects the image back down into the low-
+dimensional image space. We have used the terms encode
+and decode in place of ‘lifting’ and ‘projection’ to stay in
+line with the deep learning literature.
+
+Invertible core Between the feature spaces, we then place
+
+an invertible core C : ˜X → ˜Y , so the full mappings are
+
+F = DecY ◦ C ◦ EncX
+G = DecX ◦ C −1 ◦ EncY .
+
+(10)
+
+(11)
+
+For the invertible cores we use invertible residual networks
+based on additive coupling as in [13]. The full mappings F
+and G will only truly be inverses if EncX ◦ DecX = Id and
+EncY ◦ DecY = Id, which cannot be true, since the image
+spaces are lower dimensional than the feature spaces. In-
+stead, these units are trained to be approximately invertible
+pairs via the end-to-end cycle-consistency loss. Since the
+encoder and decoder are not necessarily invertible they can
+consist of non-invertible operations, such as pooling and
+strided convolutions.
+
+Because both the core C and its inverse C −1 are dif-
+ferentiable functions (with shared parameters), both func-
+tions can both occur in the forward-propagation pass and
+Indeed, training C will also
+are trained simultaneously.
+train C −1 and vice versa. The invertible core essentially
+weight-ties in the X → Y and Y → X directions.
+Given that we use the cycle-consistency loss it may be
+asked, why do we go to the trouble of including an invert-
+ible network? The reason is two-fold: ﬁrstly, while image-
+to-image translation is not a bijective task, it is close to bi-
+jective. A lot of the visual information in an image x should
+reappear in its paired image y, and by symmetry a lot of the
+visual information in the image y should appear in x.
+It
+thus seems sensible that the networks F and G should be at
+least initialized, if not loosely coupled to be weak inverses
+of one another. If the constraint of bijection is too high, then
+the models can learn to diverge from bijection via the non-
+
+4722
+
+DX
+
+X
+
+EncX
+
+DecX
+
+˜X
+
+C
+
+C −1
+
+˜Y
+
+DecY
+
+EncY
+
+DY
+
+Y
+
+Figure 2. Schematic of our RevGAN model. Between the low-dimensional image spaces X and Y and their corresponding high-
+dimensional feature spaces ˜X and ˜Y we place non-invertible encoder and decoder networks EncX , DecX , EncY and DecY . The feature
+spaces ˜X and ˜Y are of the same dimension, and between them we place an invertible core network C. We also attach to each image space,
+X and Y a domain-speciﬁc discriminator, which is used for training with the adversarial loss.
+
+invertible encoders and decoders. Secondly, there is a po-
+tent argument for using memory efﬁcient networks in these
+memory-expensive, dense, pixel-wise regression tasks. The
+use of two separate reversible networks is indeed a possi-
+bility for both F and G. These would both have constant
+memory complexity in depth. Rather than having two net-
+works, we can further reduce the memory budget by a rough
+factor of about two by exploiting the loose bijective prop-
+erty of the task, sharing the X → Y and Y → X models.
+
+Paired RevGAN We train our paired, reversible, image-
+to-image translation model, using the standard Pix2pix loss
+functions of Equation 4 from [15], applied in the X → Y
+and Y → X directions:
+LRevGANpaired = λ(LL1(F ) + LL1(G))
+
++ LcGAN(F, DY ) + LcGAN(G, DX ) (12)
+
+We also experimented with extra input noise for the condi-
+tional GAN, but found it not to help.
+
+Unpaired RevGAN For unpaired RevGAN, we adapt the
+loss functions of the CycleGAN model [31], by replacing
+the L1 loss with a cycle-consistency loss, so the total objec-
+tive is:
+
+from [31], by replacing the inner convolutions with a re-
+versible core. The core consists of 6 or 9 reversible residual
+layers, dependent on the dataset—we use 6 reversible resid-
+ual layers for the core on 128 × 128 (Cityscapes) data and
+9 reversible residual layers on 256 × 256 (Maps) data. A
+more detailed description of the network architectures can
+be found in the supplementary material. In 3D, we use an
+architecture based on the SRCNN of [11] (more details in
+supplementary material).
+
+Training details All model parameters were initialized
+from a Gaussian distribution with mean 0 and standard de-
+viation 0.02. For training we used the Adam optimizer [18]
+with a learning rate of 0.0002 (and β1 = 0.5, β2 = 0.999).
+We keep the learning rate ﬁxed for the ﬁrst 100 epochs and
+then linearly decay the learning rate to zero over the next
+100 epochs, for the 2D models. The 3D models are trained
+with a ﬁxed learning rate for 20 epochs. We used a λ factor
+of 10 for the unpaired models and a λ factor of 100 for the
+paired models.
+
+4.2. Datasets
+
+We run tests on two 2D datasets and one 3D dataset. All
+three datasets have paired X and Y domain images, and we
+can thus extract quantitative evaluations of image ﬁdelity.
+
+LRevGANunpaired = LcGAN(F, DY ) + LcGAN(G, DX )
+
++ ExLcycle(G, F, x) + EyLcycle(F, G, y).
+
+(13)
+
+4. Implementation and datasets
+
+The model we describe is very general and so below we
+explain in more detail the speciﬁcs of how to implement our
+paired and unpaired RevGAN models. We present 2D and
+3D versions of the reversible models.
+
+4.1. Implementation
+
+Network Architectures We use two main varieties of ar-
+chitecture. On the 2D problems, we modify the ResNet
+
+Cityscapes The Cityscapes dataset [8] is comprised of ur-
+ban street scenes with high quality pixel-level annotations.
+For comparison purposes, we used the same 2975 image
+pairs as used in [31] for training and the validation set for
+testing. All images were downsampled to 128 × 128.
+For evaluation, we adopt commonly used semantic seg-
+mentation metrics: per-pixel accuracy, per-class accu-
+racy and class intersection-over-union. The outputs of
+photo→label mappings can directly be evaluated. For the
+reverse mapping, label→photo, we use the FCN-Score [31],
+by ﬁrst passing our generated images through a FCN-8s se-
+mantic segmentation model [21] separately trained on the
+same segmentation task. We then measure the quality of the
+
+4723
+
+Input
+
+CycleGAN
+
+Unpaired RevGAN (ours)
+
+Pix2pix
+
+Paired RevGAN (ours)
+
+Figure 3. Test set image mappings on the Cityscapes dataset for the CycleGAN and Pix2pix models, compared to our reversible variants.
+TOP: The photo→label mapping. BOTTOM: The label→photo mapping. Notice how in the greatest improvement is between the Cycle-
+GAN and our unpaired RevGAN variant; whereas, both the Pix2pix and paired RevGAN models are of comparative visual ﬁdelity. More
+results can be found in the supplementary material.
+
+obtained segmentation masks using the same classiﬁcation
+metrics. The intuition behind this (pseudo-)metric is that
+the segmentation model should perform well if images gen-
+erated by the image-to-image translation model are of high
+quality.
+
+Maps The Maps dataset contains 1096 training images
+and an equally sized test set carefully scraped from Google
+Maps in and around New York City by [15]. The images in
+this dataset are downsampled to 256 × 256.
+We evaluate the outputs with several commonly used
+metrics for image-quality: mean absolute error (MAE),
+peak signal-to-noise ratio (PSNR) and the structural sim-
+ilarity index (SSIM).
+
+HCP Brains The Human Connectome Project dataset
+consists of 15 128 × 128 × 128 brain volumes, of which
+7 volumes are used for training. The value of each voxel is
+a 6D vector representing the 6 free components of a 3 × 3
+symmetric diffusion tensor (used to measure water diffusiv-
+ity in the brain). The brains are separated into high and low
+resolution versions. The low resolution images were up-
+sampled using 2× nearest neighbour so the input and output
+equal in size. This is a good task to trial on, since superres-
+olution in 3D is a memory intensive task. For training, we
+split the brain volumes into patches of size 24 × 24 × 24
+
+omitting patches with less than 1% brain matter, resulting
+in an average of 112 patches per volume.
+
+We evaluate on full brain volumes with the root mean
+squared error (RMSE) between voxels containing brain
+matter in the ground-truth and the up-sampled volumes. We
+also calculate the error on the interior of the brain, deﬁned
+by all voxels that are surrounded with a 5 × 5 cube within
+the full brain mask, to stay in line with prior literature [28]
+[3].
+
+5. Results
+
+In this section, we evaluate the performance of our paired
+and unpaired RevGAN model, both quantitatively and qual-
+itatively, against Pix2pix and CycleGAN baselines. Addi-
+tionally, we study the scalability of our method in terms of
+memory-efﬁciency and model depth. For easy comparison,
+we aim to use the same metrics as used in related literature.
+
+5.1. Qualitative Evaluation
+
+We present qualitative results of the RevGAN model on
+the Maps dataset in Figure 4 and on the Cityscapes dataset
+in Figure 3. We picked the ﬁrst images in the dataset to
+avoid ‘cherry-picking’ bias. The images are generated by
+models with equal parameter counts, indicated with a ‘†’
+symbol in the quantitative results of the next section (Table
+4, Table 2).
+
+Model
+
+Width
+
+Params
+
+Per-pixel acc.
+
+CycleGAN (baseline)†
+Unpaired RevGAN
+Unpaired RevGAN†
+Pix2pix (baseline)†
+Paired RevGAN
+Paired RevGAN†
+
+32
+32
+56
+32
+32
+56
+
+3.9 M 0.60
+1.3 M 0.52
+3.9 M 0.66
+3.9 M 0.82
+1.3 M 0.81
+3.9 M 0.82
+
+photo→label
+Per-class acc. Class IOU
+0.27
+0.21
+0.25
+0.43
+0.41
+0.44
+
+0.19
+0.14
+0.18
+0.32
+0.31
+0.33
+
+Per-pixel acc.
+0.42
+0.36
+0.65
+0.61
+0.57
+0.60
+
+label→photo
+Per-class acc. Class IOU
+0.15
+0.14
+0.24
+0.22
+0.20
+0.21
+
+0.10
+0.09
+0.17
+0.16
+0.15
+0.16
+
+Table 2. CENTER Classiﬁcation scores on Cityscapes photo→label. RIGHT FCN-scores on Cityscapes label→photo. TOP Unpaired
+models. BOTTOM Paired models. Bold numbers indicate where the best model in that section. Notice that in the sections where the
+baseline beats our model, the differences in values are only very small. † Parameter matched architectures
+
+4724
+
+Input
+
+CycleGAN
+
+Unpaired RevGAN (ours)
+
+Pix2pix
+
+Paired RevGAN (ours)
+
+Ground-truth
+
+Figure 4. Test set image mappings on the Maps dataset. We see from this panel of images that there is no obvious degradation in the quality
+of the translated images between the baselines (Pix2pix and CycleGAN) and the reversible variants.
+
+All models are able to produce images of similar or bet-
+ter visual quality. The greatest improvement can be seen
+in the unpaired model (compare CycleGAN with Unpaired
+RevGAN). Both paired tasks are visually more appealing
+than the unpaired tasks, which make intuitive sense, since
+paired image-to-image translation is an easier task to solve
+than the unpaired version. We therefore conclude that the
+RevGAN model does not seem to under-perform our non-
+reversible baselines in terms of observable visual quality. A
+more extensive collection of model outputs can be found in
+the supplementary material.
+
+5.2. Quantitative Evaluation
+
+Cityscapes We provide quantitative evaluations of the
+performance of our RevGAN model on the Cityscapes
+dataset. To ensure fairness, the baselines use the code im-
+plementations from the original papers. For our model,
+we provide two versions, a low parameter count version
+and a parameter matched version . In Table 2 the perfor-
+
+Model
+Paired w/o LGAN (3D-SRCNN)
+Paired+2R w/o LGAN
+Paired+4R w/o LGAN
+Paired+8R w/o LGAN
+Paired (3D-Pix2pix)
+Paired+2R
+Paired+4R
+Paired+8R
+Unpaired (3D-CycleGAN)
+Unpaired+2R
+Unpaired+4R
+Unpaired+8R
+
+RMSE (Interior) RMSE (Total)
+12.41 ± 0.57
+12.41 ± 0.57
+11.85 ± 0.56
+21.40 ± 0.98
+20.73 ± 1.05
+17.36 ± 0.76
+14.81 ± 0.61
+13.76 ± 0.60
+26.94 ± 1.20
+17.76 ± 1.38
+28.06 ± 1.44
+27.94 ± 1.09
+
+7.03 ± 0.31
+7.02 ± 0.32
+6.68 ± 0.30
+18.43 ± 1.03
+11.94 ± 0.65
+9.61 ± 0.40
+8.43 ± 0.37
+7.82 ± 0.35
+17.23 ± 0.73
+11.05 ± 0.51
+18.98 ± 1.22
+18.96 ± 0.85
+
+Table 3. Mean and standard deviation of RMSE scores measured
+on the 8 brains in the HPC Brains test set. Notice how in each ex-
+periment that the shallowest model is the not the highest perform-
+ing. We are able to improve performance, by using deeper models
+at the same level of memory complexity as shallow models.
+
+mance on the photo→label mapping is given by segmenta-
+tion scores in the center columns and the performance on
+the label→photo is given by the FCN-Scores in the right-
+hand columns.
+In Table 2, we see that on the low parameter and param-
+eter matched RevGAN models outperform the CycleGAN
+baselines on the per-pixel accuracy. This matches our qual-
+itative observations from the previous section. For per-class
+and class IOU, we also beat the baseline on label→photo,
+and from similar or marginally worse on the photo→label
+task.
+On the paired tasks we see that the results are more
+mixed and we perform roughly similar to the Pix2pix base-
+line, again matching our qualitative observations. We pre-
+sume that the paired task is already fairly easy and thus
+the baseline performance is saturated. Thus introducing
+our model will do nothing to improve the visual quality
+of outputs. On the other hand, the unpaired task is harder
+and so the provision of by-design, approximately-inverse
+photo→label and label→photo generators improves visual
+quality. On the paired task, the main beneﬁt comes in the
+form of the memory complexity (see Section 5.4), but on
+the unpaired task the RevGAN maintains low memory com-
+plexity, while generally improving numerical performance.
+
+Maps Results on the Maps dataset are shown in Table 4,
+which indicate that the RevGAN model performs similarly
+and sometimes better compared to the baselines. Again,
+similarly to the Cityscapes experiment, we see that the
+biggest improvements are found on the unpaired tasks;
+whereas, the paired tasks demonstrate comparable perfor-
+mance.
+
+5.3. 3D Volumes
+
+We also evaluate the performance of our RevGAN model
+on a 3D super-resolution problem, using the HTC Brains
+
+4725
+
+MAE
+
+Width
+
+Model
+
+CycleGAN †
+Unpaired RevGAN
+Unpaired RevGAN †
+Unpaired RevGAN
+Pix2pix †
+Paired RevGAN
+Paired RevGAN †
+Paired RevGAN
+
+SSIM
+0.81 ± 0.06
+0.81 ± 0.06
+0.80 ± 0.08
+0.67 ± 0.10
+0.82 ± 0.04
+0.81 ± 0.05
+0.82 ± 0.05
+0.82 ± 0.04
+Table 4. Image quality on Maps dataset. Notice how in most of the experiments that the RevGAN performs better than the baseline. †
+Parameter matched architectures
+
+Params
+5.7 M 139.85 ± 15.52
+1.7 M 133.57 ± 18.09
+5.6 M 134.63 ± 14.25
+6.8 M 135.48 ± 19.19
+5.7 M 139.63 ± 13.14
+1.7 M 139.23 ± 12.76
+5.6 M 140.74 ± 12.45
+6.8 M 140.59 ± 13.64
+
+MAE
+138.86 ± 20.57
+142.56 ± 18.94
+148.98 ± 16.83
+133.12 ± 17.18
+129.16 ± 16.11
+129.80 ± 15.54
+128.55 ± 12.71
+133.09 ± 12.09
+
+SSIM
+0.31 ± 0.05
+0.31 ± 0.05
+0.30 ± 0.06
+0.26 ± 0.04
+0.30 ± 0.05
+0.30 ± 0.05
+0.31 ± 0.05
+0.31 ± 0.06
+
+satellite→maps
+PSNR
+26.25 ± 3.64
+26.23 ± 3.89
+25.47 ± 4.27
+23.66 ± 2.80
+27.11 ± 3.11
+26.84 ± 3.35
+27.27 ± 3.12
+27.37 ± 3.06
+
+maps→satellite
+PSNR
+14.62 ± 1.16
+14.59 ± 0.96
+14.54 ± 1.09
+14.55 ± 1.24
+14.78 ± 1.08
+14.73 ± 1.07
+14.91 ± 1.13
+14.85 ± 1.20
+
+32
+32
+58
+64
+32
+32
+58
+64
+
+dataset of [28]. As baseline, we use a simple SRCNN model
+[11] (see supplementary material for architectural details)
+consisting of a 3 × 3 × 3 convolutional layer as encoder,
+followed by a 1 × 1 × 1 convolutional layer as decoder. For
+the discriminator, we use a 3D variant of the PatchGAN also
+used in [31]. The RevGAN model, extends the architecture
+by inserting an invertible core between the encoder and the
+decoder.
+
+As can be seen in Figure 5, we obtain higher quality re-
+sults using models with additional reversible residual lay-
+ers. Of course, it is not unusual that deeper models result in
+higher quality predictions. Increasing the model size, how-
+ever, is often unfeasible due to memory constraints. Fitting
+the activations in GPU memory can be particularly difﬁcult
+when dealing with large 3D volumes. This study suggests
+that we can train deeper neural image-to-image translation
+models by adding reversible residual layers to existing ar-
+chitectures, without requiring more memory to store model
+activations.
+
+With and without adversarial loss We performed the ex-
+periments on paired models with and without the adverarial
+loss LGAN . We found that models without such loss gener-
+ally perform better in terms of pixel-distance, but that mod-
+els with an adversarial loss typically obtain higher quality
+results upon visual inspection. A possible explanation of
+
+this phenomenon could be that models that solely minimize
+a pixel-wise distance, such as L1 or L2, tend to ‘average
+out’ or blur the aleatoric uncertainty (natural diversity) that
+exists in the data, in order to obtain a low average loss. An
+adversarial loss enforces the model to output an image that
+could have been sampled from this uncertain distribution
+(thereby introduce realistic looking noise), often resulting
+in less blurry and visually more compelling renderings, but
+with a potentially higher pixel-wise error.
+
+5.4. Introspection
+
+Memory usage
+In this experiment, we evaluate the GPU
+memory consumption of our RevGAN model for increas-
+ing depths and compare it with a CycleGAN baseline. We
+kept the widths of both models ﬁxed at such a value that the
+model parameters are approximately equal (both ∼3.9 M)
+at depth 6.
+As can be seen from Table 5, the total memory usage
+increases for deeper networks in both models. In contrast
+to CycleGAN, however, the memory cost to store activa-
+tions stays constant on the RevGAN model. A 6 layer Cy-
+cleGAN model has the same total memory footprint of an
+unpaired RevGAN with 18-30 layers. Note that for con-
+volutional layers the memory cost of storing the model is
+ﬁxed given the network architecture, while the memory us-
+age cost to store activations also depends on the size of the
+data. Therefore, reducing the memory cost of the activa-
+
+LR Input
+
+Ground-truth
+
+SRCNN
+(3D-Pix2pix)
+
+RMSE
+
+SRCNN+4R (Ours)
+(Paired 3D-RevGAN)
+
+RMSE
+
+SRCNN
+(3D-CycleGAN)
+
+RMSE
+
+SRCNN+2R (Ours)
+(Unpaired 3D-RevGAN)
+
+RMSE
+
+Paired
+
+Unpaired
+
+Figure 5. Visualization of mean diffusivity maps on an sagittal slices (top) and axial slices (bottom) of the ﬁrst brain in the HCP Brain test
+set. From left to right: low-resolution input, high-resolution ground-truth, paired model without reversible layers (SRCNN-3D-Pix2pix),
+paired model with reversible layers (Paired 3D-RevGAN), unpaired model without reversible layers (SRCNN-3D-CycleGAN) and an
+unpaired model with reversible layers (Unpaired 3D-RevGAN).
+
+4726
+
+Depth
+
+6
+9
+12
+18
+30
+
+CycleGAN
+
+Model Activations
+434.3
+482.3
+530.3
+626.3
+818.7
+
++ 752.0
++ 949.0
++ 1148.1
++ 1543.9
++ 2335.8
+
+Unpaired RevGAN
+Model Activations
+374.4
+385.4
+398.5
+423.4
+626.3
+
++ 646.1
++ 646.1
++ 646.1
++ 646.1
++ 646.1
+
+Table 5. Memory usage on GPU measured in MiB on a single
+Nvidia Tesla K40m GPU on the Maps dataset (lower is better).
+Both the CycleGAN and unpaired RevGAN have a similar number
+of parameters.
+
+tions becomes particularly important when training models
+on larger data sizes (e.g. higher image resolutions or in-
+creased batch sizes).
+
+Scalability Reversible architectures can be trained arbi-
+trarily deep without increasing the memory cost needed to
+store activations. We evaluate the performance of larger
+RevGAN models on the Cityscapes dataset.
+
+As shown in Figure 6, with successive increases in depth,
+the performance of the RevGAN model increases on the
+Cityscapes task. This effect seems to hold up until a cer-
+tain depth (∼ 12− 18) after which we ﬁnd a slight decrease
+in performance again. We presume this decrease in perfor-
+mance is due to the longer training times of deeper mod-
+els, which we have not be able to train to full convergence
+due to time-budgeting issues. Keep in mind that we tried to
+keep our network architectures and training parameters as
+close as possible to networks used in the original Pix2pix
+and CycleGAN models. Other research suggests that train-
+ing models with much deeper reversible architectures can
+be very effective [5]. We leave the exploration of alterna-
+tive reversible architectures to future work.
+
+(a) Per-pixel accuracy against
+depth.
+
+(b) Memory usage against depth.
+
+Figure 6. Comparison of per-pixel accuracy for a width 64
+RevGAN evaluated after 75 epochs and memory usage on
+Cityscapes dataset.
+
+6. Limitations and Discussion
+
+Our results indicate that we can train image-to-image
+translation models with close to constant memory require-
+ments in depth (see Table 5). This enables us to scale up to
+very deep architectures. Our ablation studies also show that
+increasing depth can lead to higher quantitative results in
+terms of various semantic segmentation metrics. This abil-
+ity to scale up, however, trades memory for time, and so
+there is a trade-off to be considered in practical situations
+where we may be concerned about how long to spend in the
+development phase of such models.
+
+We have also demonstrated empirically that given a con-
+strained budget of trainable parameters, we are able to
+achieve improved performance on the Cityscapes and Maps
+datasets, especially for of an unpaired training regime. We
+accredit two mechanisms for this observation.
+
+Due to the nature of the problem, our network is not
+fully invertible. As a result, we still need to use the cycle-
+consistency loss, which requires two forward propagation
+passes and two backward passes through the model. A
+possible way to circumvent using the the cycle-consistency
+loss is to design the encoders and decoders to be analyti-
+cally pseudo-invertible. We in fact did experiments on this,
+by formulating the (strided-)convolutions as Toeplitz ma-
+trixvector products [23]. Unfortunately, we found that ex-
+act pseudo-invertibility is computationally too slow to run.
+Another issue with our setup is that two discriminators are
+required during training time (one of each domain). These
+are not used at test time, and can thus be considered as su-
+perﬂuous networks, requiring a lot of extra memory. That
+said, this is a general problem with CycleGAN and Pix2pix
+models in general.
+
+7. Conclusion
+
+In this paper we have proposed a new image-to-image
+translation model using reversible residual layers. The pro-
+posed model is approximately invertible by design, essen-
+tially weight-tying in the forward and backward direction,
+hence training from domain X to domain Y simulaneously
+trains the mapping from Y to X. We demonstrate equiv-
+alent or improved performance in terms of image quality,
+compared to similar non-reversible methods. Additionally,
+we show that our model is more memory efﬁcient, because
+activations of reversible residual layers do not have to be
+stored to perform backpropagation.
+
+In future work we plan to explore techniques to get rid of
+the cycle-consistency loss, so that the network is automati-
+cally cycle-consistent to begin with.
+
+4727
+
+References
+
+[1] L. Ardizzone, J. Kruse, S. Wirkert, D. Rahner, E. W. Pelle-
+grini, R. S. Klessen, L. Maier-Hein, C. Rother, and U. K¨othe.
+Analyzing inverse problems with invertible neural networks.
+arXiv preprint arXiv:1808.04730, 2018.
+
+[2] S. Arora and Y. Zhang. Do gans actually learn the distribu-
+
+tion? an empirical study. CoRR, abs/1706.08224, 2017.
+
+[3] S. B. Blumberg, R. Tanno, I. Kokkinos, and D. C. Alexan-
+der. Deeper image quality transfer: Training low-memory
+neural networks for 3d images. In International Conference
+on Medical Image Computing and Computer-Assisted Inter-
+vention, pages 118–125. Springer, 2018.
+
+[4] A. Brock, J. Donahue, and K. Simonyan. Large scale gan
+arXiv
+
+training for high ﬁdelity natural image synthesis.
+preprint arXiv:1809.11096, 2018.
+
+[5] B. Chang, L. Meng, E. Haber, L. Ruthotto, D. Begert, and
+E. Holtham. Reversible architectures for arbitrarily deep
+residual neural networks. arXiv preprint arXiv:1709.03698,
+2017.
+
+[6] T. Chen, B. Xu, C. Zhang, and C. Guestrin. Training
+arXiv preprint
+
+deep nets with sublinear memory cost.
+arXiv:1604.06174, 2016.
+
+[7] Z. Cheng, Q. Yang, and B. Sheng. Deep colorization.
+
+In
+2015 IEEE International Conference on Computer Vision,
+ICCV 2015, Santiago, Chile, December 7-13, 2015, pages
+415–423, 2015.
+
+[8] M. Cordts, M. Omran, S. Ramos, T. Rehfeld, M. Enzweiler,
+R. Benenson, U. Franke, S. Roth, and B. Schiele. The
+cityscapes dataset for semantic urban scene understanding.
+In Proceedings of the IEEE conference on computer vision
+and pattern recognition, pages 3213–3223, 2016.
+
+[9] L. Dinh, D. Krueger, and Y. Bengio.
+
+Nice: Non-
+linear independent components estimation. arXiv preprint
+arXiv:1410.8516, 2014.
+
+[10] L. Dinh, J. Sohl-Dickstein, and S. Bengio. Density estima-
+tion using real nvp. arXiv preprint arXiv:1605.08803, 2016.
+
+[11] C. Dong, C. C. Loy, K. He, and X. Tang. Learning a
+deep convolutional network for image super-resolution. In
+European conference on computer vision, pages 184–199.
+Springer, 2014.
+
+[12] L. A. Gatys, A. S. Ecker, and M. Bethge. Image style trans-
+fer using convolutional neural networks. In 2016 IEEE Con-
+ference on Computer Vision and Pattern Recognition, CVPR
+2016, Las Vegas, NV, USA, June 27-30, 2016, pages 2414–
+2423, 2016.
+
+[13] A. N. Gomez, M. Ren, R. Urtasun, and R. B. Grosse. The re-
+versible residual network: Backpropagation without storing
+activations. In Advances in Neural Information Processing
+Systems, pages 2214–2224, 2017.
+
+[14] I. Goodfellow,
+
+J. Pouget-Abadie, M. Mirza, B. Xu,
+D. Warde-Farley, S. Ozair, A. Courville, and Y. Bengio. Gen-
+erative adversarial nets. In Advances in neural information
+processing systems, pages 2672–2680, 2014.
+
+[15] P. Isola, J.-Y. Zhu, T. Zhou, and A. A. Efros.
+
+Image-
+to-image translation with conditional adversarial networks.
+arXiv preprint, 2017.
+
+[16] J.-H. Jacobsen, A. Smeulders, and E. Oyallon.
+
+i-revnet:
+Deep invertible networks. arXiv preprint arXiv:1802.07088,
+2018.
+
+[17] T. Karras, T. Aila, S. Laine, and J. Lehtinen. Progressive
+growing of gans for improved quality, stability, and variation.
+CoRR, abs/1710.10196, 2017.
+
+[18] D. P. Kingma and J. Ba. Adam: A method for stochastic
+
+optimization. arXiv preprint arXiv:1412.6980, 2014.
+
+[19] D. P. Kingma and P. Dhariwal.
+
+ﬂow with invertible 1x1 convolutions.
+arXiv:1807.03039, 2018.
+
+Glow: Generative
+arXiv preprint
+
+[20] D. P. Kingma, T. Salimans, R. Jozefowicz, X. Chen,
+I. Sutskever, and M. Welling. Improved variational inference
+with inverse autoregressive ﬂow. In Advances in Neural In-
+formation Processing Systems, pages 4743–4751, 2016.
+
+[21] J. Long, E. Shelhamer, and T. Darrell. Fully convolutional
+networks for semantic segmentation. In Proceedings of the
+IEEE conference on computer vision and pattern recogni-
+tion, pages 3431–3440, 2015.
+
+[22] J. Martens and I. Sutskever. Training deep and recurrent net-
+works with hessian-free optimization. In Neural networks:
+Tricks of the trade, pages 479–535. Springer, 2012.
+
+[23] M. Matuson. Svd pseudo-inverse deconvolution of two-
+dimensional arrays. Technical report, Pennsylvania State
+University Park Applied Research Lab, 1985.
+
+[24] M. Mirza and S. Osindero. Conditional generative adversar-
+
+ial nets. CoRR, abs/1411.1784, 2014.
+
+[25] P. Ochs, T. Meinhardt, L. Leal-Taix´e, and M. M¨oller. Lift-
+ing layers: Analysis and applications. In Computer Vision
+- ECCV 2018 - 15th European Conference, Munich, Ger-
+many, September 8-14, 2018, Proceedings, Part I, pages 53–
+68, 2018.
+
+[26] G. Perarnau, J. van de Weijer, B. Raducanu, and J. M.
+Invertible conditional gans for image editing.
+
+´Alvarez.
+CoRR, abs/1611.06355, 2016.
+
+[27] D. J. Rezende and S. Mohamed. Variational inference with
+normalizing ﬂows. arXiv preprint arXiv:1505.05770, 2015.
+[28] R. Tanno, D. E. Worrall, A. Ghosh, E. Kaden, S. N.
+Sotiropoulos, A. Criminisi, and D. C. Alexander. Bayesian
+image quality transfer with cnns: Exploring uncertainty in
+dmri super-resolution. In International Conference on Med-
+ical Image Computing and Computer-Assisted Intervention,
+pages 611–619. Springer, 2017.
+
+[29] J. Xie, L. Xu, and E. Chen. Image denoising and inpainting
+with deep neural networks.
+In Advances in Neural Infor-
+mation Processing Systems 25: 26th Annual Conference on
+Neural Information Processing Systems 2012. Proceedings
+of a meeting held December 3-6, 2012, Lake Tahoe, Nevada,
+United States., pages 350–358, 2012.
+
+[30] H. Zhao, O. Gallo, I. Frosio, and J. Kautz. Loss functions for
+image restoration with neural networks. IEEE Trans. Com-
+putational Imaging, 3(1):47–57, 2017.
+
+[31] J.-Y. Zhu, T. Park, P. Isola, and A. A. Efros. Unpaired image-
+to-image translation using cycle-consistent adversarial net-
+works. arXiv preprint, 2017.
+
+4728
+
+

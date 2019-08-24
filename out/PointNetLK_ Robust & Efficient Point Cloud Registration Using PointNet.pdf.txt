@@ -1,0 +1,1024 @@
+PointNetLK: Robust & Efﬁcient Point Cloud Registration using PointNet
+
+Yasuhiro Aoki1,2*
+
+Hunter Goforth1*
+
+Rangaprasad Arun Srivatsan1
+
+Simon Lucey1,3
+
+1Carnegie Mellon University
+aoki-yasuhiro@fujitsu.com
+
+3Argo AI
+2Fujitsu Laboratories Ltd.
+{hgoforth,arangapr,slucey}@cs.cmu.edu
+
+Abstract
+
+PointNet has revolutionized how we think about repre-
+senting point clouds. For classiﬁcation and segmentation
+tasks, the approach and its subsequent extensions are state-
+of-the-art. To date, the successful application of PointNet
+to point cloud registration has remained elusive. In this pa-
+per we argue that PointNet itself can be thought of as a
+learnable “imaging” function. As a consequence, classi-
+cal vision algorithms for image alignment can be applied
+on the problem – namely the Lucas & Kanade (LK) algo-
+rithm. Our central innovations stem from: (i) how to mod-
+ify the LK algorithm to accommodate the PointNet imag-
+ing function, and (ii) unrolling PointNet and the LK al-
+gorithm into a single trainable recurrent deep neural net-
+work. We describe the architecture, and compare its perfor-
+mance against state-of-the-art in common registration sce-
+narios. The architecture offers some remarkable proper-
+ties including: generalization across shape categories and
+computational efﬁciency – opening up new paths of explo-
+ration for the application of deep learning to point cloud
+registration. Code and videos are available at https:
+//github.com/hmgoforth/PointNetLK.
+
+1. Introduction
+
+Point clouds are inherently unstructured with sample and
+order permutation ambiguities. This lack of structure makes
+them problematic for use in modern deep learning architec-
+tures. PointNet [26] has been revolutionary from this per-
+spective, as it offers a learnable structured representation
+for point clouds. One can think of this process as a kind of
+“imaging” – producing a ﬁxed dimensional output irrespec-
+tive of the number of samples or ordering of points. This
+innovation has produced a number of new extensions and
+variants [28, 34, 42] that are now state-of-the-art in object
+classiﬁcation and segmentation on point clouds.
+
+The utility of PointNet for the task of point cloud reg-
+istration, however, has remained somewhat elusive. In this
+
+* equal contribution.
+
+Figure 1: Point cloud registration of (Top) Stanford
+bunny [39] and (Bottom) raw indoor scan from S3DIS [1]
+with PointNetLK. Refer to Sec. 4.2 and Sec. 4.4 for more
+details. As the iterations progress, PointNetLK is able
+to successfully register the source points to the template
+model, even though it was not trained on these shapes. We
+include Bunny surface rendering for the sake of visualiza-
+tion.
+
+paper we want to explore further the notion of interpret-
+ing the PointNet representation as an imaging function – a
+direct beneﬁt of which could be the application of image
+alignment approaches to the problem of point cloud regis-
+tration. In particular we want to utilize the classical Lucas &
+Kanade (LK) algorithm [18]. This connection is motivated
+by a recent innovation [41] that has demonstrated state-of-
+the-art 2D photometric object tracking performance by rein-
+terpreting the LK algorithm as a recurrent neural network.
+
+The LK algorithm, however, cannot be naively applied
+to the PointNet representation. This is due to the LK algo-
+
+7163
+
+rithm’s dependence on gradient estimates, which are esti-
+mated in practice through convolution. Within a 2D photo-
+metric image, or a 3D volumetric image, each element of
+the representation (i.e. pixel or voxel) has a known local
+dependency between its neighbors, which can be expressed
+as 2D- and 3D- grids respectively – from which convolu-
+tion can be deﬁned.
+It is also well understood that this
+dependency does not have to take the form or a N D-grid,
+with the notion of “graph” convolution [42] also being ex-
+plored. PointNet representations have no such local depen-
+dency making the estimation of spatial gradients through
+convolution ill posed.
+
+Contributions: We propose a modiﬁcation to the LK al-
+gorithm which circumvents the need for convolution on the
+PointNet representation. We then demonstrate how this
+modiﬁed LK form can be unrolled as a recurrent neural net-
+work and integrated within the PointNet framework – this
+uniﬁed network shall be referred to herein as PointNetLK.
+Unlike many variants of iterative closest point (ICP), our ap-
+proach requires no costly computation of point correspon-
+dences [31], which gives rise to substantial advantages in
+terms of accuracy, robustness to initialization and computa-
+tional efﬁciency. PointNetLK exhibits remarkable general-
+ization to unseen object and shape variations, as shown in
+Fig. 1. This generalization performance can be attributed
+to the explicit encoding of the alignment process within
+the network architecture. As a consequence, the network
+only needs to learn the PointNet representation rather than
+the task of alignment. Finally, our approach is fully differ-
+entiable, unlike most registration approaches in literature,
+hence allowing for an easy integration with larger DNN
+systems. An added computational beneﬁt is that our ap-
+proach can be run directly on GPU as part of a larger neural-
+network pipeline, unlike most of the comparisons which re-
+quire a method like ICP or its variants to be run on CPU.
+
+2. Related Work
+
+PointNet: PointNet [26] is the ﬁrst work to propose the
+use of DNN with raw point clouds as input, for the pur-
+poses of classiﬁcation and segmentation. The architecture
+achieves state of the art performance on this task despite its
+simplicity, and provides interesting theoretical insight into
+processing raw point clouds. PointNet++ was proposed as
+an improvement over the PointNet, by hierarchically aggre-
+gating features in local point sets [28]. Another variant con-
+siders aggregates features of nearby points [34]. Wang et
+al. [42] use a local neighborhood graph and convolution-
+like operations on the edges connecting neighboring pairs
+of points.
+
+ICP and variants: Besl and McKay [4] introduced the
+iterative closest point (ICP), which is a popular approach
+for registration, by iteratively estimating point correspon-
+dence and performing a least squares optimization. Several
+variants of the ICP have been developed (see [31] for a re-
+view) that incorporate sensor uncertainties [33, 35], are ro-
+bust to outliers [5], use different optimizers [8], etc. ICP and
+its variants, however, have a few fundamental drawbacks,
+namely: (1) explicit estimation of closest point correspon-
+dences, which results in the complexity scaling quadrati-
+cally with the number of points, (2) sensitive to initializa-
+tion, and (3) nontrivial to integrate them to deep learning
+framework due to issues of differentiability.
+
+Globally optimal registration: Since ICP and most of
+its variants are sensitive to initial perturbation in align-
+ment, they only produce locally optimal estimates. Yang et
+al. [46] developed Go-ICP, a branch and bound-based
+optimization approach to obtain globally optimal pose.
+More recently convex relaxation has been used for global
+pose estimation using Riemannian optimization [30], semi-
+deﬁnite programming [13, 20] and mixed integer program-
+ming [14]. A major drawback of the above methods is the
+large computation time, rendering them unsuitable for real
+time applications.
+
+Interest point methods: There are works in literature
+that estimate interest points to help with registration. For
+instance, scale invariant curvature descriptors [9], ori-
+ented descriptors [10], extended Gaussian images [19], fast
+point feature histograms [32], color intensity-based descrip-
+tors [11], global point signatures [6], heat kernels [25], etc.
+While interest points have the potential to improve the com-
+putationally speed of the registration approaches, they do
+not generalize to all applications [12].
+
+Hand-crafted representations: The discriminative opti-
+mization (DO) work of Vongkulbhisal et al. [40] uses a
+hand-crafted feature vector and learns a set of maps, to es-
+timate a good initial alignment. The alignment is later re-
+ﬁned using an ICP. The drawback of this approach is that
+the features and maps are speciﬁc to each object and do not
+generalize. More recently they developed inverse composi-
+tion discriminative optimization (ICDO), which generalizes
+over unseen object shapes. ICDO unfortunately has a com-
+plexity which is quadratic in the number of points, making
+it difﬁcult to use in several real world scenarios. Another is-
+sue with ICDO is that both the features and alignment maps
+are learned, which can result in a compromise on the gener-
+alizability of the approach.
+
+Alternate representations: Voxelization is a method to
+discretize the space and convert a point clouds to a struc-
+
+7164
+
+tured grid. Several methods have been developed that use
+DNNs over voxels [22, 43]. Major drawbacks of these ap-
+proaches include computation time and memory require-
+ments. Another popular representation is depth image or
+range image, which represents the point cloud as a collec-
+tion of 2D views, which are easily obtained by commer-
+cial structured light sensors. Typically convolution oper-
+ations are performed on each view and the resulting fea-
+tures are aggregated [36]. Some works also combine voxel
+data with multi-view data [27, 3]. There are several works
+that directly estimate 3D pose from photometric images.
+For instance, [37, 16, 21, 44, 24], directly regress over
+the Euler angles of object orientations from cropped ob-
+ject images. On the other hand, in applications such as
+robotic manipulation, pose is often decoupled into rotation
+and translation components and each is inferred indepen-
+dently [37, 38, 15, 45, 29, 17].
+
+3. PointNetLK
+
+In Section 3.1 we introduce notation and mathematics
+for PointNetLK. In Section 3.2 we provide a derivation of
+the optimization on PointNet feature vectors used for point
+cloud alignment.
+In Section 3.3 we describe aspects of
+training for our model, including loss functions and pos-
+sible symmetric operators.
+
+Notation: We denote matrices with uppercase bold such
+as M, constants as uppercase italic such as C, and scalar
+variables with lowercase italic such as s.
+
+3.1. Overview
+
+Let φ denote the PointNet function, φ : R3×N → RK ,
+such that for an input point cloud P ∈ R3×N , φ(P) produces
+a K-dimensional vector descriptor. The function φ applies a
+Multi-Layer Perceptron (MLP) to each 3D point in P, such
+that the ﬁnal output dimension of each point is K. Then a
+symmetric pooling function, such as maximum or average,
+is applied, resulting in the K-dimensional global descriptor.
+We formulate an optimization as follows. Let PT , PS
+be template and source point clouds respectively. We will
+seek to ﬁnd the rigid-body transform G ∈ SE(3) which
+best aligns source PS to template PT . The transform G will
+be represented by an exponential map as follows:
+
+G = exp Xi
+
+ξiTi!
+
+ξ = (ξ1, ξ2, ..., ξ6)T ,
+
+(1)
+
+where Ti are the generators of the exponential map with
+twist parameters ξ ∈ R6. The 3D point cloud align-
+ment problem can then be described as ﬁnding G such that
+φ(PT ) = φ(G · PS ), where we use the shorthand (·) to de-
+note transformation of PS by rigid transform G. This equa-
+
+tion is analogous to the quantity being optimized in the clas-
+sical LK algorithm for 2D images, where the source image
+is warped such that the pixel intensity differences between
+the warped source and template are minimized. It is worth
+noting that we do not include the T-net in our PointNet ar-
+chitecture, since its purpose was to transform the input point
+cloud in order to increase classiﬁcation accuracy [26]. How-
+ever, we instead use the LK layer to estimate the alignment,
+and the T-net is unnecessary.
+
+Another key idea that we can borrow from the LK al-
+gorithm is the Inverse Compositional (IC) formulation [2].
+The IC formulation is necessitated by the fact that the tradi-
+tional LK algorithm has a high computational cost for each
+iteration of the optimization. This cost comes from the re-
+computation of an image Jacobian on the warped source im-
+age, at each step of the optimization. The insight of the IC
+formulation is to reverse the role of the template and source:
+at each iteration, we will solve for the incremental warp up-
+date to the template instead of the source, and then apply
+the inverse of this incremental warp to the source. By doing
+this, the Jacobian computation is performed for the template
+instead of the source and happens only once before the op-
+timization begins. This fact will be more clearly seen in the
+following derivation of the warp update.
+
+3.2. Derivation
+
+Restating the objective, we seek to ﬁnd G such that
+φ(PT ) = φ(G · PS ). To do this, we will derive an itera-
+tive optimization solution.
+
+With the IC formulation in mind, we take an inverse form
+
+for the objective:
+
+φ(PS ) = φ(G−1 · PT )
+
+(2)
+
+The next step is to linearize the right-hand side of (2):
+
+φ(PS ) = φ(PT ) +
+
+(3)
+
+∂
+
+∂ξ (cid:2)φ(G−1 · PT )(cid:3) ξ
+
+the
+
+denote
+
+Jacobian
+
+Where we deﬁne G−1 = exp(−Pi ξiTi).
+∂ξ(cid:2)φ(G−1 · PT )(cid:3), where J ∈ RK×6 matrix. At
+
+Canonical LK: We will
+J = ∂
+this point, computing J would seem to require an analytical
+representation of the gradient for the PointNet function
+with respect to the twist parameters of G. This analytical
+gradient would be difﬁcult to compute and quite costly.
+The approach taken in the classical LK algorithm for N D
+images is to split the Jacobian using the chain rule, into
+two partial terms: an image gradient in the N D image
+directions, and an analytical warp Jacobian [2]. However,
+in our case this approach will not work either, since there
+is no graph or other convolutional structure which would
+allow taking gradients in x, y and z for our 3D registration
+case.
+
+7165
+
+mlp(3,64,64,64,128,K)
+
+sym. 
+func.
+
+,
+
+3
+ 
+x
+ 
+N
+
+shared
+
+,
+
+3
+ 
+x
+ 
+N
+
+shared
+
+K
+ 
+x
+ 
+N
+
+K
+ 
+x
+ 
+N
+
+K
+
+$(, )
+
+K
+
+$(, )
+
+$ exp −)"*"
+
+!" =
+
++ , − $(,)
+)"
+
+/ = !0 + $(, − $(,)]
+
+Looping computation
+
+One-time computation
+
+, ← ∆3 + ,
+
+if ∆3 > thresh. 
+
+∆3 = exp( ∑"/"*")
+
+3678 = ∆39 + … + ∆3; + ∆3<
+
+if ∆3 < thresh. 
+
+Figure 2: Point cloud inputs source PS and template PT are passed through a shared MLP, and a symmetric pooling function,
+to compute the global feature vectors φ(PS ) and φ(PT ). The Jacobian J is computed once using φ(PT ). The optimal twist
+parameters are found, which are used to incrementally update the pose of PS , and then the global feature vector φ(PS ) is
+recomputed. During training, a loss function is used which is based on the difference in the estimated rigid transform and the
+ground truth transform.
+
+Modiﬁed LK: Motivated by these challenges, we instead
+opt to compute J using a stochastic gradient approach.
+Speciﬁcally, each column Ji of the Jacobian can be approx-
+imated through a ﬁnite difference gradient computed as
+
+Ji =
+
+φ(exp(−tiTi) · PT ) − φ(PT )
+
+ti
+
+(4)
+
+Where ti are inﬁnitesimal perturbations of the twist pa-
+rameters ξ. This approach to computing J is what allows the
+application of the computationally efﬁcient inverse compo-
+sitional LK algorithm to the problem of point cloud regis-
+tration using PointNet features. Note that J is computed
+only once, for the template point cloud, and does not need
+to be recomputed as the source point cloud is warped during
+iterative alignment.
+
+For each column Ji of the Jacobian, only the ith twist
+parameter has a non-zero value ti. Theoretically, ti should
+be inﬁnitesimal so that J is equal to an analytical derivative.
+In practice, we ﬁnd empirically that setting ti to some small
+ﬁxed value over all iterations yields the best result.
+
+We can now solve for ξ in (3) as
+
+ξ = J+ [φ(PS ) − φ(PT )]
+
+(5)
+
+Where J+ is a Moore-Penrose inverse of J.
+In summary, our iterative algorithm consists of a looping
+computation of the optimal twist parameters using (5), and
+then updating the source point cloud PS as
+
+PS ← ∆G · PS
+
+∆G = exp Xi
+
+ξiTi!
+
+(6)
+
+The ﬁnal estimate Gest is then the composition of all
+
+incremental estimates computed during the iterative loop:
+
+Gest = ∆Gn · ... · ∆G1 · ∆G0
+
+(7)
+
+The stopping criterion for iterations is based on a mini-
+mum threshold for ∆G. A graphical representation of our
+model is shown in Fig. 2.
+
+3.3. Training
+
+Loss function: The loss function for training should be
+targeted at minimizing the difference between the estimated
+transform Gest and the ground truth transform Ggt. This
+could be expressed as the Mean Square Error (MSE) be-
+tween the twist parameters ξest and ξgt. Instead, we use
+
+||(Gest)−1 · Ggt − I4||F ,
+
+(8)
+
+which is more computationally efﬁcient to compute as it
+does not require matrix logarithm operation during training,
+and follows in a straightforward way from the representa-
+tion of Gest, Ggt ∈ SE(3).
+
+Symmetric pooling operator:
+In PointNet, the MLP op-
+eration is followed by a symmetric pooling function such as
+maximum or average pooling, to facilitate point-order per-
+mutation invariance (see Fig. 2).
+In Section 4, we show
+results using either max or average pooling and make ob-
+servations about which operator may be more suitable given
+different scenarios. Particularly, we hypothesize that aver-
+age pooling would have an advantage over max pooling on
+
+7166
+
+Figure 3: Results for Section 4.1 and 4.2. PointNetLK
+achieves remarkable alignment results on categories seen
+during training (PNLK same category), as well as those
+unseen during training (PNLK different category). Results
+are reported for 10 iterations of both PointNetLK and ICP,
+showcasing also the ability of PointNetLK to align quickly
+in fewer iterations.
+
+Figure 4: Results for Section 4.3. We compare PointNetLK
+trained on zero-noise data with max pool, trained on zero-
+noise data with avg. pool, and trained on noisy (SD=0.04)
+data using avg. pool. The results support our hypothesis
+that avg. pooling is important in order to account for noise
+in data.
+
+the case of noisy point cloud data, which is conﬁrmed in our
+experiments.
+
+4. Experiments
+
+We experiment with various combinations of training
+data, test data, and symmetric operators. We compare with
+ICP [4] as a baseline at test time. We have used Model-
+Net40 [43], a dataset containing CAD models for 40 object
+categories, for experiments unless otherwise noted.
+
+bitrarily chosen axes and translation [0, 0.8] during training
+of PointNetLK. Results at test time compared with ICP are
+shown in Fig. 3. We report results after 10 iterations of both
+ICP and PointNetLK. This emphasizes an important result,
+that PointNetLK is able to converge to the correct solution
+in typically many fewer iterations than ICP. We ensure that
+testing takes place for the same point clouds and perturba-
+tions for both ICP and PointNetLK, for a fair comparison.
+Initial translations for testing are in the range [0, 0.3] and
+initial rotations are in the range [0, 90] degrees.
+
+4.1. Train and test on same object categories
+
+4.2. Train and test on different object categories
+
+Our ﬁrst experiment is to train PointNetLK on the train-
+ing set for 20 object categories in ModelNet40, and test on
+the test set for the same 20 object categories. We begin
+by ﬁrst training a standard PointNet classiﬁcation network
+on ModelNet40, and then initialize the PointNetLK feature
+extractor φ using this classiﬁcation network and ﬁne-tune
+with the PointNetLK loss function. The point clouds used
+for registration are the vertices from ModelNet40 shapes.
+The source point cloud is a rigid transformation of the tem-
+plate. Template points are normalized into a unit box at the
+origin [0, 1]3 before warping to create the source. We use
+random Ggt with rotation angles [0, 45] degrees about ar-
+
+We repeat the experiment from Section 4.1, however,
+we train on the other 20 categories of ModelNet40. We
+then test on the 20 categories in ModelNet which have not
+been seen during training, which are the same categories as
+used in testing for Section 4.1. We ﬁnd that PointNetLK
+has the ability to generalize for accurate alignment on ob-
+ject categories which are unseen during training. The re-
+sults are shown in Fig. 3 for ModelNet40 test dataset,
+and Fig. 1 on the Stanford bunny dataset [39]. The result
+with Stanford bunny dataset is especially impressive as this
+dataset is signiﬁcantly different than the ModelNet train-
+ing data. For the sake of comparison we also repeated the
+
+7167
+
+04080Initial Angle (Deg.)0.00.1Mean Trans. ErrorICPPNLK (same categ.)PNLK (different categ.)04080Initial Angle (Deg.)03060Mean Rot. Error (Deg.)0.000.020.04Noise SD0.000.050.10Median Trans. ErrorPNLK (max,0)PNLK (avg,0)PNLK (avg,0.04)0.000.020.04Noise SD04812Median Rot. Error (Deg.)Figure 5: Example registrations with Gaussian noise added to each point in the source point cloud for ModelNet object
+categories unseen during training (Section 4.3). For each example, initial position of the points is shown in the left and
+converged results are shown on the right. The orange points show the ICP estimates and blue points show the PointNetLK
+estimates.
+
+experiments with ICP and Go-ICP [46]. We observe that
+the rotation and translation errors respectively for ICP are
+(175.51◦, 0.22), Go-ICP are (0.18◦, 10−3) and PointNetLK
+are (0.2◦, 10−4). While ICP takes 0.36s, and Go-ICP takes
+80.78s, PointNetLK takes only 0.2s.
+
+4.3. Gaussian noise
+
+We explore the robustness of PointNetLK against Gaus-
+sian noise on points. The experiment set-up is as follows:
+a template point cloud is randomly sampled from the faces
+of the ModelNet shape, and a source is set equal to the tem-
+plate with additive Gaussian noise of certain standard devia-
+tion. We use 1000 points during sampling. We hypothesize
+that the choice of symmetric operator becomes more crit-
+ical to the performance of PointNetLK in this experiment.
+As noted in the original PointNet work, using the max pool
+operator leads to a critical set of shape points which deﬁne
+the global feature vector. With noisy data, this critical set
+is subject to larger variation across different random noise
+samples. Therefore we hypothesize that average pooling
+would be better suited to learning the global features used
+for alignment on noisy data. This hypothesis is conﬁrmed
+in the results shown in Fig. 4. We repeat the procedure of
+Section 4.2, testing on object categories which are unseen
+during training. Some example alignment pairs are shown
+in Fig. 5.
+
+Figure 6: Results for Section 4.4. We test registration
+of partially visible ModelNet data, comparing ICP, Point-
+NetLK trained on 3D data, and PointNetLK trained on par-
+tially visible data. Both PointNetLK models are trained
+with max pool. Test categories are unseen during training.
+We ﬁnd that training with partially visible data greatly im-
+proves performance, even surpassing ICP. A registration is
+counted as successful if the ﬁnal alignment rotation error
+is less than 5 degrees and translation error is less than 0.01.
+Notice that PointNetLK has perfect performance at zero ini-
+tial angle since we subtract the mean of each point cloud,
+whereas ICP does not.
+
+4.4. Partially visible data
+
+We explore the use of PointNetLK on the common reg-
+istration scenario of aligning 2.5D data. In the real world,
+oftentimes the template is a full 3D model and the source a
+
+2.5D scan. One approach in this case is to input the 2.5D
+source and 3D template directly into an alignment algo-
+rithm and estimate the correspondence and the alignment.
+A second approach is to use an initial estimate of camera
+pose with respect to the 3D model to sample visible points
+
+7168
+
+0306090120Initial Angle (Deg.)0.000.250.500.751.00Success RatioICPPNLK (max,3d)PNLK (max,partial)on the model, which can be compared with the 2.5D scan.
+The camera pose can be iteratively updated until the visible
+points on the 3D model match the 2.5D scan.
+
+We take the latter approach for testing PointNetLK, be-
+cause the cost function φ(PT ) − φ(G · PS ) can tend to be
+large for input point clouds which are a 3D model and 2.5D
+scan. Instead, it makes more sense to sample visible points
+from the 3D model ﬁrst based on an initial pose estimate,
+so that the inputs to PointNetLK are both 2.5D. This way,
+a correct ﬁnal alignment is more likely to lead to the cost
+function φ(PT ) − φ(G · PS ) being close to zero.
+
+Sampling visible points is typically based on simulating
+a physical sensor model for 3D point sensing, which has a
+horizontal and vertical ﬁeld-of-view, and a minimum and
+maximum depth [23, 7]. We adapt ModelNet40 data for
+partially visible testing using a simplistic sensor model as
+follows. We sample faces from ModelNet shapes to cre-
+ate a template, place the template into a unit box [0, 1]3,
+set the template equal to the source, and warp the source
+using a random perturbation. Next we translate the source
+and template both by a vector of length 2 in the direction
+[1, 1, 1]T from the origin. Then we assign the visible points
+of the template Pv
+T as those satisfying (PT +2·[1, 1, 1]T ) <
+mean(PT + 2 · [1, 1, 1]T ). This operation can be thought of
+a placing a sensor at the origin which faces the direction
+[1, 1, 1]T and samples points on the 3D models which lie in
+front of it, up to a maximum depth equal to the mean of the
+point cloud. We set the visible source points Pv
+S in the same
+manner. This operation returns about half of the points both
+template and source being visible for any given point cloud.
+We input the 2.5D visible point sets Pv
+S into Point-
+NetLK, allowing a single iteration to occur for estimation of
+the aligning transform Gest. We then warp the original full
+source model PS using the single-iteration guess Gest, and
+re-sample Pv
+S . We repeat the single-iteration update and vis-
+ibility re-sampling until convergence. We repeat the same
+procedure for testing ICP.
+
+T and Pv
+
+We test on the ModelNet40 test set, using random trans-
+lation [0, 0.3] for all tests. The results are shown in Fig. 6.
+Notably, we ﬁnd that PointNetLK is able to learn to register
+objects using our sensor model, and generalizes well when
+the sensor model is applied to unseen object categories. Ex-
+ample template and source pairs for partially visible align-
+ment are shown in Fig. 7 for ModelNet test dataset. We ob-
+serve that our approach generalizes well to unseen shapes
+as shown in Fig. 1 which is generated from RGBD sensor
+data [1].
+
+4.5. Same category, different object
+
+We hypothesize that PointNetLK features could be use-
+ful for registering point clouds of objects which are different
+but of the same category. An example of this is shown for
+two airplane models in Fig. 8. We would hope that the reg-
+
+Figure 7: Results for Section 4.4. We test registration of
+partially visible ModelNet data, comparing ICP (shown by
+orange points), and PointNetLK trained on partially visible
+data (shown by blue points).
+
+istration error for PointNetLK |φ(G · PS ) − φ(PT )| is min-
+imized when the airplane models, despite being different,
+are aligned in orientation. This reafﬁrms that the feature
+vectors learned for alignment are capturing a sense of the
+object category, and the canonical orientation of that object.
+The network used for this experiment is trained using max
+pool on full 3D models. We ﬁnd that in many cases, such
+as in the airplane example of Fig. 8, the PointNetLK cost
+function is globally minimized when the correct orientation
+is attained, while the ICP cost function is not necessarily
+minimized. In practice, this approach could work particu-
+larly well to identify the correct orientation of objects within
+a category if the orientation is known up to one or two axes
+of rotation.
+
+4.6. Computational efﬁciency
+
+We plot trends for computation time in Fig. 9, com-
+paring PointNetLK and ICP on an Intel Xeon 2GHz CPU.
+We argue that PointNetLK is quite competitive in efﬁciency
+among current approaches to point cloud registration, due to
+the fact that it has complexity O(n) in n number of points.
+Note that we do not use a kd-tree in the ICP for this particu-
+lar comparison, because in several applications such as pose
+
+7169
+
+Figure 8: Results for Section 4.5. PointNetLK can achieve
+a global minimum when two different objects of the same
+category have the same orientation, whereas ICP can fail.
+We use two different airplane models from ModelNet40, a
+biplane (a) and a jetliner (b). (c) shows the initial (incor-
+rect) conﬁguration for alignment, where the centroids each
+model are at the same location. The jetliner is then rotated
+about the Z-axis through its centroid. The cost function
+for standard ICP and PointNetLK during this rotation are
+plotted. The airplanes have the same orientation at −90◦
+(ground truth). PointNetLK has a global minimum here,
+whereas ICP has global minimum at 180◦.
+
+tracking from 2.5D data, one does not have kd-tree informa-
+tion. Further, the computation can be sped up several orders
+of magnitude with a GPU implementation as PointNetLK is
+highly parallelizable.
+
+5. Implementation Details
+
+For the MLP in all experiments we use dimensions
+(3, 64, 64, 64, 128, K = 1024). Our early experiments
+showed that this choice of K is suitable for alignment of
+point clouds containing points on the order of 1000, the
+number we used in most of our experiments. For setting
+ti, the inﬁnitesimal perturbations of twist parameters used
+to compute the Jacobian in Eq. 4, we ﬁnd that 1e−2 or sim-
+ilar works well. For the minimum threshold for ∆G used
+to stop iterations of PointNetLK, we use |∆ξi| < 1e−7.
+That is, we condition on the magnitude of individual twist
+parameters which constitute ∆G.
+
+During the ﬁne-tuning stage of training PointNetLK, af-
+
+Figure 9: Computation cost of PointNetLK grows in O(n)
+with n points, compared to O(n2) for ICP.
+
+ter training the PointNet classiﬁer, we train for 200 epochs
+of the ModelNet test set (about one day of training). We ﬁnd
+that more epochs are needed to realize good performance
+for noisy data or partial visibility data (approximately 300
+and 400 epochs respectively). When training PointNetLK
+on 2.5D data, some modiﬁcations to the PointNetLK archi-
+tecture ( as shown in Fig. 2) were necessary in order to
+maintain differentiability. This includes creating a visible
+point mask which sets the non-visible points in the 2.5D
+source and template to zero, and this mask is applied before
+the max pooling operator. At test time for 2.5D, differentia-
+bility is not a concern and therefore these maskings are not
+necessary. We implement PointNetLK in PyTorch and train
+using an NVIDIA GeForce GTX Titan X.
+
+6. Conclusion
+
+We have presented PointNetLK, a novel approach for
+adapting PointNet for point cloud registration. We mod-
+ify the classical LK algorithm to circumvent the inherent
+inability of the PointNet representation to accommodate
+gradient estimates through convolution. This modiﬁed LK
+framework is then unrolled as a recurrent neural network
+from which PointNet is then integrated to form the Point-
+NetLK architecture. Our approach achieves impressive pre-
+cision, robustness to initialization, and computational efﬁ-
+ciency. We have also shown the ability to train PointNetLK
+on noisy data or partially visible data and achieve large per-
+formance gains, while maintaining impressive generaliza-
+tion to shapes far removed from the training set. Finally, we
+believe that this approach presents an important step for-
+ward for the community as it affords an effective strategy
+for point cloud registration that is differentiable, generaliz-
+able, and extendable to other deep learning frameworks.
+
+7170
+
+18090090180Angle (Z)Normalized CostPNLKICPground truth050001000015000200002500030000Number of points0510152025303540Processing time [sec]ICPPNLKReferences
+
+[1] I. Armeni, O. Sener, A. R. Zamir, H. Jiang, I. Brilakis,
+M. Fischer, and S. Savarese. 3d semantic parsing of large-
+scale indoor spaces. In The IEEE Conference on Computer
+Vision and Pattern Recognition (CVPR), June 2016. 1, 7
+
+[2] S. Baker and I. Matthews. Lucas-kanade 20 years on: A uni-
+fying framework. International journal of computer vision,
+56(3):221–255, 2004. 3
+
+[3] V. Balntas, A. Doumanoglou, C. Sahin, J. Sock, R. Kousk-
+ouridas, and T.-K. Kim. Pose Guided RGBD Feature Learn-
+ing for 3D Object Pose Estimation.
+In Proceedings of the
+IEEE Conference on Computer Vision and Pattern Recogni-
+tion, pages 3856–3864, 2017. 3
+
+[4] P. Besl and N. D. McKay. A method for registration of 3-D
+shapes. IEEE Transactions on Pattern Analysis and Machine
+Intelligence, 14(2):239–256, Feb 1992. 2, 5
+
+[5] S. Bouaziz, A. Tagliasacchi, and M. Pauly. Sparse iterative
+In Proceedings of the Eleventh Eurograph-
+closest point.
+ics/ACMSIGGRAPH Symposium on Geometry Processing,
+pages 113–123. Eurographics Association, 2013. 2
+
+[6] C. S. Chua and R. Jarvis. Point signatures: A new repre-
+sentation for 3d object recognition. International Journal of
+Computer Vision, 25(1):63–85, 1997. 2
+
+[7] B. Eckart, K. Kim, and K. Jan. Eoe: Expected overlap es-
+timation over unstructured point cloud data. In 2018 Inter-
+national Conference on 3D Vision (3DV), pages 747–755.
+IEEE, 2018. 7
+
+[8] A. W. Fitzgibbon. Robust registration of 2D and 3D point
+Image and Vision Computing, 21(13-14):1145–1153,
+
+sets.
+2003. 2
+
+[9] N. Gelfand, N. J. Mitra, L. J. Guibas, and H. Pottmann. Ro-
+bust global registration. In Symposium on geometry process-
+ing, volume 2, page 5, 2005. 2
+
+[10] J. Glover, G. Bradski, and R. B. Rusu. Monte carlo pose
+estimation with quaternion kernels and the distribution. In
+Robotics: Science and Systems, volume 7, page 97, 2012. 2
+
+[11] G. Godin, M. Rioux, and R. Baribeau. Three-dimensional
+registration using range and intensity information. In Video-
+metrics III, volume 2350, pages 279–291. International So-
+ciety for Optics and Photonics, 1994. 2
+
+[12] Y. Guo, M. Bennamoun, F. Sohel, M. Lu, and J. Wan. 3D
+object recognition in cluttered scenes with local surface fea-
+tures: a survey. IEEE Transactions on Pattern Analysis and
+Machine Intelligence, 36(11):2270–2287, 2014. 2
+
+[13] M. B. Horowitz, N. Matni, and J. W. Burdick. Convex re-
+laxations of SE(2) and SE(3) for visual pose estimation. In
+IEEE International Conference on Robotics and Automation
+(ICRA), pages 1148–1154. IEEE, 2014. 2
+
+[14] G. Izatt, H. Dai, and R. Tedrake. Globally Optimal Object
+Pose Estimation in Point Clouds with Mixed-Integer Pro-
+gramming.
+In International Symposium on Robotics Re-
+search, 12 2017. 2
+
+[15] W. Kehl, F. Manhardt, F. Tombari, S. Ilic, and N. Navab.
+SSD-6D: Making RGB-based 3D detection and 6D pose esti-
+mation great again. In IEEE Conference on Computer Vision
+and Pattern Recognition (CVPR), pages 1521–1529, 2017. 3
+
+[16] A. Kendall, M. Grimes, and R. Cipolla. PoseNet: A convolu-
+tional network for real-time 6-DOF camera relocalization. In
+IEEE International Conference on Computer Vision (ICCV),
+pages 2938–2946. IEEE, 2015. 3
+
+[17] C. Li, J. Bai, and G. D. Hager. A Uniﬁed Framework
+for Multi-View Multi-Class Object Pose Estimation. arXiv
+preprint arXiv:1803.08103, 2018. 3
+
+[18] B. D. Lucas, T. Kanade, et al. An iterative image registration
+
+technique with an application to stereo vision. 1981. 1
+
+[19] A. Makadia, A. Patterson, and K. Daniilidis. Fully automatic
+registration of 3D point clouds. In Computer Vision and Pat-
+tern Recognition, 2006 IEEE Computer Society Conference
+on, volume 1, pages 1297–1304. IEEE, 2006. 2
+
+[20] H. Maron, N. Dym, I. Kezurer, S. Kovalsky, and Y. Lip-
+man. Point registration via efﬁcient convex relaxation. ACM
+Transactions on Graphics (TOG), 35(4):73, 2016. 2
+
+[21] F. Massa, R. Marlet, and M. Aubry. Crafting a multi-
+arXiv preprint
+
+task CNN for viewpoint estimation.
+arXiv:1609.03894, 2016. 3
+
+[22] D. Maturana and S. Scherer. Voxnet: A 3d convolutional
+neural network for real-time object recognition. In Intelligent
+Robots and Systems (IROS), 2015 IEEE/RSJ International
+Conference on, pages 922–928. IEEE, 2015. 3
+
+[23] R. Mehra, P. Tripathi, A. Sheffer, and N. J. Mitra. Vis-
+ibility of noisy point cloud data. Computers & Graphics,
+34(3):219–230, 2010. 7
+
+[24] A. Mousavian, D. Anguelov, J. Flynn, and J. Koˇseck´a. 3D
+bounding box estimation using deep learning and geometry.
+In IEEE Conference on Computer Vision and Pattern Recog-
+nition (CVPR), pages 5632–5640. IEEE, 2017. 3
+
+[25] M. Ovsjanikov, Q. M´erigot, F. M´emoli, and L. Guibas. One
+point isometric matching with the heat kernel. In Computer
+Graphics Forum, volume 29, pages 1555–1564. Wiley On-
+line Library, 2010. 2
+
+[26] C. R. Qi, H. Su, K. Mo, and L. J. Guibas. Pointnet: Deep
+learning on point sets for 3d classiﬁcation and segmentation.
+Proc. Computer Vision and Pattern Recognition (CVPR),
+IEEE, 1(2):4, 2017. 1, 2, 3
+
+[27] C. R. Qi, H. Su, M. Nießner, A. Dai, M. Yan, and L. J.
+Guibas. Volumetric and multi-view cnns for object classiﬁ-
+cation on 3d data. In Proceedings of the IEEE conference on
+computer vision and pattern recognition, pages 5648–5656,
+2016. 3
+
+[28] C. R. Qi, L. Yi, H. Su, and L. J. Guibas. Pointnet++: Deep hi-
+erarchical feature learning on point sets in a metric space. In
+Advances in Neural Information Processing Systems, pages
+5099–5108, 2017. 1, 2
+
+[29] M. Rad and V. Lepetit. BB8: A Scalable, Accurate, Robust
+to Partial Occlusion Method for Predicting the 3D Poses of
+Challenging Objects without Using Depth. In International
+Conference on Computer Vision, 2017. 3
+
+[30] D. M. Rosen, L. Carlone, A. S. Bandeira, and J. J. Leonard.
+A certiﬁably correct algorithm for synchronization over the
+special Euclidean group. 12th International Workshop on
+Agorithmic Foundations of Robotics, 2016. 2
+
+[31] S. Rusinkiewicz and M. Levoy. Efﬁcient variants of the ICP
+algorithm. In Proceedings of the Third International Confer-
+
+7171
+
+ence on 3-D Digital Imaging and Modeling, pages 145–152.
+IEEE, 2001. 2
+
+[32] R. B. Rusu, N. Blodow, and M. Beetz. Fast point feature his-
+tograms (FPFH) for 3D registration. In IEEE International
+Conference on Robotics and Automation, pages 3212–3217.
+IEEE, 2009. 2
+
+[33] A. Segal, D. Haehnel, and S. Thrun. Generalized-ICP. In
+Robotics: science and systems, volume 2, page 435, 2009. 2
+[34] Y. Shen, C. Feng, Y. Yang, and D. Tian. Neighbors do help:
+Deeply exploiting local structures of point clouds. arXiv
+preprint arXiv:1712.06760, 2017. 1, 2
+
+[35] R. A. Srivatsan, M. Xu, N. Zevallos, and H. Choset. Prob-
+abilistic pose estimation using a bingham distribution-based
+linear ﬁlter. The International Journal of Robotics Research,
+page 0278364918778353. 2
+
+[36] H. Su, S. Maji, E. Kalogerakis, and E. Learned-Miller. Multi-
+view convolutional neural networks for 3d shape recognition.
+In Proceedings of the IEEE international conference on com-
+puter vision, pages 945–953, 2015. 3
+
+[37] H. Su, C. R. Qi, Y. Li, and L. J. Guibas. Render for CNN:
+Viewpoint estimation in images using CNNs trained with
+rendered 3D model views. In Proceedings of the IEEE Inter-
+national Conference on Computer Vision, pages 2686–2694,
+2015. 3
+
+[38] B. Tekin, S. N. Sinha, and P. Fua. Real-Time Seamless
+arXiv preprint
+
+Single Shot 6D Object Pose Prediction.
+arXiv:1711.08848, 2017. 3
+
+[39] G. Turk and M. Levoy. The Stanford 3D Scanning Repos-
+itory. Stanford University Computer Graphics Laboratory
+http://graphics.stanford.edu/data/3Dscanrep, 2005. 1, 5
+
+[40] J. Vongkulbhisal, F. De la Torre, and J. P. Costeira. Discrim-
+inative optimization: theory and applications to point cloud
+registration. In IEEE CVPR, 2017. 2
+
+[41] C. Wang, H. K. Galoogahi, C.-H. Lin, and S. Lucey. Deep-
+LK for efﬁcient adaptive object tracking. In 2018 IEEE In-
+ternational Conference on Robotics and Automation (ICRA),
+pages 627–634. IEEE, 2018. 1
+
+[42] Y. Wang, Y. Sun, Z. Liu, S. E. Sarma, M. M. Bronstein, and
+J. M. Solomon. Dynamic graph cnn for learning on point
+clouds. arXiv preprint arXiv:1801.07829, 2018. 1, 2
+
+[43] Z. Wu, S. Song, A. Khosla, F. Yu, L. Zhang, X. Tang, and
+J. Xiao. 3d shapenets: A deep representation for volumetric
+shapes. In Proceedings of the IEEE conference on computer
+vision and pattern recognition, pages 1912–1920, 2015. 3, 5
+[44] Y. Xiang, W. Kim, W. Chen, J. Ji, C. Choy, H. Su, R. Mot-
+taghi, L. Guibas, and S. Savarese. Objectnet3D: A large scale
+database for 3d object recognition. In European Conference
+on Computer Vision, pages 160–176. Springer, 2016. 3
+
+[45] Y. Xiang, T. Schmidt, V. Narayanan,
+
+and D. Fox.
+PoseCNN: A Convolutional Neural Network for 6D Ob-
+ject Pose Estimation in Cluttered Scenes. arXiv preprint
+arXiv:1711.00199, 2017. 3
+
+[46] J. Yang, H. Li, and Y. Jia. Go-ICP: Solving 3d registration ef-
+ﬁciently and globally optimally. In 2013 IEEE International
+Conference on Computer Vision (ICCV), pages 1457–1464,
+Dec 2013. 2, 6
+
+7172
+
+

@@ -1,0 +1,1235 @@
+Revealing Scenes by Inverting Structure from Motion Reconstructions
+
+Francesco Pittaluga1
+
+Sanjeev J. Koppal1
+
+Sing Bing Kang2
+
+Sudipta N. Sinha2
+
+1 University of Florida
+
+2 Microsoft Research
+
+(a) SfM point cloud (top view)
+
+(b) Projected 3D points
+
+(c) Synthesized Image
+
+(d) Original Image
+
+Figure 1: SYNTHESIZING IMAGERY FROM A SFM POINT CLOUD: From left to right: (a) Top view of a SfM reconstruction
+of an indoor scene, (b) 3D points projected into a viewpoint associated with a source image, (c) the image reconstructed using
+our technique, and (d) the source image. The reconstructed image is very detailed and closely resembles the source image.
+
+Abstract
+
+Many 3D vision systems localize cameras within a scene
+using 3D point clouds. Such point clouds are often obtained
+using structure from motion (SfM), after which the images
+are discarded to preserve privacy. In this paper, we show,
+for the ﬁrst time, that such point clouds retain enough in-
+formation to reveal scene appearance and compromise pri-
+vacy. We present a privacy attack that reconstructs color
+images of the scene from the point cloud. Our method is
+based on a cascaded U-Net that takes as input, a 2D multi-
+channel image of the points rendered from a speciﬁc view-
+point containing point depth and optionally color and SIFT
+descriptors and outputs a color image of the scene from
+that viewpoint. Unlike previous feature inversion meth-
+ods [46, 9], we deal with highly sparse and irregular 2D
+point distributions and inputs where many point attributes
+are missing, namely keypoint orientation and scale, the de-
+scriptor image source and the 3D point visibility. We evalu-
+ate our attack algorithm on public datasets [24, 39] and an-
+alyze the signiﬁcance of the point cloud attributes. Finally,
+we show that novel views can also be generated thereby en-
+abling compelling virtual tours of the underlying scene.
+
+1. Introduction
+
+Emerging AR technologies on mobile devices based on
+ARCore [2], ARKit [3], 3D mapping APIs [1], and new
+devices such as HoloLens [15] have set the stage for de-
+ployment of devices with always-on cameras in our homes,
+
+workplaces, and other sensitive environments. Image-based
+localization techniques allow such devices to estimate their
+precise pose within the scene [18, 37, 23, 25]. However,
+these localization methods requires persistent storage of 3D
+models of the scene which contains sparse 3D point clouds
+reconstructed using images and SfM algorithms [38].
+
+SfM source images are usually discarded to safeguard
+privacy. Surprisingly, however, we show that the SfM point
+cloud and the associated attributes such as color and SIFT
+descriptors contain enough information to reconstruct de-
+tailed comprehensible images of the scene (see Fig. 1 and
+Fig. 3). This suggests that the persistent point cloud storage
+poses serious privacy risks that have been widely ignored
+so far but will become increasingly relevant as localization
+services are adopted by a larger user community.
+
+While privacy issues for wearable devices have been
+studied [16], to the best of our knowledge, a systematic
+analysis of privacy risk of storing 3D point cloud maps has
+never been reported. We illustrate the privacy concerns by
+proposing the problem of synthesizing color images from
+an SfM model of a scene. We assume that the reconstructed
+model contains a sparse 3D point cloud with optional at-
+tributes such as descriptors, color, point visibility and asso-
+ciated camera poses but not the source images.
+
+We make the following contributions:
+
+(1) We intro-
+duce the problem of inverting a sparse SfM point cloud
+and reconstructing detailed views of the scene from arbi-
+trary viewpoints. This problem differs from the previously
+studied single-image feature inversion problem due to the
+need to deal with highly sparse point distributions and a
+
+1145
+
+higher degree of missing information in the input, namely
+unknown keypoint orientation and scale, unknown image
+source of descriptors, and unknown 3D point visibilities.
+(2) We present a new approach based on three neural net-
+works where the ﬁrst network performs visibility estima-
+tion, the second network reconstructs the image and the
+third network uses an adversarial framework to further re-
+ﬁne the image quality. (3) We systematically analyze vari-
+ants of the inversion attack that exploits additional attributes
+that may be available, namely per-point descriptors, color
+and information about the source camera poses and point
+visibility and show that even the minimalist representation
+(descriptors only) are prone to the attack. (4) We demon-
+strate the need for developing privacy preserving 3D repre-
+sentations, since the reconstructed images reveal the scene
+in great details and conﬁrm the feasibility of the attack in a
+wide range of scenes. We also show that novel views of the
+scene can be synthesized without any additional effort and
+a compelling virtual tour of a scene can be easily generated.
+The three networks in our cascade are trained on 700+
+indoor and outdoor SfM reconstructions generated from
+500k+ multi-view images taken from the NYU2 [39] and
+MegaDepth [24] datasets. The training data for all three
+networks including the visibility labels were generated au-
+tomatically using COLMAP [38]. Next we compare our
+approach to previous work on inverting image features
+[46, 9, 8] and discuss how the problem of inverting SfM
+models poses a unique set of challenges.
+
+2. Related Work
+
+In this section, we review existing work on inverting im-
+age features and contrast them to inverting SfM point cloud
+models. We then broadly discuss image-to-image transla-
+tion, upsampling and interpolation, and privacy attacks.
+
+Inverting features. The task of reconstructing images from
+features has been explored to understand what is encoded
+by the features, as was done for SIFT features by Weinza-
+epfel et al. [46], HOG features by Vondrick et al. [45] and
+bag-of-words by Kato and Harada [20]. Recent work on
+the topic has been primarily focused on inverting and inter-
+preting CNN features [49, 48, 29]. Dosovitskiy and Brox
+proposed encoder-decoder CNN architectures for inverting
+many different features (DB1) [9] and later incorporated ad-
+versarial training with perceptual loss functions (DB2) [8].
+While DB1 [9] showed some qualitative results on inverting
+sparse SIFT, both papers focused primarily on dense fea-
+tures. In contrast to these feature inversion approaches, we
+focus solely on inverting SIFT descriptors stored along with
+SfM point clouds. While the projected 3D points on a cho-
+sen viewpoint may resemble single image SIFT features,
+there are some key differences. First, our input 2D point
+distributions can be highly sparse and irregular, due to the
+
+typical inherent sparsity of SfM point clouds. Second, the
+SIFT keypoint scale and orientation are unknown since SfM
+methods retain only the descriptors for the 3D points. Third,
+each 3D point typically has only one descriptor sampled
+from an arbitrary source image whose identity is not stored
+either, entailing descriptors with unknown perspective dis-
+tortions and photometric inconsistencies. Finally, the 3D
+point visibilities are also unknown and we will demonstrate
+the importance of visibility reasoning in the paper.
+
+Image-to-Image Translation. Various methods such as
+Pix2Pix [19], CycleGan [50], CoGAN [27] and related un-
+supervised approaches [7, 26, 34] use conditional adversar-
+ial networks to transform between 2D representations, such
+as edge to color, label to color, and day to night images.
+While such networks are typically dense (without holes)
+and usually low-dimensional (single channel or RGB), Con-
+tour2Im [5] takes sparse 2D points sampled along gradients
+along with low-dimensional input features. In contrast to
+our work, these approaches are trained on speciﬁc object
+categories and semantically similar images. While we use
+similar building blocks to these methods (encoder-decoder
+networks, U-nets, adversarial loss, and perceptual loss), our
+networks can generalize to arbitrary images, and are trained
+on large scale indoor and outdoor SfM datasets.
+
+Upsampling. When the input and output domains are iden-
+tical, deep networks have shown excellent results on up-
+sampling and superresolution tasks for images, disparity,
+depth maps and active range maps [4, 28, 43, 36, 17]. How-
+ever, prior upsampling methods typically focus on inputs
+with uniform sparsity. Our approach differs due to the non-
+uniform spatial sampling in the input data which also hap-
+pens to be high dimensional and noisy since the input de-
+scriptors are from different source images and viewpoints.
+
+Novel view synthesis and image-based rendering. Deep
+networks can signiﬁcantly improve photorealism in free
+viewpoint image-based rendering [12, 14]. Additionally,
+several works have also explored monocular depth estima-
+tion and novel view synthesis using U-Nets [11, 24, 31].
+Our approach arguably provides similar photorealistic visu-
+ally quality – remarkably, from sparse SfM reconstructions
+instead of images. This is disappointing news from a pri-
+vacy perspective but could be useful in other settings for
+generating photorealistic images from 3D reconstructions.
+
+CNN-based privacy attacks and defense techniques. Re-
+cently, McPherson et al. [30] and Vasiljevic et al. [44]
+showed that deep models could defeat existing image obfus-
+cation methods. Further more, many image transformations
+can be considered as adding noise and undoing them as de-
+noising, and here deep networks have been quite success-
+ful [47]. To defend against CNN-based attacks, attempts at
+learning CNN-resistant transformations have shown some
+
+146
+
+promise [33, 10, 35, 13]. Concurrent to our work, Speciale
+et al. [41] introduced the privacy preserving image-based
+localization problem to address the privacy issues we have
+brought up. They proposed a new camera pose estimation
+technique using an obfuscated representation of the map ge-
+ometry which can defend against our inversion attack.
+
+3. Method
+
+The input to our pipeline is a feature map generated from
+a SfM 3D point cloud model given a speciﬁc viewpoint i.e.
+a set of camera extrinsic parameters. We obtain this fea-
+ture map by projecting the 3D points on the image plane
+and associating the 3D point attributes (SIFT descriptor,
+color, etc.) with the discrete 2D pixel where the 3D point
+projects in the image. When multiple points project to the
+same pixel, we retain the attributes for the point closest to
+the camera and store its depth. We train a cascade of three
+encoder-decoder neural networks for visibility estimation,
+coarse image reconstruction and the ﬁnal reﬁnement step
+which recovers ﬁne details in the reconstructed image.
+
+Visibility Estimation. Since SfM 3D point clouds are of-
+ten quite sparse and the underlying geometry and topology
+of the surfaces in the scene are unknown, it is not possi-
+ble to easily determine which 3D points should be consid-
+ered as visible from a speciﬁc camera viewpoint just us-
+ing z-buffering. This is because a sufﬁcient number of 3D
+points may not have been reconstructed on the foreground
+occluding surfaces. This produces 2D pixels in the input
+feature maps which are associated with 3D points in the
+background i.e. lie on surfaces which are occluded from
+that viewpoint. Identifying and removing such points from
+the feature maps is critical to generating high-quality im-
+ages and avoiding visual artifacts. We propose to recover
+point visibility using a data-driven neural network-based
+approach, which we refer to as VISIBNET. We also evaluate
+two geometric methods which we refer to as VISIBSPARSE
+and VISIBDENSE. Both geometric methods however re-
+quire additional information which might be unavailable.
+
+Coarse Image Reconstructon and Reﬁnement. Our tech-
+nique for image synthesis from feature maps consists of a
+coarse image reconstruction step followed by a reﬁnement
+step. COARSENET is conditioned on the input feature map
+and produces an RGB image of the same width and height
+as the feature map. REFINENET outputs the ﬁnal color im-
+age which has the same size, given the input feature map
+along with the image output of COARSENET as its input.
+
+3.1. Visibility Estimation
+
+If we did not perform explicit visibility prediction in
+our pipeline, some degree of implicit visibility reasoning
+would still be carried out by the image synthesis network
+COARSENET. In theory, this network has access to the input
+
+depths and could learn to reason about visibility. However,
+in practice, we found that this approach to be inaccurate,
+especially in regions where the input feature maps contain
+a low ratio of visible to occluded points. Qualitative exam-
+ples of these failure cases are shown in Figure 5. Therefore
+we explored explicit visibility estimation approaches based
+on geometric reasoning as well as learning.
+
+VisibSparse. We explored a simple geometric method that
+we refer to as VISIBSPARSE. It is based on the “point splat-
+ting” paradigm used in computer graphics. By considering
+only the depth channel in the input, we apply a min ﬁlter
+with a k × k kernel on the feature map to obtain a ﬁltered
+depth map. Here, we used k = 3 based on empirical test-
+ing. Each entry in the feature map whose depth value is no
+greater than 5% of the depth value in the ﬁltered depth map
+is retained as visible. Otherwise, the point is considered
+occluded and the associated entry in the input is removed.
+
+VisibDense. When the camera poses for the source im-
+ages computed during SfM and the image measurements
+are stored along with the 3D point cloud, it is often possible
+to exploit that data to compute a dense scene reconstruc-
+tion. Labatut et al. [21] proposed such a method to com-
+pute a dense triangulated mesh by running space carving on
+the tetrahedral cells of the 3D Delaunay triangulation of the
+sparse SfM points. We used this method, implemented in
+COLMAP [38] and computed 3D point visibility based on
+the reconstructed mesh model using traditional z-buffering.
+
+VisibNet. A geometric method such as VISIBDENSE can-
+not be used when the SfM cameras poses and image mea-
+surements are unavailable. We therefore propose a general
+regression-based approach that directly predicts the visibil-
+ity from the input feature maps, where the predictive model
+is trained using supervised learning. Speciﬁcally, we train
+an encoder-decoder neural network which we refer to as
+VISIBNET to classify each input point as either “visible”
+or “occluded”. Ground truth visibility labels were gener-
+ated automatically by leveraging VISIBDENSE on all train,
+test, and validation scenes. Using VISIBNET’s predictions
+to “cull” occluded points from the input feature maps prior
+to running COARSENET signiﬁcantly improves the quality
+of the reconstructed images, especially in regions where the
+input feature map contains fewer visible points compared to
+the number of points that are actually occluded.
+
+3.2. Architecture
+
+A sample input feature map as well as our complete net-
+work architecture consisting of VISIBNET, COARSENET,
+and REFINENET is shown in Figure 2. The input to our
+network is an H × W × n dimensional feature map consist-
+ing of n-dimensional feature vectors with different combi-
+nations of depth, color, and SIFT features at each 2D loca-
+tion. Except for the number of input/output channels in the
+
+147
+
+nD 
+Input Tensor
+
+=
+
+z  RGB     SIFT descriptor
+
+encoder
+
+decoder
+
+conv. layers
+
+nD Input
+
+VisibNet
+
+Visibility
+
+Map
+
+CoarseNet
+
+RGB image
+
+RefineNet
+
+RGB image
+
+(output)
+
+Figure 2: NETWORK ARCHITECTURE: Our network has three sub-networks – VISIBNET, COARSENET and REFINENET.
+The upper left shows that the input to our network is a multi-dimensional nD array. The paper explores network variants where
+the inputs are different subsets of depth, color and SIFT descriptors. The three sub-networks have similar architectures. They
+are U-Nets with encoder and decoder layers with symmetric skip connections. The extra layers at the end of the decoder
+layers (marked in orange) are there to help with high-dimensional inputs. See the text and supplementary material for details.
+
+ﬁrst/ﬁnal layers, each sub-network has the same architec-
+ture consisting of U-Nets with a series of encoder-decoder
+layers with skip connections. Compared to conventional U-
+Nets, our network has a few extra convolutional layers at
+the end of the decoder layers. These extra layers facilitate
+propagation of information from the low-level features, par-
+ticularly the information extracted from SIFT descriptors,
+via the skip connections to a larger pixel area in the out-
+put, while also helping to attenuate visual artifacts resulting
+from the highly sparse and irregular distribution of these
+features. We use nearest neighbor upsampling followed by
+standard convolutions instead of transposed convolutions as
+the latter are known to produce artifacts [32].
+
+3.3. Optimization
+
+We separately train the sub-networks in our architecture,
+VISIBNET, COARSENET, and REFINENET. Batch normal-
+ization was used in every layer, except the ﬁnal one in each
+network. We applied Xavier initialization and projections
+were generated on-the-ﬂy to facilitate data augmentation
+during training and novel view generation after training.
+VISIBNET was trained ﬁrst to classify feature map points
+as either visible or occluded, using ground-truth visibility
+masks generated automatically by running VISIBDENSE for
+all train, test, and validation samples. Given training pairs
+of input feature maps Fx ∈ RH×W ×N and target source
+images x ∈ RH×W ×3, VISIBNET’s objective is
+
+LV (x) = −
+
+M
+
+X
+
+i=1
+
+(cid:2)Uxlog(cid:0)(V (Fx) + 1)/2(cid:1)+
+
+(1)
+
+(1 − Ux)log(cid:0)(1 − V (Fx))/2(cid:1)(cid:3)i,
+
+where V : RH×W ×N → RW ×H×1 denotes a differen-
+tiable function representing VISIBNET, with learnable pa-
+rameters, Ux ∈ RH×W ×1 denotes the ground-truth visibil-
+ity map for feature map Fx, and the summation is carried
+out over the set of M non-zero spatial locations in Fx.
+
+COARSENET was trained next, using a combination of
+an L1 pixel loss and an L2 perceptual loss (as in [22, 8])
+over the outputs of layers relu1 1, relu2 2, and relu3 3 of
+VGG16 [40] pre-trained for image classiﬁcation on the Im-
+ageNet [6] dataset. The weights of VISIBNET remained
+ﬁxed while COARSENET was being trained using the loss
+
+LC = ||C(Fx) − x||1 + α
+
+3
+
+X
+
+i=1
+
+||φi(C(Fx)) − φi(x)||2
+
+2, (2)
+
+where C : RH×W ×N → RH×W ×3 denotes a differentiable
+function representing COARSENET, with learnable param-
+×64, φ2 : RH×W ×3 →
+eters, and φ1 : RH×W ×3 → R
+×256 denote
+R
+the layers relu1 1, relu2 2, and relu2 2, respectively, of the
+pre-trained VGG16 network.
+
+×128, and φ3 : RH×W ×3 → R
+
+W
+4
+
+W
+8
+
+W
+2
+
+H
+8
+
+H
+4
+
+H
+2
+
+×
+
+×
+
+×
+
+REFINENET was trained last using a combination of an
+L1 pixel loss, the same L2 perceptual loss as COARSENET,
+and an adversarial loss. While training REFINENET, the
+weights of VISIBNET and COARSENET remained ﬁxed.
+For adversarial training, we used a conditional discrimi-
+nator whose goal was to distinguish between real source
+images used to generate the SfM models and images syn-
+thesized by REFINENET. The discriminator trained using
+cross-entropy loss similar to Eq. (1). Additionally, to sta-
+bilize adversarial training, φ1(R(Fx))1, φ2(R(Fx))1, and
+
+148
+
+Desc.
+Src.
+
+Si
+Si
+Si
+Si
+
+M
+
+MAE
+
+SSIM
+
+Inp. Feat.
+D O S
+X X X .126
+X X × .133
+X × X .129
+X × × .131
+X × × .147
+
+20% 60% 100% 20% 60% 100%
+.631
+.597
+.599
+.578
+.524
+
+.105
+.111
+.107
+.113
+.128
+
+.101
+.105
+.102
+.109
+.123
+
+.539
+.499
+.507
+.477
+.443
+
+.605
+.568
+.574
+.550
+.499
+
+Table 1:
+INVERTING SINGLE IMAGE SIFT FEATURES:
+The top four rows compare networks designed for differ-
+ent subsets of single image (Si) inputs: descriptor (D), key-
+point orientation (O) and scale (S). Test error (MAE) and
+accuracy (SSIM) obtained when 20%, 60% and all the SIFT
+features are used. Lower MAE and higher SSIM values are
+better. The last row is for when the descriptors originate
+from multiple (M) different and unknown source images.
+
+φ3(R(Fx))1 were concatenated before the ﬁrst, second, and
+third convolutional layers of the discriminator as done in
+[42]. REFINENET denoted as R() has the following loss.
+
+LR =||R(Fx) − x||1 + α
+
+3
+
+X
+
+i=1
+
+||φi(R(Fx)) − φi(x)||2
+
+2
+
+(3)
+
++ β[log(D(x)) + log(1 − D(R(Fx)))].
+
+Here, the two functions, R : RH×W ×N +3 → RH×W ×3
+and D : RH×W ×N +3 → R denote differentiable functions
+representing REFINENET and the discriminator, respec-
+tively, with learnable parameters. We trained REFINENET
+to minimize LR by applying alternating gradient updates
+to REFINENET and the discriminator. The gradients were
+computed on mini-batches of training data, with different
+batches used to update REFINENET and the discriminator.
+
+4. Experimental Results
+
+We now report a systematic evaluation of our method.
+Some of our results are qualitatively summarized in Fig.
+3, demonstrating robustness to various challenges, namely,
+missing information in the point clouds, effectiveness of our
+visibility estimation, and the sparse and irregular distribu-
+tion of input samples over a large variety of scenes.
+
+Dataset. We use the MegaDepth [24] and NYU [39]
+datasets in our experiments. MegaDepth (MD) is an In-
+ternet image dataset with ∼150k images of 196 landmark
+scenes obtained from Flickr. NYU contains ∼400k images
+of 464 indoor scenes captured with the Kinect (we only used
+the RGB images). These datasets cover very different scene
+content, image resolution, and generate very different dis-
+tribution of SfM points and camera poses. Generally, NYU
+scenes produce far fewer SfM points than the MD scenes.
+
+Data
+
+MD
+
+NYU
+
+Accuracy
+
+Inp. Feat.
+z
+X × × .948
+X × X .938
+X X × .949
+X X X .952
+X × × .892
+X × X .897
+X X × .895
+X X X .906
+
+D C 20% 60% 100%
+.946
+.941
+.948
+.950
+.908
+.910
+.909
+.917
+
+.948
+.943
+.951
+.952
+.907
+.908
+.907
+.916
+
+Table 2: EVALUATION OF VISIBNET: We trained four ver-
+sion of VISIBNET, each with a different set of input at-
+tributes, namely, z (depth), D (SIFT) and C (color) to eval-
+uate their relative importance. Ground truth labels were ob-
+tained with VisibDense. The table reports mean classiﬁca-
+tion accuracy on the test set for the NYU and MD datasets.
+The results show that VISIBNET achieves accuracy greater
+than 93.8% and 89.2% on MD and NYU respectively and is
+not very sensitive to sparsity levels and input attributes.
+
+partitioned the scenes into training, validation, and testing
+sets with 441, 80, and 139 scenes respectively. All images
+of one scene were included only in one of the three groups.
+We report results using both the average mean absolute error
+(MAE), where color values are scaled to the range [0,1].
+and average structured similarity (SSIM). Note that lower
+MAE and higher SSIM values indicate better results.
+
+Inverting Single Image SIFT Features. Consider the sin-
+gle image scenario, with trivial visibility estimation and
+identical input to [9]. We performed an ablation study in
+this scenario, measuring the effect of inverting features with
+unknown keypoint scale, orientation, and multiple unknown
+image sources. Four variants of COARSENET were trained,
+then tested at three sparsity levels. The results are shown
+in Table 1 and Figure 4. Table 1 reports MAE and SSIM
+across a combined MD and NYU dataset. The sparsity per-
+centage refers to how many randomly selected features were
+retained in the input, and our method handles a wide range
+of sparsity reasonably well. From the examples in Figure 4,
+we observe that the networks are surprisingly robust at in-
+verting features with unknown orientation and scale; while
+the accuracy drops a bit as expected, the reconstructed im-
+ages are still recognizable. Finally, we quantify the effect
+of unknown and different image sources for the SIFT fea-
+tures. The last row of Table 1 shows that indeed the feature
+inversion problem becomes harder but the results are still re-
+markably good. Having demonstrated that our work solves
+a harder problem than previously tackled, we now report
+results on inverting SfM points and their features.
+
+4.1. Visibility Estimation
+
+Preprocessing. We processed the 660 scenes in MD and
+NYU using the SfM implementation in COLMAP [38]. We
+
+We ﬁrst independently evaluate the performance of the
+proposed VISIBNET model and compare it to the geomet-
+
+149
+
+Figure 3: QUALITATIVE RESULTS: Each result is a 3 × 1 set of square images, showing point clouds (with occluded points
+in red), image reconstruction and original. The ﬁrst four columns (top and bottom) show results from the MegaDepth dataset
+(internet scenes) and the last four columns (top and bottom) show results from indoor NYU scenes. Sparsity: Our network
+handles a large variety in input sparsity (density decreases from left to right). In addition, perspective projection accentuates
+the spatially-varying density differences, and the MegaDepth outdoor scenes have concentrated points in the input whereas
+NYU indoor scenes have far samples. Further, the input points are non-homogeneous, with large holes which our method
+gracefully ﬁlls in. Visual effects: For the ﬁrst four columns (MD scenes) our results give the pleasing effect of uniform
+illumination (see top of ﬁrst column). Since our method relies on SfM, moving objects are not recovered. Scene diversity:
+The fourth column is an aerial photograph, an unusual category that is still recovered well. For the last four columns (NYU
+scenes), despite lower sparsity, we can recover textures in common household scenes such as bathrooms, classrooms and
+bedrooms. The variety shows that our method does not learn object categories and works on any scene. Visibility: All scenes
+beneﬁt from visibility prediction using VISIBNET which for example was crucial for the bell example (lower 2nd column).
+
+ric methods VISIBSPARSE and VISIBDENSE. We trained
+four variants of VISIBNET designed for different subsets of
+input attributes to classify points in the input feature map
+as “visible” or “occluded”. We report classiﬁcation accu-
+racy separately on the MD and NYU test sets even though
+the network was trained on the combined training set (see
+Table 2). We observe that VISIBNET is largely insensitive
+to scene type, sparsity levels, and choice of input attributes
+such as depth, color, and descriptors. The VISIBNET vari-
+ant designed for depth only has 94.8% and 89.2% mean
+
+classiﬁcation accuracy on MD and NYU test sets, respec-
+tively, even when only 20% of the input samples were used
+to simulate sparse inputs. Table 3 shows that when points
+predicted as occluded by VISIBNET are removed from the
+input to COARSENET, we observe a consistent improve-
+ment when compared to COARSENET carrying both the
+burdens of visibility and image synthesis (denoted as Im-
+plicit in the table). While the improvement may not seem
+numerically large, in Figure 5 we show insets where visual
+artifacts (bookshelf above, building below) are removed.
+
+150
+
+(a) Input
+
+(b) SIFT
+
+(c) SIFT + s
+
+(d) SIFT + o
+
+(e) SIFT + s + o
+
+(f) Original
+
+Figure 4: INVERTING SIFT FEATURES IN A SINGLE IMAGE: (a) 2D keypoint locations. Results obtained with (b) only
+descriptor, (c) descriptor and keypoint scale, (d) descriptor and keypoint orientation, (e) descriptor, scale and orientation. (f)
+Original image. Results from using only descriptors (2nd column) are only slightly worse than the baseline (5th column).
+
+(a) Input
+
+(b) Pred. (VisibNet)
+
+(c) Implicit
+
+(d) VisibNet
+
+(e) VisibDense
+
+(f) Original
+
+Figure 5: IMPORTANCE OF VISIBILITY ESTIMATION: Examples showing (a) input 2D point projections (in blue), (b) pre-
+dicted visibility from VISIBNET – occluded (red) and visible (blue) points, (c–e) results from IMPLICIT (no explicit visibility
+estimation), VISIBNET (uses a CNN) and VISIBDENSE (uses z-buffering and dense models), and (f) the original image.
+
+4.2. Relative Signiﬁcance of Point Attributes
+
+and SIFT descriptors signiﬁcantly improves visual quality.
+
+We trained four variants of COARSENET, each with a
+different set of the available SfM point attributes. The goal
+here is to measure the relative importance of each of the at-
+tributes. This information could be used to decide which
+optional attributes should be removed when storing SfM
+model to enhance privacy. We report reconstruction error on
+the test set for both indoor (NYU) and outdoor scenes (MD)
+for various sparsity levels in Table 4 and show qualitative
+evaluation on the test set in Figure 6. The results indicate
+that our approach is largely invariant to sparsity and capable
+of capturing very ﬁne details even when the input feature
+map contains just depth, although, not surprisingly, color
+
+4.3. Signiﬁcance of ReﬁneNet
+
+In Figure 7 we qualitatively compare two scenes where
+the feature maps had only depth and descriptors (left) and
+when it had all the attributes (right). For privacy preser-
+vation, these results are sobering. While Table 4 showed
+that COARSENET struggles when color is dropped (sug-
+gesting an easy solution of removing color for privacy),
+Figure 7 (left) unfortunately shows that REFINENET recov-
+ers plausible colors and improves results a lot. Of course,
+REFINENET trained on all features also does better than
+COARSENET although less dramatically (Figure 7 (right)).
+
+151
+
+Data
+
+MD
+
+NYU
+
+Visibility
+
+Est.
+
+Implicit
+
+VisibSparse
+
+VisibNet
+
+VisibDense
+
+Implicit
+
+VisibSparse
+
+VisibNet
+
+VisibDense
+
+MAE
+
+SSIM
+
+20% 60% 100% 20% 60% 100%
+.445
+.201
+.440
+.202
+.448
+.201
+.201
+.451
+.592
+.121
+.592
+.122
+.595
+.120
+.120
+.600
+
+.197
+.197
+.196
+.196
+.100
+.100
+.098
+.097
+
+.412
+.408
+.415
+.417
+.541
+.539
+.543
+.545
+
+.436
+.432
+.440
+.442
+.580
+.579
+.583
+.587
+
+.195
+.196
+.195
+.195
+.094
+.094
+.092
+.090
+
+Table 3: IMPORTANCE OF VISIBILITY ESTIMATION: Both
+sub-tables show results obtained using IMPLICIT i.e. no
+explicit occlusion reasoning where of burden of visibility
+estimation implicitly falls on COARSENET, VisibNet and
+the geometric methods VISIBSPARSE and VISIBDENSE.
+Lower MAE and higher SSIM values are better.
+
+z + D
+
+z + D + C
+
+IMPORTANCE OF REFINENET:
+
+Figure 7:
+(Top row)
+COARSENET results. (Bottom Row) REFINENET results.
+(Left) Networks use depth and descriptors (z + D). (Right)
+Networks use depth, descriptor and color (z + D + C).
+
+Data
+
+MD
+
+NYU
+
+MAE
+
+SSIM
+
+Inp. Feat.
+z
+X × × .258
+X × X .210
+X X × .228
+X X X .201
+X × × .295
+X × X .148
+X X × .207
+X X X .121
+
+D C 20% 60% 100% 20% 60% 100%
+.250
+.403
+.438
+.448
+.197
+.546
+.539
+.594
+
+.254
+.204
+.223
+.196
+.290
+.121
+.179
+.099
+
+.253
+.202
+.221
+.195
+.289
+.111
+.171
+.093
+
+.264
+.378
+.410
+.414
+.244
+.491
+.493
+.542
+
+.254
+.394
+.430
+.439
+.209
+.528
+.528
+.582
+
+Table 4: EFFECT OF POINT ATTRIBUTES: Performance of
+four networks designed for different sets of input attributes
+– z (depth), D (SIFT) and C (color), on MD and NYU. Input
+sparsity is simulated by applying random dropout to input
+samples during training and testing.
+
+z
+
+z + D
+
+z + C
+
+z + D + C
+
+orig
+
+Figure 6: EFFECT OF POINT ATTRIBUTES: Results ob-
+tained with different attributes. Left to right: depth [z],
+depth + SIFT [z + D], depth + color [z + C], depth + SIFT
++ color [z + D + C] and the original image. (see Table 4).
+
+4.4. Novel View Synthesis
+
+Our technique can be used to easily generate realistic
+novel views of the scene. While quantitatively evaluating
+
+Figure 8: NOVEL VIEW SYNTHESIS: Synthesized images
+from virtual viewpoints in two NYU scenes [39] helps to
+interpret the cluttered scenes (see supplementary video).
+
+such results is more difﬁcult (in contrast to our experiments
+where aligned real camera images are available), we show
+qualitative results in Figure 8 and generate virtual tours
+based on the synthesized novel views1. Such novel view
+based virtual tours can make scene interpretation easier for
+an attacker even when the images contain some artifacts.
+
+5. Conclusion
+
+In this paper, we introduced a new problem, that of in-
+verting a sparse SfM point cloud and reconstructing color
+images of the underlying scene. We demonstrated that sur-
+prisingly high quality images can be reconstructed from the
+limited amount of information stored along with sparse 3D
+point cloud models. Our work highlights the privacy and
+security risks associated with storing 3D point clouds and
+the necessity for developing privacy preserving point cloud
+representations and camera localization techniques, where
+the persistent scene model data cannot easily be inverted to
+reveal the appearance of the underlying scene. This was
+also the primary goal in concurrent work on privacy pre-
+serving camera pose estimation [41] which proposes a de-
+fense against the type of attacks investigated in our paper.
+Another interesting avenue of future work would be to ex-
+plore privacy preserving features for recovering correspon-
+dences between images and 3D models.
+
+1see the video in the supplementary material.
+
+152
+
+References
+
+[1] 6D.AI. http://6d.ai/, 2018. 1
+[2] ARCore. developers.google.com/ar/, 2018. 1
+[3] ARKit. developer.apple.com/arkit/, 2018. 1
+[4] Z. Chen, V. Badrinarayanan, G. Drozdov, and A. Rabinovich.
+Estimating depth from RGB and sparse sensing. In ECCV,
+pages 167–182, 2018. 2
+
+[5] T. Dekel, C. Gan, D. Krishnan, C. Liu, and W. T. Free-
+man. Smart, sparse contours to represent and edit images.
+In CVPR, 2018. 2
+
+[6] J. Deng, W. Dong, R. Socher, L.-J. Li, K. Li, and L. Fei-
+Fei. ImageNet: A large-scale hierarchical image database.
+In CVPR, pages 248–255, 2009. 4
+
+[7] J. Donahue, P. Kr¨ahenb¨uhl, and T. Darrell. Adversarial fea-
+
+ture learning. In ICLR, 2017. 2
+
+[8] A. Dosovitskiy and T. Brox. Generating images with percep-
+tual similarity metrics based on deep networks. In Advances
+in Neural Information Processing Systems, pages 658–666,
+2016. 2, 4
+
+[9] A. Dosovitskiy and T. Brox. Inverting visual representations
+with convolutional networks. In CVPR, pages 4829–4837,
+2016. 1, 2, 5
+
+[10] H. Edwards and A. Storkey. Censoring representations with
+
+an adversary. In ICLR, 2016. 3
+
+[11] D. Eigen, C. Puhrsch, and R. Fergus. Depth map prediction
+from a single image using a multi-scale deep network.
+In
+Advances in neural information processing systems, pages
+2366–2374, 2014. 2
+
+[12] J. Flynn, I. Neulander, J. Philbin, and N. Snavely. Deep-
+stereo: Learning to predict new views from the world’s im-
+agery. In CVPR, pages 5515–5524, 2016. 2
+
+[13] J. Hamm. Minimax ﬁlter: learning to preserve privacy from
+inference attacks. The Journal of Machine Learning Re-
+search, 18(1):4704–4734, 2017. 3
+
+[14] P. Hedman, J. Philip, T. Price, J.-M. Frahm, G. Drettakis, and
+G. Brostow. Deep blending for free-viewpoint image-based
+rendering. ACM Transactions on Graphics (SIGGRAPH
+Asia Conference Proceedings), 37(6), November 2018. 2
+
+[15] Hololens. https://www.microsoft.com/en-us/
+
+hololens, 2016. 1
+
+[16] J. Hong. Considering privacy issues in the context of google
+
+glass. Commun. ACM, 56(11):10–11, 2013. 1
+
+[17] T.-W. Hui, C. C. Loy, and X. Tang. Depth map super-
+In ECCV, 2016.
+
+resolution by deep multi-scale guidance.
+2
+
+[18] A. Irschara, C. Zach, J.-M. Frahm, and H. Bischof. From
+structure-from-motion point clouds to fast location recogni-
+tion. In CVPR, pages 2599–2606, 2009. 1
+
+[19] P. Isola, J.-Y. Zhu, T. Zhou, and A. A. Efros. Image-to-image
+translation with conditional adversarial networks. In CVPR,
+pages 1125–1134, 2017. 2
+
+[22] C. Ledig, L. Theis, F. Husz´ar, J. Caballero, A. Cunningham,
+A. Acosta, A. Aitken, A. Tejani, J. Totz, Z. Wang, et al.
+Photo-realistic single image super-resolution using a genera-
+tive adversarial network. In CVPR, pages 4681–4690, 2017.
+4
+
+[23] Y. Li, N. Snavely, D. Huttenlocher, and P. Fua. Worldwide
+pose estimation using 3d point clouds. In ECCV, pages 15–
+29. Springer, 2012. 1
+
+[24] Z. Li and N. Snavely. Megadepth: Learning single-view
+depth prediction from internet photos. In Computer Vision
+and Pattern Recognition (CVPR), 2018. 1, 2, 5
+
+[25] H. Lim, S. N. Sinha, M. F. Cohen, M. Uyttendaele, and
+H. J. Kim. Real-time monocular image-based 6-dof localiza-
+tion. The International Journal of Robotics Research, 34(4-
+5):476–492, 2015. 1
+
+[26] M.-Y. Liu, T. Breuel, and J. Kautz. Unsupervised image-to-
+image translation networks. In Advances in Neural Informa-
+tion Processing Systems, pages 700–708, 2017. 2
+
+[27] M.-Y. Liu and O. Tuzel. Coupled generative adversarial net-
+In Advances in neural information processing sys-
+
+works.
+tems, pages 469–477, 2016. 2
+
+[28] J. Lu and D. Forsyth. Sparse depth super resolution.
+
+In
+
+CVPR, pages 2245–2253, 2015. 2
+
+[29] A. Mahendran and A. Vedaldi. Understanding deep image
+In CVPR, pages 5188–
+
+representations by inverting them.
+5196, 2015. 2
+
+[30] R. McPherson, R. Shokri, and V. Shmatikov. Defeat-
+ing image obfuscation with deep learning. arXiv preprint
+arXiv:1609.00408, 2016. 2
+
+[31] M. Moukari, S. Picard, L. Simoni, and F. Jurie. Deep multi-
+scale architectures for monocular depth estimation. In ICIP,
+pages 2940–2944, 2018. 2
+
+[32] A. Odena, V. Dumoulin, and C. Olah. Deconvolution and
+
+checkerboard artifacts. Distill, 2016. 4
+
+[33] F. Pittaluga, S. Koppal, and A. Chakrabarti. Learning privacy
+preserving encodings through adversarial training. In 2019
+IEEE Winter Conference on Applications of Computer Vision
+(WACV), pages 791–799. IEEE, 2019. 3
+
+[34] X. Qi, Q. Chen, J. Jia, and V. Koltun. Semi-parametric image
+
+synthesis. In CVPR, pages 8808–8816, 2018. 2
+
+[35] N. Raval, A. Machanavajjhala, and L. P. Cox. Protecting vi-
+sual secrets using adversarial nets. In CV-COPS 2017, CVPR
+Workshop, pages 1329–1332, 2017. 3
+
+[36] G. Riegler, M. R¨uther, and H. Bischof. ATGV-Net: Accurate
+
+depth super-resolution. In ECCV, pages 268–284, 2016. 2
+
+[37] T. Sattler, B. Leibe, and L. Kobbelt. Fast image-based lo-
+In ICCV, pages
+
+calization using direct 2d-to-3d matching.
+667–674. IEEE, 2011. 1
+
+[38] J. L. Sch¨onberger and J.-M. Frahm. Structure-from-motion
+
+revisited. In CVPR, pages 4104–4113, 2016. 1, 2, 3, 5
+
+[20] H. Kato and T. Harada. Image reconstruction from bag-of-
+
+[39] N. Silberman, D. Hoiem, P. Kohli, and R. Fergus.
+
+visual-words. In CVPR, pages 955–962, 2014. 2
+
+[21] P. Labatut, J.-P. Pons, and R. Keriven. Efﬁcient multi-view
+reconstruction of large-scale scenes using interest points, De-
+launay triangulation and graph cuts.
+In ICCV, pages 1–8,
+2007. 3
+
+Indoor
+In
+
+segmentation and support inference from rgbd images.
+ECCV, 2012. 1, 2, 5, 8
+
+[40] K. Simonyan and A. Zisserman. Very deep convolutional
+networks for large-scale image recognition. In ICLR, 2015.
+4
+
+153
+
+[41] P. Speciale, J. L. Sch¨onberger, S. B. Kang, S. N. Sinha, and
+M. Pollefeys. Privacy preserving image-based localization.
+arXiv preprint arXiv:1903.05572, 2019. 3, 8
+
+[42] D. Sungatullina, E. Zakharov, D. Ulyanov, and V. Lempit-
+sky. Image manipulation with perceptual discriminators. In
+ECCV, pages 579–595, 2018. 5
+
+[43] J. Uhrig, N. Schneider, L. Schneider, U. Franke, T. Brox,
+In International
+
+and A. Geiger. Sparsity invariant CNNs.
+Conference on 3D Vision (3DV), pages 11–20, 2017. 2
+
+[44] I. Vasiljevic, A. Chakrabarti, and G. Shakhnarovich. Exam-
+ining the impact of blur on recognition by convolutional net-
+works. arXiv preprint arXiv:1611.05760, 2016. 2
+
+[45] C. Vondrick, A. Khosla, T. Malisiewicz, and A. Torralba.
+In CVPR,
+
+Hoggles: Visualizing object detection features.
+pages 1–8, 2013. 2
+
+[46] P. Weinzaepfel, H. J´egou, and P. P´erez. Reconstructing an
+image from its local descriptors. In CVPR, pages 337–344,
+2011. 1, 2
+
+[47] L. Xu, J. S. Ren, C. Liu, and J. Jia. Deep convolutional neural
+network for image deconvolution.
+In Advances in Neural
+Information Processing Systems, pages 1790–1798, 2014. 2
+[48] J. Yosinski, J. Clune, A. Nguyen, T. Fuchs, and H. Lipson.
+Understanding neural networks through deep visualization.
+In ICML Workshop on Deep Learning, 2015. 2
+
+[49] M. D. Zeiler and R. Fergus. Visualizing and understanding
+convolutional networks. In ECCV, pages 818–833. Springer,
+2014. 2
+
+[50] J.-Y. Zhu, T. Park, P. Isola, and A. A. Efros. Unpaired image-
+to-image translation using cycle-consistent adversarial net-
+works. In CVPR, pages 2223–2232, 2017. 2
+
+154
+
+

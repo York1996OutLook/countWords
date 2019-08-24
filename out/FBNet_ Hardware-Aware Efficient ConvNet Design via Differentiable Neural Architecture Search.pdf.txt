@@ -1,0 +1,1597 @@
+FBNet: Hardware-Aware Efﬁcient ConvNet Design
+
+via Differentiable Neural Architecture Search
+
+Bichen Wu1 ∗, Xiaoliang Dai2∗, Peizhao Zhang3, Yanghan Wang3, Fei Sun3,
+
+Yiming Wu3, Yuandong Tian3, Peter Vajda3, Yangqing Jia3, and Kurt Keutzer1
+
+1UC Berkeley, 2Princeton University, 3Facebook Inc.
+
+{bichen, keutzer}@berkeley.edu, xdai@princeton.edu,
+
+{stzpz, yanghan, feisun, wyiming, yuandong, vajdap, jiayq}@fb.com
+
+Abstract
+
+Designing accurate and efﬁcient ConvNets for mobile
+devices is challenging because the design space is com-
+binatorially large. Due to this, previous neural archi-
+tecture search (NAS) methods are computationally expen-
+sive. ConvNet architecture optimality depends on fac-
+tors such as input resolution and target devices. How-
+ever, existing approaches are too resource demanding for
+case-by-case redesigns. Also, previous work focuses pri-
+marily on reducing FLOPs, but FLOP count does not al-
+ways reﬂect actual latency. To address these, we propose
+a differentiable neural architecture search (DNAS) frame-
+work that uses gradient-based methods to optimize Con-
+vNet architectures, avoiding enumerating and training in-
+dividual architectures separately as in previous methods.
+FBNets (Facebook-Berkeley-Nets), a family of models dis-
+covered by DNAS surpass state-of-the-art models both de-
+signed manually and generated automatically. FBNet-B
+achieves 74.1% top-1 accuracy on ImageNet with 295M
+FLOPs and 23.1 ms latency on a Samsung S8 phone, 2.4x
+smaller and 1.5x faster than MobileNetV2-1.3[17] with
+similar accuracy. Despite higher accuracy and lower la-
+tency than MnasNet[20], we estimate FBNet-B’s search
+cost is 420x smaller than MnasNet’s, at only 216 GPU-
+hours. Searched for different resolutions and channel sizes,
+FBNets achieve 1.5% to 6.4% higher accuracy than Mo-
+bileNetV2. The smallest FBNet achieves 50.2% accuracy
+and 2.9 ms latency (345 frames per second) on a Sam-
+sung S8. Over a Samsung-optimized FBNet, the iPhone-X-
+optimized model achieves a 1.4x speedup on an iPhone X.
+FBNet models are open-sourced at https://github.
+com/facebookresearch/mobile-vision.
+
+∗Work done while interning at Facebook.
+
+Search	space
+
+Target	
+device
+
+Deploy
+
+Benchmark
+
+…
+
+Operator
+Latency
+
+LUT
+
+Neural	Architectures
+
+…
+
+Sampling
+
+Stochastic	super	net
+
+Training	
+super	net	
+
+…
+
+…
+
+Proxy
+dataset
+
+…
+
+Distribution
+
+Probability
+
+Operators
+
+Figure 1. Differentiable neural architecture search (DNAS) for
+ConvNet design. DNAS explores a layer-wise space that each
+layer of a ConvNet can choose a different block. The search space
+is represented by a stochastic super net. The search process trains
+the stochastic super net using SGD to optimize the architecture
+distribution. Optimal architectures are sampled from the trained
+distribution. The latency of each operator is measured on target
+devices and used to compute the loss for the super net.
+
+1. Introduction
+
+ConvNets are the de facto method for computer vision.
+In many computer vision tasks, a better ConvNet design
+usually leads to signiﬁcant accuracy improvement. In pre-
+vious works, accuracy improvement comes at the cost of
+higher computational complexity, making it more challeng-
+ing to deploy ConvNets to mobile devices, on which com-
+puting capacity is limited.
+Instead of solely focusing on
+accuracy, recent work also aims to optimize for efﬁciency,
+especially latency. However, designing efﬁcient and accu-
+rate ConvNets is difﬁcult due to the challenges below.
+
+Intractable design space: The design space of a Con-
+vNet is combinatorial. Using VGG16 [18] as a motivat-
+ing example: VGG16 contains 16 layers. Assume for
+each layer of the network, we can choose a different ker-
+nel size from {1, 3, 5} and a different ﬁlter number from
+{32, 64, 128, 256, 512}. Even with such simpliﬁed de-
+sign choices and shallow layers, the design space contains
+(3 × 5)16 ≈ 6 × 1018 possible architectures. However,
+
+10734
+
+Search	space
+
+Neural	Architectures
+
+Manual	Design
+
+…
+
+Performance
+
+Latency
+
+…
+
+Accuracy
+
+…
+
+Training	&	
+Evaluation	
+
+Target
+dataset
+
+(a) A typical ﬂow of manual ConvNet design.
+
+Search	space
+
+Controller	sampling
+
+…
+
+Neural	Architectures
+
+…
+
+Training	
+controller
+
+Performance
+
+Latency
+
+Training	&	
+Evaluation	
+
+Proxy
+dataset
+
+…
+
+Accuracy
+
+(b) A typical ﬂow of reinforcement learning based neural architec-
+ture search.
+
+Figure 2. Illustration of manual ConvNet design and reinforcement
+learning based neural architecture search.
+
+training a ConvNet is very time-consuming, typically taking
+days or even weeks. As a result, previous ConvNet design
+rarely explores the design space. A typical ﬂow of man-
+ual ConvNet design is illustrated in Figure 2(a). Design-
+ers propose initial architectures and train them on the target
+dataset. Based on the performance, designers evolve the ar-
+chitectures accordingly. Limited by the time cost of training
+ConvNets, the design ﬂow has to stop after a few iterations,
+which is far too few to sufﬁciently explore the design space.
+
+Starting from [30], recent works adopt neural architec-
+ture search (NAS) to explore the design space automati-
+cally. Many previous works [30, 31, 20] use reinforce-
+ment learning (RL) to guide the search and a typical ﬂow
+is illustrated in Figure 2(b). A controller samples architec-
+tures from the search space to be trained. To reduce the
+training cost, sampled architectures are trained on a smaller
+proxy dataset such as CIFAR-10 or trained for fewer epochs
+on ImageNet. The performance of the trained networks
+is then used to train and improve the controller. Previ-
+ous works [30, 31, 20] has demonstrated the effectiveness
+of such methods in ﬁnding accurate and efﬁcient ConvNet
+models. However, training each architecture is still time-
+consuming, and it usually takes thousands of architectures
+to train the controller. As a result, the computational cost of
+such methods is prohibitively high.
+
+Nontransferable optimality: the optimality of ConvNet
+
+architectures is conditioned on many factors such as input
+resolutions and target devices. Once these factors change,
+the optimal architecture is likely to be different. A common
+practice to reduce the FLOP count of a network is to shrink
+the input resolution. A smaller input resolution may require
+a smaller receptive ﬁeld of the network and therefore shal-
+lower layers. On a different device, the same operator can
+have different latency, so we need to adjust the ConvNet ar-
+chitecture to achieve the best accuracy-efﬁciency trade-off.
+Ideally, we should design different ConvNet architectures
+case-by-case. In practice, however, limited by the computa-
+tional cost of previous manual and automated approaches,
+we can only realistically design one ConvNet and use it for
+all conditions.
+
+Inconsistent efﬁciency metrics: Most of the efﬁciency
+metrics we care about are dependent on not only the Con-
+vNet architecture but also the hardware and software con-
+ﬁgurations on the target device. Such metrics include la-
+tency, power, energy, and in this paper, we mainly focus
+on latency. To simplify the problem, most of the previ-
+ous works adopt hardware-agnostic metrics such as FLOPs
+(more strictly, number of multiply-add operations) to evalu-
+ate a ConvNet’s efﬁciency. However, a ConvNet with lower
+FLOP count is not necessarily faster. For example, NasNet-
+A [31] has a similar FLOP count as MobileNetV1 [6], but
+its complicated and fragmented cell-level structure is not
+hardware friendly, so the actual latency is slower [17]. The
+inconsistency between hardware agnostic metrics and ac-
+tual efﬁciency makes the ConvNet design more difﬁcult.
+
+To address the above problems, we propose to use dif-
+ferentiable neural architecture search (DNAS) to discover
+hardware-aware efﬁcient ConvNets. The ﬂow of our algo-
+rithm is illustrated in Figure 1. DNAS allows us to explore
+a layer-wise search space where we can choose a different
+block for each layer of the network. Following [21], DNAS
+represents the search space by a super net whose operators
+execute stochastically. We relax the problem of ﬁnding the
+optimal architecture to ﬁnd a distribution that yields the op-
+timal architecture. By using the Gumbel Softmax technique
+[9], we can directly train the architecture distribution us-
+ing gradient-based optimization such as SGD. The search
+process is extremely fast compared with previous reinforce-
+ment learning (RL) based method. The loss used to train the
+stochastic super net consists of both the cross-entropy loss
+that leads to better accuracy and the latency loss that penal-
+izes the network’s latency on a target device. To estimate the
+latency of an architecture, we measure the latency of each
+operator in the search space and use a lookup table model
+to compute the overall latency by adding up the latency of
+each operator. Using this model allows us to quickly es-
+timate the latency of architectures in this enormous search
+space. More importantly, it makes the latency differentiable
+with respect to layer-wise block choices.
+
+10735
+
+We name the models discovered by DNAS as FBNets
+(Facebook-Berkeley-Nets). FBNets surpass the state-of-
+the-art efﬁcient ConvNets designed manually and automat-
+ically. FBNet-B achieves 74.1% top-1 accuracy with 295M
+FLOPs and 23.1 ms latency on an Samsung S8 phone, 2.4x
+smaller and 1.5x faster than MobileNetV2-1.3. Being better
+than MnasNet, FBNet-B’s search cost is 216 GPU-hours,
+421x lower than the cost for MnasNet estimated based on
+[20]. Such low search cost enables us to re-design ConvNets
+case-by-case. For different resolution and channel scaling,
+FBNets achieve 1.5% to 6.4% absolute gain in top-1 ac-
+curacy compared with MobileNetV2 models. The smallest
+FBNet achieves 50.2% accuracy and 2.9 ms latency (345
+frames per second) with a batch size of 1 on Samsung
+S8. Using DNAS to search for device-speciﬁc ConvNet,
+an iPhone-x-optimized model achieves 1.4x speedup on an
+iPhone X compared with a Samsung-optimized model.
+
+2. Related work
+
+Efﬁcient ConvNet models: Designing efﬁcient Con-
+vNet has attracted many research attention in recent years.
+SqueezeNet [8] is one of the early works focusing on reduc-
+ing the parameter size of ConvNet models. It is originally
+designed for classiﬁcation, but later extended to object de-
+tection [22] and LiDAR point-cloud segmentation [24, 26].
+Following SqueezeNet, SqueezeNext [3] and ShiftNet [23]
+achieve further parameter size reduction. Recent works
+change the focus from parameter size to FLOPs. Mo-
+bileNetV1 and MobileNetV2 [6, 17] use depthwise con-
+volutions to replace the more expensive spatial convolu-
+tions. ShufﬂeNet [29] uses group convolution and shuf-
+ﬂe operations to reduce the FLOP count further. More re-
+cent works realize that FLOP count does not always reﬂect
+the actual hardware efﬁciency. To improve actual latency,
+ShufﬂeNetV2 [13] proposes a series of practical guide-
+lines for efﬁcient ConvNet design. Synetgy [28] combines
+ideas from ShufﬂeNetV2 and ShiftNet to co-design hard-
+ware friendly ConvNets and FPGA accelerators.
+
+Neural Architecture Search: [30, 31] ﬁrst proposes to
+use reinforcement learning (RL) to search for neural archi-
+tectures to achieve competitive accuracy with low FLOPs.
+Early NAS methods are computationally expensive. Recent
+works try to reduce the computational cost by weight shar-
+ing [16] or using gradient-based optimization [12]. [25, 1]
+further develop the idea of differentiable neural architec-
+ture search combining Gumbel Softmax [9]. Early works of
+NAS [31, 16, 12] focus on the cell level architecture search,
+and the same cell structure is repeated in all layers of a
+network. However, such fragmented and complicated cell-
+level structures are not hardware friendly, and the actual ef-
+ﬁciency is low. Most recently, [20] explores a stage-level
+hierarchical search space, allowing different blocks for dif-
+ferent stages of a network, while blocks inside a stage are
+
+still the same. Instead of focusing on FLOPs, [20] aims to
+optimize the latency on target devices. Besides searching
+for new architectures, works such as [27, 5] focus on adapt-
+ing existing models to improve efﬁciency.
+
+3. Method
+
+In this paper, we use differentiable neural architecture
+search (DNAS) to solve the problem of ConvNet design.
+We formulate the neural architecture search problem as
+
+min
+a∈A
+
+min
+wa
+
+L(a, wa).
+
+(1)
+
+Given an architecture space A, we seek to ﬁnd an optimal
+architecture a ∈ A such that after training its weights wa,
+it can achieve the minimal loss L(a, wa). In our work, we
+focus on three factors of the problem: a) the search space A.
+b) The loss function L(a, wa) that considers actual latency.
+c) An efﬁcient search algorithm.
+
+3.1. The Search Space
+
+Previous works [30, 31, 16, 11, 12] focus on cell level
+architecture search. Once a cell structure is searched, it
+is used in all the layers across the network. However,
+many searched cell structures are very complicated and
+fragmented and are therefore slow when deployed to mo-
+bile CPUs [17, 13]. Besides, at different layers, the same
+cell structure can have a different impact on the accuracy
+and latency of the overall network. As shown in [20] and in
+our experiments, allowing different layers to choose differ-
+ent blocks leads to better accuracy and efﬁciency.
+
+In this work, we construct a layer-wise search space with
+a ﬁxed macro-architecture, and each layer can choose a dif-
+ferent block. The macro-architecture is described in Table
+1. The macro architecture deﬁnes the number of layers and
+the input/output dimensions of each layer. The ﬁrst and the
+last three layers of the network have ﬁxed operators. For
+the rest of the layers, their block type needs to be searched.
+The ﬁlter numbers for each layer are hand-picked empiri-
+cally. We use relatively small channel sizes for early layers,
+since the input resolution at early layers is large, and the
+computational cost (FLOP count) is quadratic to input size.
+Each searchable layer in the network can choose a differ-
+ent block from the layer-wise search space. The block struc-
+ture is inspired by MobileNetV2 [17] and ShiftNet [23], and
+is illustrated in Figure 3. It contains a point-wise (1x1) con-
+volution, a K-by-K depthwise convolution where K denotes
+the kernel size, and another 1x1 convolution. “ReLU” ac-
+tivation functions follow the ﬁrst 1x1 convolution and the
+depthwise convolution, but there are no activation functions
+following the last 1x1 convolution. If the output dimension
+stays the same as the input dimension, we use a skip con-
+nection to add the input to the output. Following [17, 23],
+we use a hyperparameter, the expansion ratio e, to control
+
+10736
+
+Input shape
+2242 × 3
+1122 × 16
+1122 × 16
+562 × 24
+282 × 32
+142 × 64
+142 × 112
+72 × 184
+72 × 352
+72 × 1504
+
+1504
+
+Block
+
+3x3 conv
+
+TBS
+TBS
+TBS
+TBS
+TBS
+TBS
+TBS
+
+1x1 conv
+
+f
+16
+16
+24
+32
+64
+112
+184
+352
+1984
+
+7x7 avgpool
+
+-
+
+fc
+
+1000
+
+n
+1
+1
+4
+4
+4
+4
+4
+1
+1
+1
+1
+
+s
+2
+1
+2
+2
+2
+1
+2
+1
+1
+1
+-
+
+Table 1. Macro-architecture of the search space.
+In this table,
+column-“Block” denotes the block type. “TBS” denotes that lay-
+ers in this stage need to be searched. Column-f denotes the ﬁlter
+number of a block. Column-n denotes the number of layers in this
+stage. Column-s denotes the stride of the ﬁrst block in a stage.
+
+H	x	W	x	Cin
+
+1x1	(group)	Conv,	ReLU
+
+H	x	W	x	(e	x	Cin)
+
+K	x	K	DWConv,	ReLU
+
+(H/s)	x	(W/s)	x	(e	x	Cin)
+
+1x1	(group)	Conv
+
+(H/s)	x	(W/s)	x	Cout
+
++
+
+Figure 3. The block structure of the micro-architecture search
+space. Each candidate block in the search space can choose a dif-
+ferent expansion rate, kernel size, and number of groups for group
+convolution.
+
+the block. It determines how much do we expand the output
+channel size of the ﬁrst 1x1 convolution compared with its
+input channel size. Following [20], we also allow choos-
+ing a kernel size of 3 or 5 for the depthwise convolution.
+In addition, we can choose to use group convolution for the
+ﬁrst and the last 1x1 convolution to reduce the computation
+complexity. When we use group convolution, we follow
+[29] to add a channel shufﬂe operation to mix the informa-
+tion between channel groups.
+
+In our experiments, our layer-wise search space contains
+9 candidate blocks, with their conﬁgurations listed in Table
+2. Note we also have a block called “skip”, which directly
+feed the input feature map to the output without actual com-
+putations. This candidate block essentially allows us to re-
+duce the depth of the network.
+
+In summary, our overall search space contains 22 layers
+and each layer can choose from 9 candidate blocks from
+Table 2, so it contains 922 ≈ 1021 possible architectures.
+
+Block type
+
+expansion Kernel Group
+
+k3 e1
+
+k3 e1 g2
+
+k3 e3
+k3 e6
+k5 e1
+
+k5 e1 g2
+
+k5 e3
+k5 e6
+skip
+
+1
+1
+3
+6
+1
+1
+3
+6
+-
+
+3
+3
+3
+3
+5
+5
+5
+5
+-
+
+1
+2
+1
+1
+1
+2
+1
+1
+-
+
+Table 2. Conﬁgurations of candidate blocks in the search space.
+
+Finding the optimal layer-wise block assignment from such
+enormous search space is a non-trivial task.
+
+3.2. Latency-Aware Loss Function
+
+The loss function used in (1) has to reﬂect not only the
+accuracy of a given architecture but also the latency on the
+target hardware. To achieve this goal, we deﬁne the follow-
+ing loss function:
+
+L(a, wa) = CE(a, wa) · α log(LAT(a))β.
+
+(2)
+
+The ﬁrst term CE(a, wa) denotes the cross-entropy loss of
+architecture a with parameter wa. The second term LAT(a)
+denotes the latency of the architecture on the target hard-
+ware measured in micro-second. The coefﬁcient α controls
+the overall magnitude of the loss function. The exponent
+coefﬁcient β modulates the magnitude of the latency term.
+The cross-entropy term can be easily computed. How-
+ever, the latency term is more difﬁcult, since we need to
+measure the actual runtime of an architecture on a target de-
+vice. To cover the entire search space, we need to measure
+about 1021 architectures, which is an impossible task.
+
+To solve this problem, we use a latency lookup table
+model to estimate the overall latency of a network based
+on the runtime of each operator. More formally, we assume
+
+LAT(a) = X
+
+LAT(b(a)
+
+l
+
+),
+
+(3)
+
+l
+
+l
+
+where b(a)
+denotes the block at layer-l from architecture a.
+This assumes that on the target processor, the runtime of
+each operator is independent of other operators. The as-
+sumption is valid for many mobile CPUs and DSPs, where
+operators are computed sequentially one by one. This way,
+by benchmarking the latency of a few hundred operators
+used in the search space, we can easily estimate the actual
+runtime of the 1021 architectures in the entire search space.
+More importantly, as will be explained in section 3.3, using
+the lookup table model makes the latency term in the loss
+function (2) differentiable with respect to layer-wise block
+choices, and this allows us to use gradient-based optimiza-
+tion to solve problem (1).
+
+10737
+
+3.3. The Search Algorithm
+
+Solving the problem (1) through brute-force enumera-
+tion of the search space is very infeasible. The inner prob-
+lem of optimizing wa involves training a neural network.
+For ImageNet classiﬁcation, training a ConvNet typically
+takes several days or even weeks. The outer problem of op-
+timizing a ∈ A has a combinatorially large search space.
+
+Most of the early works on NAS [30, 31, 20] follow the
+paradigm above. To reduce the computational cost, the in-
+ner problem is replaced by training candidate architectures
+on an easier proxy dataset. For example, [30, 31] trains the
+architecture on the CIFAR10 dataset, and [20] trains on Im-
+ageNet but only for 5 epochs. The learned architectures are
+then transferred to the target dataset. To avoid exhaustively
+iterating through the search space, [30, 31, 20] use rein-
+forcement learning to guide the exploration. Despite these
+improvements, solving problem (1) is still prohibitively ex-
+pensive – training a network on the proxy dataset is still
+time-consuming, and thousands of architectures need to be
+trained before reaching the optimal solution.
+
+We adopt a different paradigm of solving problem (1).
+We ﬁrst represent the search space by a stochastic super net.
+The super net has the same macro-architecture as described
+in Table 1, and each layer contains 9 parallel blocks as de-
+scribed in Table 2. During the inference of the super net,
+only one candidate block is sampled and executed with the
+sampling probability of
+
+Pθl (bl = bl,i) = softmax(θl,i; θl) =
+
+exp(θl,i)
+
+Pi exp(θl,i)
+
+.
+
+(4)
+
+θl contains parameters that determine the sampling proba-
+bility of each block at layer-l. Equivalently, the output of
+layer-l can be expressed as
+
+xl+1 = X
+
+ml,i · bl,i(xl),
+
+(5)
+
+i
+
+where ml,i is a random variable in {0, 1} and is evaluated
+to 1 if block bl,i is sampled. The sampling probability is
+determined by equation (4). bl,i(xl) denotes the output of
+block-i at layer l given the input feature map xl. We let
+each layer sample independently, therefore, the probability
+of sampling an architecture a can be described as
+
+Pθ(a) = Y
+
+Pθl (bl = b(a)
+
+l,i ),
+
+(6)
+
+l
+
+where θ denotes the a vector consists of all the θl,i for each
+block-i at layer-l. b(a)
+l,i denotes that in the sampled architec-
+ture a, block-i is chosen at layer-l.
+
+Instead of solving for the optimal architecture a ∈ A,
+which has a discrete search space, we relax the problem to
+optimize the probability Pθ of the stochastic super net to
+
+achieve the minimum expected loss. Formally, we re-write
+the discrete optimization problem (1) as
+
+min
+θ
+
+min
+wa
+
+Ea∼Pθ {L(a, wa)}.
+
+(7)
+
+It is obvious the loss function in (7) is differentiable with
+respect to the architecture weights wa and therefore can be
+optimized by stochastic gradient descent (SGD). However,
+the loss is not directly differentiable to the sampling param-
+eter θ, since we cannot pass the gradient through the dis-
+crete random variable ml,i to θl,i. To sidestep this, we relax
+the discrete mask variable ml,i to be a continuous random
+variable computed by the Gumbel Softmax function [9, 14]
+
+ml,i = GumbelSoftmax(θl,i|θl)
+
+=
+
+exp[(θl,i + gl,i)/τ ]
+
+Pi exp[(θl,i + gl,i)/τ ]
+
+,
+
+(8)
+
+where gl,i ∼ Gumbel(0, 1) is a random noise following the
+Gumbel distribution. The Gumbel Softmax function is con-
+trolled by a temperature parameter τ . As τ approaches 0,
+it approximates the discrete categorical sampling following
+the distribution in (6). As τ becomes larger, ml,i becomes
+a continuous random variable. Regardless of the value of τ ,
+the mask ml,i is directly differentiable with respect to the
+parameter θl,i. The technique of using Gumbel Softmax for
+neural architecture search is also proposed in [25, 1].
+
+As a result, it is clear that the cross-entropy term from
+the loss function (2) is differentiable with respect to the
+mask ml,i and therefore θl,i. For the latency term, since we
+use the lookup table based model for efﬁciency estimation,
+equation (3) can be written as
+
+LAT(a) = X
+
+X
+
+ml,i · LAT(bl,i).
+
+(9)
+
+l
+
+i
+
+The latency of each operator LAT(bl,i) is a constant coef-
+ﬁcient, so the overall latency of architecture-a is differen-
+tiable with respect to the mask ml,i, therefore θl,i.
+
+As a result, the loss function (2) is fully differentiable
+with respect to both weights wa and the architecture distri-
+bution parameter θ. This allows us to use SGD to efﬁciently
+solve problem (1).
+
+Our search process is now equivalent to training the
+stochastic super net. During the training, we compute
+∂L/∂wa to train each operator’s weight in the super net.
+This is no different from training an ordinary ConvNet. Af-
+ter operators get trained, different operators can have a dif-
+ferent contribution to the accuracy and the efﬁciency of the
+overall network. Therefore, we compute ∂L/∂θ to update
+the sampling probability Pθ for each operator. This step se-
+lects operators with better accuracy and lower latency and
+suppresses the opposite ones. After the super net training
+ﬁnishes, we can then obtain the optimal architectures by
+sampling from the architecture distribution Pθ.
+
+10738
+
+As will be shown in the experiment section, the proposed
+DNAS algorithm is orders of magnitude faster than previous
+RL based NAS while generating better architectures.
+
+4. Experiments
+
+4.1. ImageNet Classiﬁcation
+
+To demonstrate the efﬁcacy of our proposed method, we
+use DNAS to search for ConvNet models on ImageNet 2012
+classiﬁcation dataset [2], and we name the discovered mod-
+els FBNets. We aim to discover models with high accuracy
+and low latency on target devices. In our ﬁrst experiment,
+we target Samsung Galaxy S8 with a Qualcomm Snap-
+dragon 835 platform. The model is deployed with Caffe2
+with int8 inference engine for mobile devices.
+
+Before the search starts, we ﬁrst build a latency lookup
+table described in section 3.2 on the target device. Next,
+we train a stochastic super net with search space described
+in section 3.3. We set the input resolution of the network
+to 224-by-224. To reduce the training time, we randomly
+choose 100 classes from the original 1000 classes to train
+the stochastic super net. We train the stochastic super net for
+90 epochs. In each epoch, we ﬁrst train the operator weights
+wa and then the architecture probability parameter θ. wa is
+trained on 80% of ImageNet training set using SGD with
+momentum. The architecture distribution parameter θ is
+trained on the rest 20% of ImageNet training set with Adam
+optimizer [10]. To control the temperature of the Gumbel
+Softmax from equation (8), we use an exponentially de-
+caying temperature. After the search ﬁnishes, we sample
+several architectures from the trained distribution Pθ, and
+train them from scratch. Our architecture search framework
+is implemented in pytorch [15] and searched models are
+trained in Caffe2. More training details will be provided
+in the supplementary materials.
+
+Our experiment results are summarized in Table 3. We
+compare our searched models with state-of-the-art efﬁcient
+models both designed automatically and manually. The pri-
+mary metrics we care about are top-1 accuracy on the Im-
+ageNet validation set and the latency. If the latency is not
+available, we use FLOP as the secondary efﬁciency metric.
+For baseline models, we directly cite the parameter size,
+FLOP count, and top-1 accuracy from the original paper.
+Since our network is deployed with caffe2 with highly efﬁ-
+cient in8 implementation, we have an unfair latency advan-
+tage against other baselines. Therefore, we implement the
+baseline models ourselves and measure their latency under
+the same environment for a fair comparison. For automati-
+cally designed models, we also compare the search method,
+search space, and search cost.
+
+Table 3 divides the models into three categories accord-
+ing to their accuracy level.
+In the ﬁrst group, FBNet-
+A achieves 73.0% accuracy, better than 1.0-MobileNetV2
+
+(+1.0%), 1.5-ShufﬂeNet V2 (+0.4%), and CondenseNet
+(+2%), and are on par with DARTS and MnasNet-65. Re-
+garding latency, FBNet-A is 1.9 ms (relative 9.6%), 2.2
+ms (relative 11%), and 8.6 ms (relative 43%) better than
+the MobileNetV2, ShufﬂeNetV2, and CondenseNet coun-
+terparts. Although we did not optimize for FLOP count di-
+rectly, FBNet-A’s FLOP count is only 249M, 50M smaller
+(relative 20%) than MobileNetV2 and ShufﬂeNetV2, 20M
+(relative 8%) smaller than MnasNet, and 2.4X smaller than
+DARTS. In the second group, FBNet-B achieves com-
+parable accuracy with 1.3-MobileNetV2, but the latency
+is 1.46x lower, and the FLOP count is 1.73x smaller,
+even smaller than 1.0-MobileNetV2 and 1.5-ShufﬂeNet V2.
+Compared with MnasNet, FBNet-B’s accuracy is 0.1%
+higher, latency is 0.6ms lower, and FLOP count is 22M
+(relative 7%) smaller. We do not have the latency of
+NASNet-A and PNASNet, but the accuracy is compara-
+ble, and the FLOP count is 1.9x and 2.0x smaller. In the
+third group, FBNet-C achieves 74.9% accuracy, same as
+2.0-ShufﬂeNetV2 and better than all others. The latency is
+28.1 ms, 1.33x and 1.19x faster than MobileNet and Shuf-
+ﬂeNet. The FLOP count is 1.56x, 1.58x, and 1.03x smaller
+than MobileNet, ShufﬂeNet, and MnasNet-92.
+
+Among all the automatically searched models, FBNet’s
+performance is much stronger than DARTS, PNAS, and
+NAS, and better than MnasNet. However, the search cost
+is orders of magnitude lower. MnasNet [20] does not dis-
+close the exact search cost (in terms of GPU-hours). How-
+ever, it mentions that the controller samples 8,000 mod-
+els during the search and each model is trained for ﬁve
+epochs. According to our experiments, training of MNas-
+Net for one epoch takes 17 minutes using 8 GPUs. So
+the estimated cost for training 8,000 models for 5 epochs
+is about 17/60 × 5 × 8 × 8, 000 ≈ 91 × 103 GPU hours.
+In comparison, the FBNet search takes 8 GPUs for only 27
+hours, so the computational cost is only 216 GPU hours,
+or 421x faster than MnasNet, 222x faster than NAS, 27.8x
+faster than PNAS, and 1.33x faster than DARTS.
+
+We visualize some of our searched FBNets, Mo-
+
+bileNetV2, and MnasNet in Figure 4.
+
+4.2. Different Resolution and Channel Size Scaling
+
+A common technique to reduce the computational cost of
+a ConvNet is to reduce the input resolution or channel size
+without changing the ConvNet structure. This approach is
+likely to be sub-optimal. We hypothesize that with a dif-
+ferent input resolution and channel size scaling, the optimal
+ConvNet structure will be different. To test this, we use
+DNAS to search for several different combinations of input
+resolution and channel size scaling. Thanks to the superior
+efﬁciency of DNAS, we can ﬁnish the search very quickly.
+The result is summarized in Table 4. Compared with Mo-
+bileNetV2 under the same input size and channel size scal-
+
+10739
+
+Search
+space
+
+Search cost
+
+(GPU hours / relative)
+
+#Params
+
+MnasNet-65 [13]
+
+RL
+
+stage-wise
+
+Model
+
+Search
+method
+manual
+manual
+CondenseNet (G=C=8) [7] manual
+
+1.0-MobileNetV2 [17]
+1.5-ShufﬂeNetV2 [13]
+
+DARTS [12]
+
+FBNet-A (ours)
+
+gradient
+gradient
+manual
+CondenseNet (G=C=4) [7] manual
+
+1.3-MobileNetV2 [17]
+
+MnasNet [20]
+NASNet-A [31]
+PNASNet [11]
+FBNet-B (ours)
+
+1.4-MobileNetV2 [17]
+2.0-ShufﬂeNetV2 [13]
+
+MnasNet-92 [20]
+FBNet-C (ours)
+
+RL
+RL
+
+SMBO
+gradient
+manual
+manual
+
+RL
+
+gradient
+
+-
+-
+-
+
+cell
+
+layer-wise
+
+-
+-
+
+stage-wise
+
+cell
+cell
+
+layer-wise
+
+-
+-
+
+-
+-
+-
+
+91K∗ / 421x
+288 / 1.33x
+216 / 1.0x
+
+-
+-
+
+91K∗ / 421x
+48K / 222x
+6K† / 27.8x
+216 / 1.0x
+
+-
+-
+
+stage-wise
+layer-wise
+
+91K∗ / 421x
+216 / 1.0x
+
+#FLOPs
+
+CPU
+
+-
+-
+
+Latency
+21.7 ms
+300M
+299M
+22.0 ms
+274M 28.4 ‡ ms
+270M
+595M
+249M
+509M
+529M
+317M
+564M
+588M
+295M
+585M
+591M
+388M
+375M
+
+19.8 ms
+33.8 ms
+28.7‡ ms
+23.7 ms
+
+23.1 ms
+37.4 ms
+33.3 ms
+
+28.1 ms
+
+-
+-
+
+-
+
+Top-1
+acc (%)
+
+72.0
+72.6
+71.0
+73.0
+73.1
+73.0
+74.4
+73.8
+74.0
+74.0
+74.2
+74.1
+74.7
+74.9
+74.8
+74.9
+
+3.4M
+3.5M
+2.9M
+3.6M
+4.9M
+4.3M
+5.3M
+4.8M
+4.2M
+5.3M
+5.1M
+4.5M
+6.9M
+7.4M
+4.4M
+5.5M
+
+Table 3. ImageNet classiﬁcation performance compared with baselines. For baseline models, we directly cite the parameter size, FLOP
+count and top-1 accuracy on the ImageNet validation set from their original papers. For CPU latency, we deploy and benchmark the models
+on the same Samsung Galaxy S8 phone with Caffe2 int8 implementation. The details of MnasNet-{64, 92} are not disclosed from [20]
+so we cannot measure the latency. *The search cost for MnasNet is estimated according to the description in [20]. † The search cost is
+estimated based on the claim from [11] that PNAS [11] is 8x lower than NAS[31]. ‡ The inference engine is faster than other models.
+
+K=3
+E=6
+
+K=3
+E=3
+
+K=3
+E=1
+
+K=3
+E=1
+G=2
+
+K=5
+E=6
+
+K=5
+E=3
+
+K=5
+E=1
+
+K=5
+E=1
+G=2
+
+Skip
+
+FBNet-A
+
+FBNet-B
+
+FBNet-C
+
+FBNet-96-0.35-1
+
+FBNet-s8
+
+FBNet-iPhoneX
+
+MobileNetV2
+
+MnasNet
+
+Figure 4. Visualization of some of the searched architectures. We
+use rectangle boxes to denote blocks for each layer. We use differ-
+ent colors to denote the kernel size of the depthwise convolution,
+blue for kernel size of 3, green for kernel size of 5, and empty for
+skipping. We use height to denote the expansion rate of the block:
+6, 3, 1, and 1 with group-2 convolution.
+
+ing, our searched models achieve 1.5% to 6.4% better accu-
+racy with similar latency. Especially the FBNet-96-0.35-1
+model achieves 50.2% (+4.7%) accuracy and 2.9 ms latency
+(345 frames per second) on a Samsung Galaxy S8.
+
+We visualize the architecture of FBNet-96-0.35-1 in Fig-
+ure 4, we can see that many layers are skipped, and the net-
+work is much shallower than FBNet-{A, B, C}, whose input
+
+size is 224. We conjecture that this is because with smaller
+input size, the receptive ﬁeld needed to parse the image also
+becomes smaller, so having more layers will not effectively
+increase the accuracy.
+
+4.3. Different Target Devices
+
+In previous ConvNet design practices, the same ConvNet
+model is deployed to many different devices. However, this
+is sub-optimal since different computing platforms and soft-
+ware implementation can have different characteristics. To
+validate this, we conduct search targeting two mobile de-
+vices: Samsung Galaxy S8 with Qualcomm Snapdragon
+835 platforms, and iPhone X with A11 Bionic processors.
+We use the same architecture search space, but different la-
+tency lookup tables collected from two target devices. All
+the architecture search and training protocols are the same.
+After we searched and trained two models, we deploy them
+to both Samsung Galaxy S8 and iPhone X to benchmark the
+overall latency. The result is summarized in Table. 5.
+
+As we can see, the two models reach similar accuracy
+(73.20% vs. 73.27%). FBNet-iphoneX model’s latency
+is 19.84 ms on its target device, but when deployed to a
+Samsung S8, its latency increases to 23.33 ms. On the
+other hand, FBNet-S8 reaches a latency of 22.12 ms on a
+Samsung S8, but when deployed to an iPhone X, the la-
+tency hikes to 27.53 ms, 7.69 ms (relatively 39%) higher
+than FBNet-iPhone X. This demonstrates the necessity of
+re-designing ConvNets for different target devices.
+
+Two models are visualized in Figure 4. Note that FBNet-
+
+10740
+
+Input size &
+
+Channel Scaling
+
+Model
+
+#Parameters
+
+#FLOPs CPU Latency Top-1 acc (%)
+
+(224, 0.35)
+
+MobileNetV2-224-0.35
+MNasNet-scale-224-0.35
+
+FBNet-224-0.35
+
+MobileNetV2
+
+(192, 0.50)
+
+MnasNet-search-192-0.5
+
+(128, 1.0)
+
+(128, 0.50)
+
+(96, 0.35)
+
+FBNet-192-0.5 (ours)
+
+MobileNetV2
+
+MnasNet-scale-128-1.0
+FBNet-128-1.0 (ours)
+
+MobileNetV2
+
+FBNet-128-0.5 (ours)
+
+MobileNetV2
+
+FBNet-96-0.35-1 (ours)
+FBNet-96-0.35-2 (ours)
+
+1.7M
+1.9M
+2.0M
+2.0M
+
+-
+
+2.6M
+3.5M
+4.2M
+4.2M
+2.0M
+2.4M
+1.7M
+1.8M
+1.9M
+
+59M
+76M
+72M
+71M
+
+-
+
+73M
+99M
+103M
+92M
+32M
+32M
+11M
+12.9M
+13.7M
+
+9.3 ms
+10.7 ms
+10.7 ms
+8.4 ms
+
+-
+
+9.9 ms
+8.4 ms
+9.2 ms
+9.0 ms
+4.8 ms
+5.1 ms
+3.8 ms
+2.9 ms
+3.6 ms
+
+60.3
+
+62.4 (+2.1)
+65.3 (+5.0)
+
+63.9
+
+65.6 (+1.7)
+65.9 (+2.0)
+
+65.3
+
+67.3 (+2.0)
+67.0 (+1.7)
+
+57.7
+
+60.0 (+2.3)
+
+45.5
+
+50.2 (+4.7)
+51.9 (+6.4)
+
+Table 4. FBNets searched for different input resolution and channel scaling. MnasNet-scale is the MnasNet model with input and channel
+size scaling. MnasNet-search-192-0.5 is a model searched with an input size of 192 and channel scaling of 0.5. Details of it are not
+disclosed in [20], so we only cite the accuracy.
+
+Model
+
+#Parameters
+
+#FLOPs
+
+Latency on
+iPhone X
+
+FBNet-iPhoneX
+
+FBNet-S8
+
+4.47M
+4.43M
+
+322M 19.84 ms (target)
+293M
+
+27.53 ms
+
+Latency on
+Samsung S8
+
+23.33 ms
+
+22.12 ms (target)
+
+Top-1 acc (%)
+
+73.20
+73.27
+
+Table 5. FBNets searched for different devices.
+
+Comparison	of	Operator	Runtime	(us)
+
+Ops	adopted	by	FBNet-iPhoneX
+
+ences of the lower three operators on two target devices.
+It explains why the Samsung-S8-optimized model performs
+poorly on an iPhone X. This shows DNAS can automati-
+cally optimize the operator adoptions and generate different
+ConvNets optimized for different devices.
+
+Ops	adopted	in	FBNet-S8
+
+5. Conclusion
+
+hw14_c384_k3_s1
+
+hw14_c336_k3_s1
+
+hw28_c192_k3_s1
+
+hw14_c336_k5_s1
+
+hw14_c192_k5_s1
+
+hw28_c192_k5_s2
+
+0
+
+200
+
+400
+
+600
+
+800
+
+1000
+
+1200
+
+iPhone	X
+
+Samsung	S8
+
+Figure 5. Comparison of operator runtime on two devices. Run-
+time is in micro-second (us). Orange bar denotes the runtime on
+iPhone X and blue bar denotes the runtime on Samsung S8. The
+upper three operators are faster on iPhone X, therefore they are au-
+tomatically adopted in FBNet-iPhoneX. The lower three operators
+are faster on Samsung S8, and they are also automatically adopted
+in FBNet-S8.
+
+S8 uses many blocks with 5x5 depthwise convolution while
+FBNet-iPhoneX only uses them in the last two stages. We
+examine the depthwise convolution operators used in the
+two models and compare their runtime on both devices.
+As shown in Figure 5, the upper three operators are faster
+on iPhone X, therefore they are automatically adopted in
+FBNet-iPhoneX. The lower three operators are signiﬁcantly
+faster on Samsung S8, and they are also automatically
+adopted in FBNet-S8. Notice the drastic runtime differ-
+
+We present DNAS, a differentiable neural architecture
+search framework.
+It optimizes over a layer-wise search
+space and represents the search space by a stochastic su-
+per net. The actual target device latency of blocks is used to
+compute the loss for super net training. FBNets, a family of
+models discovered by DNAS surpass state-of-the-art mod-
+els, both manually and automatically designed: FBNet-B
+achieves 74.1% top-1 accuracy with 295M FLOPs and 23.1
+ms latency, 2.4x smaller and 1.5x faster than MobileNetV2-
+1.3 with the same accuracy. It also achieves better accuracy
+and lower latency than MnasNet, the state-of-the-art efﬁ-
+cient model designed automatically; we estimate the search
+cost of DNAS is 420x smaller. Such efﬁciency allows us to
+conduct searches for different input resolutions and channel
+scaling. Discovered models achieve 1.5% to 6.4% accu-
+racy gains. The smallest FBNet achieves 50.2% accuracy
+with a latency of 2.9 ms (345 frames/sec) with batch size 1.
+Over the Samsung-optimized FBNet, the improved FBNet
+achieves 1.4x speed up on an iPhone X, showing DNAS is
+able to adapt to different target devices automatically.
+
+10741
+
+References
+
+[1] Anonymous. Snas: stochastic neural architecture search. In
+Submitted to International Conference on Learning Repre-
+sentations, 2019. under review.
+
+[2] J. Deng, W. Dong, R. Socher, L.-J. Li, K. Li, and L. Fei-
+Fei.
+Imagenet: A large-scale hierarchical image database.
+In Computer Vision and Pattern Recognition, 2009. CVPR
+2009. IEEE Conference on, pages 248–255. Ieee, 2009.
+
+[3] A. Gholami, K. Kwon, B. Wu, Z. Tai, X. Yue, P. Jin, S. Zhao,
+and K. Keutzer. Squeezenext: Hardware-aware neural net-
+work design. arXiv preprint arXiv:1803.10615, 2018.
+
+[4] K. He, X. Zhang, S. Ren, and J. Sun. Deep residual learn-
+ing for image recognition. In Proceedings of the IEEE con-
+ference on computer vision and pattern recognition, pages
+770–778, 2016.
+
+[5] Y. He, J. Lin, Z. Liu, H. Wang, L.-J. Li, and S. Han. Amc:
+Automl for model compression and acceleration on mobile
+devices.
+In Proceedings of the European Conference on
+Computer Vision (ECCV), pages 784–800, 2018.
+
+[6] A. G. Howard, M. Zhu, B. Chen, D. Kalenichenko, W. Wang,
+T. Weyand, M. Andreetto, and H. Adam. Mobilenets: Efﬁ-
+cient convolutional neural networks for mobile vision appli-
+cations. arXiv preprint arXiv:1704.04861, 2017.
+
+[7] G. Huang, S. Liu, L. van der Maaten, and K. Q. Weinberger.
+Condensenet: An efﬁcient densenet using learned group con-
+volutions. group, 3(12):11, 2017.
+
+[8] F. N. Iandola, S. Han, M. W. Moskewicz, K. Ashraf, W. J.
+Dally, and K. Keutzer. Squeezenet: Alexnet-level accuracy
+with 50x fewer parameters and¡ 0.5 mb model size. arXiv
+preprint arXiv:1602.07360, 2016.
+
+[9] E. Jang, S. Gu, and B. Poole. Categorical reparameterization
+arXiv preprint arXiv:1611.01144,
+
+with gumbel-softmax.
+2016.
+
+[10] D. P. Kingma and J. Ba. Adam: A method for stochastic
+
+optimization. arXiv preprint arXiv:1412.6980, 2014.
+
+[11] C. Liu, B. Zoph, J. Shlens, W. Hua, L.-J. Li, L. Fei-Fei,
+A. Yuille, J. Huang, and K. Murphy. Progressive neural ar-
+chitecture search. arXiv preprint arXiv:1712.00559, 2017.
+
+[12] H. Liu, K. Simonyan, and Y. Yang. Darts: Differentiable
+architecture search. arXiv preprint arXiv:1806.09055, 2018.
+[13] N. Ma, X. Zhang, H.-T. Zheng, and J. Sun. Shufﬂenet
+v2: Practical guidelines for efﬁcient cnn architecture design.
+arXiv preprint arXiv:1807.11164, 2018.
+
+[14] C. J. Maddison, A. Mnih, and Y. W. Teh. The concrete dis-
+tribution: A continuous relaxation of discrete random vari-
+ables. arXiv preprint arXiv:1611.00712, 2016.
+
+[15] A. Paszke, S. Gross, S. Chintala, G. Chanan, E. Yang, Z. De-
+Vito, Z. Lin, A. Desmaison, L. Antiga, and A. Lerer. Auto-
+matic differentiation in pytorch. 2017.
+
+[16] H. Pham, M. Y. Guan, B. Zoph, Q. V. Le, and J. Dean. Efﬁ-
+cient neural architecture search via parameter sharing. arXiv
+preprint arXiv:1802.03268, 2018.
+
+[17] M. Sandler, A. Howard, M. Zhu, A. Zhmoginov, and L.-C.
+Chen. Mobilenetv2: Inverted residuals and linear bottle-
+necks. In Proceedings of the IEEE Conference on Computer
+Vision and Pattern Recognition, pages 4510–4520, 2018.
+
+[18] K. Simonyan and A. Zisserman. Very deep convolutional
+networks for large-scale image recognition. arXiv preprint
+arXiv:1409.1556, 2014.
+
+[19] C. Szegedy, W. Liu, Y. Jia, P. Sermanet, S. Reed,
+D. Anguelov, D. Erhan, V. Vanhoucke, and A. Rabinovich.
+Going deeper with convolutions.
+In Proceedings of the
+IEEE conference on computer vision and pattern recogni-
+tion, pages 1–9, 2015.
+
+[20] M. Tan, B. Chen, R. Pang, V. Vasudevan, and Q. V. Le.
+Mnasnet: Platform-aware neural architecture search for mo-
+bile. arXiv preprint arXiv:1807.11626, 2018.
+
+[21] T. Veniat and L. Denoyer. Learning time/memory-efﬁcient
+arXiv
+
+deep architectures with budgeted super networks.
+preprint arXiv:1706.00046, 2017.
+
+[22] B. Wu, F. N. Iandola, P. H. Jin, and K. Keutzer. Squeezedet:
+Uniﬁed, small, low power fully convolutional neural net-
+works for real-time object detection for autonomous driving.
+In CVPR Workshops, pages 446–454, 2017.
+
+[23] B. Wu, A. Wan, X. Yue, P. Jin, S. Zhao, N. Golmant, A. Gho-
+laminejad, J. Gonzalez, and K. Keutzer. Shift: A zero ﬂop,
+zero parameter alternative to spatial convolutions.
+arXiv
+preprint arXiv:1711.08141, 2017.
+
+[24] B. Wu, A. Wan, X. Yue, and K. Keutzer. Squeezeseg: Con-
+volutional neural nets with recurrent crf for real-time road-
+object segmentation from 3d lidar point cloud.
+In 2018
+IEEE International Conference on Robotics and Automation
+(ICRA), pages 1887–1893. IEEE, 2018.
+
+[25] B. Wu, Y. Wang, P. Zhang, Y. Tian, P. Vajda, and K. Keutzer.
+Mixed precision quantization of convnets via differentiable
+neural architecture search. arXiv preprint arXiv:1812.00090,
+2018.
+
+[26] B. Wu, X. Zhou, S. Zhao, X. Yue, and K. Keutzer. Squeeze-
+segv2: Improved model structure and unsupervised domain
+adaptation for road-object segmentation from a lidar point
+cloud. arXiv preprint arXiv:1809.08495, 2018.
+
+[27] T.-J. Yang, A. Howard, B. Chen, X. Zhang, A. Go, M. San-
+dler, V. Sze, and H. Adam. Netadapt: Platform-aware neural
+network adaptation for mobile applications. Energy, 41:46,
+2018.
+
+[28] Y. Yang, Q. Huang, B. Wu, T. Zhang, L. Ma, G. Gam-
+bardella, M. Blott, L. Lavagno, K. Vissers, J. Wawrzynek,
+Synetgy: Algorithm-hardware co-design for con-
+et al.
+vnet accelerators on embedded fpgas.
+arXiv preprint
+arXiv:1811.08634, 2018.
+
+[29] X. Zhang, X. Zhou, M. Lin, and J. Sun. Shufﬂenet: An
+extremely efﬁcient convolutional neural network for mobile
+devices. arxiv 2017. arXiv preprint arXiv:1707.01083.
+
+[30] B. Zoph and Q. V. Le. Neural architecture search with rein-
+forcement learning. arXiv preprint arXiv:1611.01578, 2016.
+[31] B. Zoph, V. Vasudevan, J. Shlens, and Q. V. Le. Learn-
+ing transferable architectures for scalable image recognition.
+arXiv preprint arXiv:1707.07012, 2(6), 2017.
+
+10742
+
+

@@ -1,0 +1,1611 @@
+The Regretful Agent: Heuristic-Aided Navigation through Progress Estimation
+
+Chih-Yao Ma∗†, Zuxuan Wu‡, Ghassan AlRegib†, Caiming Xiong§, Zsolt Kira†
+†Georgia Institute of Technology, ‡University of Maryland, College Park, §Salesforce Research
+
+Instruction:	Exit	the	room.	Walk	past	the	display	case	
+and	into	the	kitchen.	Stop	by	the	table.	
+
+I know I came from there.  
+
+Where should I go next?
+
+4th
+
+5th
+
+1st step
+
+2nd
+
+7th
+
+6th
+
+My estimated 
+
+confidence decreased.  
+Something went wrong. 
+
+Let’s learn this lesson 
+
+and go back. 
+
+5th step
+
+60%
+
+75%
+
+90%
+
+1st step
+
+20%
+
+13%
+
+25%
+
+42%
+
+Figure 1: Vision-and-Language Navigation task and our proposed regretful navigation agent. The agent leverages the self-
+monitoring mechanism [13] through time to decide when to roll back to a previous location and resume the instruction-
+following task. Our code is available at https://github.com/chihyaoma/regretful-agent.
+
+Abstract
+
+As deep learning continues to make progress for chal-
+lenging perception tasks, there is increased interest in com-
+bining vision, language, and decision-making. Speciﬁcally,
+the Vision and Language Navigation (VLN) task involves
+navigating to a goal purely from language instructions
+and visual information without explicit knowledge of the
+goal. Recent successful approaches have made in-roads in
+achieving good success rates for this task but rely on beam
+search, which thoroughly explores a large number of trajec-
+tories and is unrealistic for applications such as robotics.
+In this paper, inspired by the intuition of viewing the prob-
+lem as search on a navigation graph, we propose to use a
+progress monitor developed in prior work as a learnable
+heuristic for search. We then propose two modules incorpo-
+rated into an end-to-end architecture: 1) A learned mech-
+anism to perform backtracking, which decides whether to
+continue moving forward or roll back to a previous state
+(Regret Module) and 2) A mechanism to help the agent de-
+cide which direction to go next by showing directions that
+are visited and their associated progress estimate (Progress
+
+∗ Work partially done while the author was a research intern at Sales-
+
+force Research.
+
+Marker). Combined, the proposed approach signiﬁcantly
+outperforms current state-of-the-art methods using greedy
+action selection, with 5% absolute improvement on the test
+server in success rates, and more importantly 8% on suc-
+cess rates normalized by the path length.
+
+1. Introduction
+
+Building on the success of deep learning in solving var-
+ious computer vision tasks, several new tasks and corre-
+sponding benchmarks have been proposed to combine vi-
+sual perception and decision-making [2, 22, 7, 12, 17, 23,
+5]. One such task is the Vision-and-Language Navigation
+task (VLN), where an agent must navigate to a goal purely
+from language instructions and visual input without explicit
+knowledge of the goal. This task has a number of applica-
+tions, including service robotics where it would be prefer-
+able if humans interacted naturally with the robot by in-
+structing it to perform various tasks.
+
+Recently, there have been several approaches proposed
+to solve this task. The dominant approaches frame the nav-
+igation task as a sequence to sequence problem [2]. Several
+enhancements such as synthetic data augmentation [11],
+pragmatic inference [11], and combinations of model-free
+and model-based reinforcement learning techniques [19]
+
+16732
+
+have also been proposed. However, current methods are
+separated into two regimes: those that use beam search and
+obtain good success rate (with longer trajectory lengths) and
+those that use greedy action selection (and hence result in
+very low trajectory lengths) but obtain much lower success
+rates.
+In fact, there have recently been new metrics pro-
+posed that balance these two objectives [1]. Intuitively, the
+agent should perform intelligent action selection (akin to
+best-ﬁrst search), without exhaustively exploring the search
+space. For robotics application, for example, the use of
+beam search is unrealistic as it would require the robot to
+explore a large number of possible trajectories.
+
+In this paper, we view the process of navigation as graph
+search across the navigation graph and employ two strate-
+gies, encoded within the neural network architecture, to en-
+able navigation without the use of beam search. Specif-
+ically, we develop: 1) A Regret Module that provides
+a mechanism to allow the agent to learn when to back-
+track [10, 3] and 2) We propose a Progress Marker mech-
+anism that allows the agent to incorporate information from
+previous visits and reason about such visits and their asso-
+ciated progress estimates towards better action selection.
+
+Speciﬁcally, in graph search a heuristic is used to make
+meaningful progress towards the goal in a manner that
+avoids exhaustive search but is more effective than na¨ıve
+greedy search. We therefore build on recent work [13] that
+developed a progress monitor which is a learned mechanism
+that was used to estimate the progress made towards the
+goal (with low values meaning progress has not been made
+and high values meaning the agent is closer to the goal). In
+that work, however, the focus was on the regularizing effect
+of the progress monitor as well as its use in beam search. In-
+stead, we use this progress monitor effectively as a learned
+heuristic that can be used to determine directions that are
+more likely to lead towards the goal during inference.
+
+We use the Progress Marker in two ways. First, we lever-
+age the notion of backtracking, which is prevalent in graph
+search, by developing a learned rollback mechanism that
+decides whether to go back to the previous location or not
+(Regret Module). Second, we incorporate a mechanism to
+allow the agent to use the estimated progress it computed
+when visiting the viewpoints to choose the next action to
+perform after it has rolled back (Progress Marker). This al-
+lows the agent to know when particular directions have al-
+ready been visited and the progress they resulted in, which
+can bias it to not re-visit states unless warranted. We do this
+by augmenting the visual state vectors with the progress es-
+timates so that the agent can reduce the probability of revis-
+iting such states (again, in a learned manner).
+
+We demonstrate that these learned mechanisms are supe-
+rior to greedy decoding. Our agent is able to achieve state-
+of-the-art results among published works both in terms of
+success rate (when beam search is not used) and more im-
+
+portantly the SPL [1] metric which incorporates path length,
+owing to our short trajectory lengths. In summary, our con-
+tributions include: 1) A graph search perspective on the
+instruction-based navigation problem, and use of a learned
+heuristic in the form of a progress monitor to effectively
+explore the navigation graph, 2) an end-to-end trainable Re-
+gret Module that can learn to decide when to roll back to
+the previous location given the history of textual and visual
+grounding observed, 3) a Progress Marker that can enable
+effective backtracking and reduce the probability of going
+to a visited location accordingly, and 4) state-of-the-art re-
+sults on the VLN task.
+
+2. Related Work
+
+Vision and language navigation. There are a number
+of benchmarks and environments for investigating the com-
+bination of vision, language, and decision-making. This in-
+cludes House3D [22], Embodied QA [7], AI2-THOR [12],
+navigation based agents [15, 20, 14] (including with com-
+munication [9]), and the VLN task that we focus on [2].
+For tasks that contain only sparse rewards, reinforcement
+learning approaches exist [19, 25, 8], for example focus-
+ing on language grounding through guided feature trans-
+formation [25] and development of a neural module ap-
+proach [8]. Our work, in contrast, focuses on tasks that
+contain language instructions that can guide the naviga-
+tion process and has applications such as service robotics.
+Approaches to this task are dominated by a sequence-to-
+sequence formulation, beginning with initial work intro-
+ducing the task [2]. Subsequent methods have used a
+Speaker-Follower technique to generate synthetic instruc-
+tions that are used for data augmentation and pragmatic
+inference [11], as well as the combination of supervised-
+based and RL-based approaches [19, 18]. Recently, the
+Self-Monitoring navigation agent was introduced which
+learns to estimate progress made towards the goal using vi-
+sual and language co-grounding [13]. Prior work employs
+beam-search type techniques, though, optimizing for suc-
+cess rate at the expense of trajectory length and reduced
+applicability to robotics and other domains.
+Inspired by
+the latter work, we view the progress monitor as a learned
+heuristic and combine it with other techniques in graph
+search, namely backtracking, to use it for action selection,
+which was not a focus of the prior work.
+
+Navigation and learned heuristics. Several works in
+vision and robotics have explored the intersection of learn-
+ing and planning. In robotics, planning systems must of-
+ten explore large search trees for getting from start to goal,
+and selection of the next state to expand must be done in-
+telligently to reduce computation. Often ﬁxed heuristics
+(e.g. distance to goal) are used, but these are static, re-
+quire known goal locations, and are used for optimal A*-
+style algorithms rather than greedy best-ﬁrst search, which
+
+6733
+
+is what can be employed on robots when maps are not avail-
+able [16]. Recently, several learning-based approaches have
+been developed for such heuristics, including older works
+that learn residuals for existing heuristics [24], heuristic
+ranking methods that enable reﬁnement of new ones [21] as
+well as learning of a heuristic policy in a Markov Decision
+Process (MDP) formulation to directly optimize search ef-
+fort by taking into account history and contextual informa-
+tion [4]. In our work, we similarly learn to estimate a heuris-
+tic (progress monitor) and use it for action selection, show-
+ing that the resulting estimates can generalize to unseen
+environments. We also develop an architecture to explic-
+itly learn when to backtrack based on this progress monitor
+(with a Progress Marker to reduce the chance of choosing
+the same action again after backtracking unless warranted),
+which further improves navigation performance.
+
+3. Baseline
+
+Given natural language instructions, our task is to train
+an agent to follow these instructions and reach an (unspeci-
+ﬁed) goal in the environment (see Figure 1 for an example).
+This requires processing both the instructions and the vi-
+sual inputs, along with attentional mechanisms to ground
+them to the current situation. We adapt the recently intro-
+duced Self-Monitoring agent [13] as our baseline, which
+consists of two primary components: (1) A visual-textual
+co-grounding module that grounds to the completed instruc-
+tion, the next instruction, and the subsequent navigable di-
+rections represented as visual features. (2) A progress moni-
+tor that takes the attention weights of grounded instructions
+as input and estimates the agent’s progress towards com-
+pleting the instruction. It was shown that such a progress
+monitor can regularize the attentional mechanism (via an
+additional loss), but the authors did not focus on using the
+progress estimates for action selection itself. In the follow-
+ing, we brieﬂy introduce the Self-Monitoring agent.
+
+is
+
+(cid:8)x1, x2, . . . , xL(cid:9), where xl
+
+Speciﬁcally, a language instruction with L words
+represented via embeddings denoted as X =
+is the feature vector for
+the l-th word encoded by a Long Short-Term Memory
+(LSTM) language encoder. Following [13, 11], we use a
+panoramic view as visual input. At the t-th time step, the
+agent perceives a set of images at each viewpoint vt =
+
+(cid:8)vt,1, vt,2, ..., vt,K(cid:9), where K is the maximum number of
+
+navigable directions, and vt,k represents the image feature
+of direction k obtained from a pre-trained ResNet-152. It
+ﬁrst obtains visual and textual grounded features, ˆvt, and
+ˆxt, respectively, with hidden states from the last time step
+ht−1 using soft-attention (see [13] for details). Conditioned
+on the grounded features and historical context, it produces
+the hidden context of the current step ht:
+
+ht, ct = LST M ([ ˆxt, ˆvt, at−1], ht−1, ct−1),
+
+where [, ] denotes concatenation and ct−1 denote cell states
+from the last time step. To further decide where to go next,
+the current hidden states ht are concatenated with grounded
+instructions ˆxt, yielding a representation that contains his-
+torical context and relevant parts of the instructions (for ex-
+ample, corresponding to parts that have just been carried out
+and those that have to be carried out next), to compute the
+correlations with visual features for each viewpoint k (vt,k).
+Formally, action selection is calculated as follows:
+
+ot,k = (Wa[ht, ˆxt])⊤g(vt,k)
+
+and pt = softmax(ot)
+
+where Wa are the learned parameters and g(·) is a Multi-
+Layer Perceptron (MLP).
+
+Furthermore, we also equip the agent with a progress
+monitor following [13] to enforce the attention weights of
+the textual grounding to align with the progress made to-
+ward the goal, further regularizing the grounded instruc-
+tions to be relevant. The progress monitor is optimized such
+that the agent is required to use the attention distribution
+of textual grounding to predict the distance from goal. The
+output of progress monitor ppm
+represents the completeness
+of instruction-following estimated by the agent.
+
+t
+
+hpm
+
+t = σ(Wh([ht−1, ˆvt]) ⊗ tanh(ct))
+
+ppm
+t = tanh(Wpm([αααt, hpm
+
+t
+
+]))
+
+where Wh and Wpm are the learnt parameters, ct is the cell
+state of the LSTM, ⊗ denotes the element-wise product, αt
+is the attention weights of textual grounding, and σ is the
+sigmoid function. Please refer to [13] for further details on
+the baseline architecture.
+
+4. Regretful Navigation Agent
+
+The progress monitor previously mentioned reﬂects the
+agent’s progress made towards the goal, and consequently
+its outputs will decrease or ﬂuctuate if the agent selects an
+action leading to deviation from the goal. Conversely it will
+increase if it moves closer to the goal by completing the in-
+struction. We posit that such a property, while conceptually
+simple, provides critical feedback for action selection. To
+this end, we leverage the outputs of the progress monitor
+to allow the agent to regret and backtrack using a Regret
+Module and a Progress Marker (see Figure. 2). In partic-
+ular, the Regret Module examines the progress made from
+the last step to the current step to decide whether to take a
+forward or rollback action. Once the agent regrets and rolls
+back to the previous location, the Progress Marker informs
+whether location(s) have been visited before and rates the
+visited location(s) according to the agent’s conﬁdence in
+completing the instruction-following task. Combining the
+two proposed methods, we show that the agent is able to
+perform a local search on the navigational graph by (1) as-
+sessing the current progress, (2) deciding when to roll back,
+
+6734
+
+weighted sum of the forward and rollback embeddings.
+Note that to ensure the progress monitor remains focused
+on estimating the agent’s progress and regularizing the tex-
+tual grounding module, we detach the output of the progress
+monitor which is fed into the Regret Module and set it as a
+leaf in the computational graph.
+
+Action selection. Similar to existing work, the agent
+determines which image features from navigable directions
+have the highest correlation with the movement vector mf r
+t
+by computing the inner-product, and the probability of each
+navigable direction is then computed as:
+
+ot,k = (Wf rmf r
+
+t )⊤g(vt,k)
+
+and pt = softmax(ot),
+
+where Wf r are the learned parameters and pt is the prob-
+ability distribution over navigable directions at time t. In
+practice, once the agent takes a rollback action, we block
+the action that leads to oscillation.
+
+4.2. Progress Marker
+
+The Regret Module provides a mechanism for the agent
+to decide when to rollback to a previous location or move
+forward according to the progress monitor outputs. Once
+the agent rolls back, it is required to select the next direction
+to go forward. It is thus essential for the agent to (1) know
+which directions it has already visited (and rolled back) and
+(2) estimate if the visited locations can lead to a path which
+completes the given instruction.
+
+Toward this end, we propose the Progress Marker to
+mark each visited location with the agent’s conﬁdence in
+completing the instruction (see Figure 3). More speciﬁcally,
+we maintain a set of memory M and store the output of the
+progress monitor associated with each visited location; if
+the location is not yet visited, the marker will be ﬁlled with
+a value 1:
+
+vmarker
+
+t,k
+
+=(ppm
+
+i
+1,
+
+,
+
+if k leads to a location i ∈ M .
+
+otherwise.
+
+where i is a unique viewpoint ID for each location. We
+allow the marker on each location to be updated every time
+the agent visits it.
+
+The marker value on each navigable direction indicates
+the estimated conﬁdence that a location leads to the goal.
+We assign a value 1 for unvisited directions to encourage
+the agent to explore the environment. The navigating prob-
+abilities between unvisited directions depend on the action
+probabilities pt since their marker values are the same.
+
+Action selection with Progress Marker. During action
+selection, in addition to the movement vector mf r
+that the
+t
+agent can rely on in deciding which direction to go, we
+propose to label the marker value to each navigation direc-
+tion as indications of whether a direction is likely to lead to
+the goal or to unexplored (and potentially better) paths. To
+
+6735
+
+Figure 2: Illustration of the proposed regretful navigation
+agent. Note that the progress monitor is based on [13].
+
+and (3) selecting the next location after rollback occurs. In
+the following, we elaborate these two components in detail.
+
+4.1. Regret Module
+
+The Regret Module takes in the outputs of the progress
+monitor at different time steps and decides whether to go
+forward or to rollback. In particular, we use the concatena-
+tion of hidden state ht and grounded instruction ˆxt as our
+forward embedding mf
+t , and more importantly we intro-
+duce a rollback embedding mr
+t to be the projection of the
+visual features for the action that leads to the previously vis-
+ited location. The two vector representations are as follows:
+
+mf
+
+t = Wa[ht, ˆxt]
+
+and mr
+
+t = g(vt,r),
+
+where Wa are the learned parameters, ˆxt is the grounded
+instruction obtained from the textual grounding module,
+and vt,r is the image feature vector representing a direction
+that points to the previously visited location.
+
+t = ppm
+
+t − ppm
+t−1.
+
+To decide whether to go forward or rollback, the Re-
+gret Module leverages the difference of the progress mon-
+itor outputs between the current time step and the previ-
+ous time step ∆ppm
+Intuitively, if the
+difference is larger than a certain threshold ∆ppm
+t > σ,
+the agent should decide to take a forward action, and vice
+versa. Since it is hard to decide an optimal value for σ, we
+achieve this by computing attention weights αf r
+and per-
+t
+form a weighted sum on both forward and rollback embed-
+dings. If the weight on rollback is larger, the agent is likely
+to be biased to take an action that leads to the last visited
+location. Formally, the weights can be computed as:
+
+αf r
+
+t = softmax(Wr(∆ppm
+mf r
+t , mr
+t ],
+
+t = (αf r
+
+t )⊤[mf
+
+t
+
+))
+
+where Wr are the learnt parameters, [, ] denotes concate-
+nation between feature vectors, and mf r
+represents the
+t
+
+feature         extractionTextual groundingVisual groundingSoft-attentionGrounded img features  Action selectionForwardRollbackMovementLSTM   SoftattentionProgress markerProgress monitor*)/ Regret  module0.2
+
+1
+
+0.33
+
+0.21
+
+0.3
+
+1
+
+Rollback
+
+0.29
+
+0.21
+
+0.5
+
+2
+
+0.31
+
+1
+
+3
+
+5
+
+0.3
+
+3
+
+0.21
+
+Updating…
+
+0 . 3 3
+
+0.21
+
+0.2
+
+9
+
+0.31
+
+Figure 3: Concept of the proposed Progress Marker (red
+ﬂags). The agent marks each visited location with estimated
+progress made towards the goal. The changes on the esti-
+mated progress determines whether the agent should roll-
+back or forward, and the difference between the current es-
+timated progress and the markers on the next navigable di-
+rections helps the agent decide which direction to go.
+
+achieve this, we leverage the difference between the current
+estimated progress and the marker for each navigable direc-
+tion ∆vmarker
+. We then concatenate it
+to the visual feature representation for each navigable direc-
+tion before action selection.
+
+t − vmarker
+
+= ppm
+
+t,k
+
+t,k
+
+vmarked
+
+t,k
+
+= [g(vt,k), ∆vmarker
+
+t,k
+
+].
+
+t,k
+
+t,k
+
+The difference ∆vmarker
+indicates the chances of nav-
+igable directions leading to the goal and further inform
+the agent which direction to select.
+In our design, lower
+∆vmarker
+corresponds to higher chance for action selec-
+tion. For instance, in step 4 in Figure 3, the ∆vmarker
+for
+starting location and the last visited location are 0.08 and
+-0.02 respectively, whereas an unvisited location will have
+-0.71, which eventually leads to 0.52 estimated progress.
+
+t,k
+
+When using Progress Marker, the ﬁnal action selection
+
+is formulated as:
+
+ot,k = (Wf rmf r
+
+t )⊤vmarked
+
+t,k
+
+and pt = softmax(ot)
+
+In practice, we tiled the difference n times before concate-
+nating with the projected image feature vt,k in order to ac-
+count for imbalance. The marker value for the stop action
+is set to be 0.
+
+4.3. Training and Inference
+
+We train the proposed agent with cross-entropy loss for
+action selection and Mean Squared Error (MSE) loss for
+progress monitor. In addition to these losses, we also in-
+troduce an additional entropy loss to encourage the agent to
+explore other actions, such that it is not biased to actions
+with already very high conﬁdence. The motivation is that,
+
+after training an agent for a period of time, the agent starts
+to overﬁt and perform fairly well on the training set. As a
+result, the agent will not learn to properly roll back during
+training since the majority of the training samples do not
+require the agent to roll back. Introducing the entropy loss
+increases the chance of exploration and making incorrect
+actions during training.
+
+action selection
+
+progress monitor
+
+2
+
+4
+
+Lloss = λ
+
+ynv
+t
+
+log(pt,k) +(1 − λ)
+
+{
+
+}|
+
+(ypm
+
+t − ppm
+
+t
+
+{
+
+)2
+
+T
+
+z
+Xt=1
+
+}|
+Xk=1
+
+K
+
+T
+
+T
+
+z
+Xt=1
+Xt=1
+|
+
+− β
+
+−pt,klog(pt,k)
+
+,
+
+entropy loss
+
+{z
+
+}
+
+where pt,k is the action probability of each navigable direc-
+tion, ynv
+is the ground-truth navigable direction at step t,
+λ = 0.5 is the weight balancing the cross-entropy loss and
+MSE loss, and β = 0.01 is the weight for entropy loss.
+
+t
+
+Following existing approaches [13, 11, 2], we perform
+categorical sampling during training for action selection.
+During inference, the agent greedily selects the action with
+highest action probability.
+
+5. Dataset and Implementations
+
+Room-to-Room dataset. We use the Room-to-Room
+(R2R) dataset [2] for evaluating our proposed approach.
+The R2R dataset is built upon the Matterport3D dataset [6].
+It consists of 10,800 panoramic views from 194,400 RGB-
+D images in 90 buildings and has 7,189 paths sampled from
+its navigation graphs. Each path has three ground-truth nav-
+igation instructions written by humans. The whole dataset
+has 90 scenes: 61 for training and validation seen, 11 for
+validation unseen, 18 for test unseen.
+
+Evaluation metrics. To compare to existing work, we
+show the same evaluation metrics used in those works: (1)
+Navigation Error (NE), mean of the shortest path distance
+in meters between the agent’s ﬁnal position and the goal
+(2) Success Rate (SR), the percentage of ﬁnal
+location.
+positions less than 3m away from the goal location.
+(3)
+Oracle Success Rate (OSR), the success rate if the agent
+can stop at the closest point to the goal along its trajectory.
+However, we note the importance of a recently added met-
+ric that emphasizes the trade-off between success rate and
+trajectory length: Success rate weighted by (normalized in-
+verse) Path Length (SPL) [1], which incorporates trajectory
+lengths and is an important consideration for real-world ap-
+plications such as robotics.
+
+Implementation Details. For fair comparison with ex-
+isting work, we use the pre-trained ResNet-152 on Im-
+ageNet to extract image features.
+Following the Self-
+
+6736
+
+Table 1: Comparison with the state of the arts with greedy decoding for action selections1. *: with data augmentation.
+
+Method
+
+Random
+
+Student-forcing [2]
+
+RPA [19]
+
+Speaker-Follower [11]*
+
+RCM [18]*
+
+Self-Monitoring [13]*
+
+Regretful
+
+Regretful*
+
+Validation-Seen
+
+Validation-Unseen
+
+Test (unseen)
+
+NE ↓
+
+SR ↑ OSR ↑
+
+SPL ↑ NE ↓
+
+SR ↑ OSR ↑
+
+SPL ↑ NE ↓
+
+SR ↑ OSR ↑
+
+SPL ↑
+
+9.45
+
+6.01
+
+5.56
+
+3.36
+
+3.37
+
+3.22
+
+3.69
+
+3.23
+
+0.16
+
+0.39
+
+0.43
+
+0.66
+
+0.67
+
+0.67
+
+0.65
+
+0.69
+
+0.21
+
+0.53
+
+0.53
+
+0.74
+
+0.77
+
+0.78
+
+0.72
+
+0.77
+
+-
+
+-
+
+-
+
+-
+
+-
+
+0.58
+
+0.59
+
+0.63
+
+9.23
+
+7.81
+
+7.65
+
+6.62
+
+5.88
+
+5.52
+
+5.36
+
+5.32
+
+0.16
+
+0.22
+
+0.25
+
+0.36
+
+0.43
+
+0.45
+
+0.48
+
+0.50
+
+0.22
+
+0.28
+
+0.32
+
+0.45
+
+0.52
+
+0.56
+
+0.61
+
+0.59
+
+-
+
+-
+
+-
+
+-
+
+-
+
+0.32
+
+0.37
+
+0.41
+
+9.77
+
+7.85
+
+7.53
+
+6.62
+
+6.01
+
+5.99
+
+-
+
+0.13
+
+0.20
+
+0.25
+
+0.35
+
+0.43
+
+0.43
+
+-
+
+0.18
+
+0.27
+
+0.33
+
+0.44
+
+0.51
+
+0.55
+
+-
+
+0.12
+
+0.18
+
+0.23
+
+0.28
+
+0.35
+
+0.32
+
+-
+
+5.69
+
+0.48
+
+0.56
+
+0.40
+
+Table 2: Ablation study showing the effect of each proposed components compared to the prior arts. All methods here trained
+without data augmentation.
+
+Method
+
+# Module Marker
+
+NE ↓
+
+SR ↑ OSR ↑
+
+SPL ↑ NE ↓
+
+SR ↑ OSR ↑
+
+SPL ↑
+
+Regret
+
+Progress
+
+Validation-Seen
+
+Validation-Unseen
+
+Speaker-Follower [11]
+
+Self-Monitoring [13]
+
+Regretful
+
+1
+
+2
+
+3
+
+X
+
+X
+
+X
+
+X
+
+4.86
+
+3.72
+
+3.88
+
+3.76
+
+3.69
+
+0.52
+
+0.63
+
+0.64
+
+0.63
+
+0.65
+
+0.63
+
+0.75
+
+0.70
+
+0.73
+
+0.72
+
+-
+
+0.56
+
+0.58
+
+0.57
+
+0.59
+
+7.07
+
+5.98
+
+5.65
+
+5.74
+
+5.36
+
+0.31
+
+0.44
+
+0.47
+
+0.44
+
+0.48
+
+0.41
+
+0.58
+
+0.59
+
+0.59
+
+0.61
+
+-
+
+0.30
+
+0.37
+
+0.32
+
+0.37
+
+Monitoring [13] and Speaker-Follower [11] works, the em-
+bedded feature vector for each navigable direction is ob-
+tained by concatenating an appearance feature with a 4-d
+orientation feature [sinφ; cosφ; sinθ; cosθ], where φ and θ
+are the heading and elevation angles. Please refer to the
+Appendix for further implementation details.
+
+6. Evaluation
+
+6.1. Comparison with Prior Art
+
+We ﬁrst compare the proposed regretful navigation agent
+with the state-of-the-art methods [13, 11, 18]. As shown in
+Table 1, our method achieves signiﬁcant performance im-
+provement over the existing approaches. We achieved 37%
+SPL and 48% SR on the validation unseen set and out-
+performed all existing work. Our best performing model
+achieves 41% SPL and 50% SR on validation unseen set
+when trained with the synthetic data from the Speaker [11].
+We demonstrate absolute 8% SPL improvement and 5% SR
+improvement on the test server over the current state-of-the-
+art method. We can also see that our regretful navigation
+agent without data augmentation has already outperformed
+
+1Note that both Speaker-Follower [11] and Self-Monitoring [13] were
+originally designed to optimize the success rate (SR) via beam search, and
+concurrently to our work, RCM [18] proposed a new setting allowing the
+agent to explore unseen environments prior to the navigation task via Self-
+Supervised Imitation Learning (SIL).
+
+the existing work on both SR and SPL metrics.
+
+6.2. Ablation Study
+
+Table 2 shows an ablation study to analyze the effect of
+each component. The ﬁrst thing to note is that our method
+is signiﬁcantly better than the Self-Monitoring agent which
+uses greedy decoding, even though it still has a progress
+monitor loss (although the progress monitor is not used for
+action selection). A second interesting point is that when
+the Progress Marker is available with the features of each
+navigable direction that have been visited before, but the
+Regret Module is not available, performance does not in-
+crease signiﬁcantly (44% SR). Note that we also conducted
+an experiment with another condition, where the progress
+monitor estimates were attached to the forward embedding,
+meaning that the network could use that information to im-
+prove action selection. That condition again was only able
+to achieve modest gains (45% SR), compared to our Re-
+gret Module which was able to achieve 47% SR (and 48%
+when the Progress Marker was added). In all, this shows
+that the key improvement stems from the design of the Re-
+gret Module, allowing the agent to intelligently backtrack
+after making mistakes.
+
+6.3. Rollback Analysis
+
+We now further analyze the behavior of the agent to ver-
+ify that the source of improvement is indeed from the ability
+
+6737
+
+Table 3: Sanity check for verifying that the source of performance improvement is from the agent’s ability to roll back.
+
+Blocking
+
+Validation-Seen
+
+Validation-Unseen
+
+Method
+
+Rollback NE ↓
+
+SR ↑ OSR ↑
+
+SPL ↑ NE ↓
+
+SR ↑ OSR ↑
+
+SPL ↑
+
+Self-Monitoring [13]
+
+Regretful
+
+3.72
+
+3.85
+
+3.69
+
+3.91
+
+0.63
+
+0.64
+
+0.65
+
+0.64
+
+0.75
+
+0.75
+
+0.72
+
+0.68
+
+0.56
+
+0.58
+
+0.59
+
+0.60
+
+5.98
+
+6.02
+
+5.36
+
+5.80
+
+0.44
+
+0.44
+
+0.48
+
+0.46
+
+0.58
+
+0.60
+
+0.61
+
+0.55
+
+0.30
+
+0.34
+
+0.37
+
+0.41
+
+X
+
+X
+
+Regretful
+
+Self-Monitoring
+
+Table 4: Ablation study when trained using only the syn-
+thetic or real training data. Oracle Navigation Error (ONE):
+the navigation error if the agent can stop at the closest point
+to the goal along its trajectory.
+
+Figure 4: Percentage of unsuccessful examples involving
+rollback reduced by our proposed regretful agent.
+
+to learn when to roll back.
+
+Does rollback lead to the performance improvement?
+Our proposed regretful agent relies on the ability to regret
+and roll back to a previous location, further exploring the
+unknown environment to increase the success rate. As a
+sanity check, we manually block all actions leading to roll-
+back for both the state-of-the-art Self-Monitoring agent and
+our regretful agent2. The result is shown in Table 3. As can
+be seen, blocking rollback for the Self-Monitoring agent
+produces mixed results, with worse NE but better metrics
+such as OSR. The SR, however, is unchanged. On the other
+hand, blocking rollback for our agent signiﬁcantly reduces
+most metrics including NE, SR, and OSR especially on un-
+seen environments. This shows that blocking the ability to
+learn when to roll back degrades a large source of perfor-
+mance increase, and this is especially true for unseen envi-
+ronments.
+
+Number of unsuccessful examples reduced. We cal-
+culate the total number of unsuccessful examples involves
+rollback action for both Self-Monitoring and our proposed
+agent (in percentage). As demonstrated in Figure 4, our pro-
+posed regretful agent signiﬁcantly reduces the unsuccessful
+examples from around 43% to 38%, which correlates to the
+4-5% improvement on SR in Table 1 and 2.
+
+Regretful agent in unfamiliar environments. The key
+to the performance increase of an agent focusing on the
+
+2except when there is only one navigable direction to go.
+
+Validation-Unseen
+
+Method
+
+Synthetic
+
+Real
+
+ONE ↓
+
+SR ↑
+
+OSR ↑
+
+Self-Monitoring [13]
+
+Regretful
+
+X
+
+X
+
+X
+
+X
+
+4.09
+
+3.62
+
+3.47
+
+3.34
+
+0.35
+
+0.44
+
+0.41
+
+0.48
+
+0.49
+
+0.58
+
+0.58
+
+0.61
+
+rollback ability is not that the agent learns a better textual
+or visual grounding, but that the agent learns to search es-
+pecially when it is not certain which direction to go. To
+demonstrate this, we train both the Self-Monitoring agent
+and our proposed regretful agent only on synthetic data and
+test them on the unseen validation set (real data). We expect
+the regretful agent to outperformed the Self-Monitoring
+agent across all metrics since our agent is designed to oper-
+ate in an environment where the agent is likely to be un-
+certain on action selection. As shown in Table 4, when
+trained using only the synthetic data, our method signiﬁ-
+cantly outperformed Self-Monitoring agent. Interestingly,
+when compared with the Self-Monitoring agent trained with
+real data, our agent trained with synthetic data is slightly
+better on ONE, same on OSR, and marginally lower on SR.
+We achieved slightly better performance on oracle metrics
+since stopping at the correct location is not a hard constrain.
+This indicates that even though our regretful agent is not yet
+learned how to properly stop at the goal (due to training on
+synthetic data only), the chance that it passes/reaches the
+goal is slightly higher than Self-Monitoring agent trained
+with real data. Further, when the regretful agent trained with
+real data, the performance improved across all metrics.
+
+6.4. Qualitative Results
+
+Figures 5 show qualitative outputs of our model during
+successful navigation in unseen environments. In Figure 5
+(a), the agent made a mistake at the ﬁrst step, and the esti-
+mated progress at the second step slightly decreases. The
+agent then decides to rollback, after which the progress
+monitor signiﬁcantly increases. Finally, the agent stopped
+
+6738
+
+Figure 5: Successful regretful agent navigates in unseen environments. (a) The agent made a mistake at the ﬁrst step, but
+it was able to roll back to the previous location since the output of the progress monitor was not signiﬁcantly increased. It
+then follows the rest of the instruction correctly. (b) The agent is able to correctly follow the instruction at the beginning but
+made a mistake by walking up the stairs again. The agent realized that the output of the progress monitor is decreased and
+the next action take a right is not feasible and decides to rollback rollback at step 4. The agent was then able to follow the
+rest of the instruction and stop with estimated progress 0.95. (c) The agent made a mistake by missing the stairs at step 1. It
+was however able to decide to rollback at step 2 and moves down stairs as instructed and successfully stops near the bamboo
+plant with estimated progress 0.99. Please see Appendix for the full trajectories.
+
+correctly as instructed. Figure 5 (b) shows an example
+where the agent correctly goes up the stairs but incorrectly
+does it again rather than turning and ﬁnding the TV as in-
+structed. Note that the progress monitor increases but only
+by a small amount; this demonstrates the need for learned
+mechanisms that can reason about the textual and visual
+grounding and context, as well as the resulting level of
+change in progress. In this case the agent then correctly de-
+cides to rollback and successfully walked into the TV room.
+Similarly, in Figure 5 (c), the agent misses the stairs, result-
+ing in a very small progress increase. The agent decides
+to rollback as a result. Upon reaching the goal, the agent’s
+progress estimate is 99%. Please refer to the Appendix for
+the full trajectories and unsuccessful examples.
+
+7. Conclusion
+
+In this paper, we have proposed an end-to-end train-
+able regretful navigation agent for the VLN task. We use
+
+a progress monitor as a learned heuristic that can be trained
+and employed during inference to greedily select the next
+best action (best-ﬁrst search). We then propose a Regret
+Module that is able to learn to decide when to perform back-
+tracking depending on the progress made and state of the
+agent. Finally, a Progress Marker is used to allow the agent
+to reason about previous visits and unvisited directions, so
+that the agent can choose a better navigable direction by re-
+ducing action probabilities for visited locations with lower
+progress estimate. The resulting framework achieved state-
+of-the-art SR and SPL compared to existing methods with-
+out using beam search on the public leaderboard.
+
+Acknowledgments
+
+This research was supported by DARPAs Lifelong
+Learning Machines (L2M) program, under Cooperative
+Agreement HR0011-18-2-001. We thank Chia-Jung Hsu
+for her valuable and artistic helps on the ﬁgures.
+
+6739
+
+References
+
+[1] Peter Anderson, Angel Chang, Devendra Singh Chaplot,
+Alexey Dosovitskiy, Saurabh Gupta, Vladlen Koltun, Jana
+Kosecka, Jitendra Malik, Roozbeh Mottaghi, Manolis Savva,
+et al. On evaluation of embodied navigation agents. arXiv
+preprint arXiv:1807.06757, 2018. 2, 5
+
+[2] Peter Anderson, Qi Wu, Damien Teney, Jake Bruce, Mark
+Johnson, Niko S¨underhauf, Ian Reid, Stephen Gould, and
+Anton van den Hengel. Vision-and-language navigation: In-
+terpreting visually-grounded navigation instructions in real
+environments.
+In Proceedings of the IEEE Conference
+on Computer Vision and Pattern Recognition (CVPR), vol-
+ume 2, 2018. 1, 2, 5, 6
+
+[3] Jerome Barraquand and Jean-Claude Latombe. Robot mo-
+tion planning: A distributed representation approach. The
+International Journal of Robotics Research, 10(6):628–649,
+1991. 2
+
+[4] Mohak Bhardwaj, Sanjiban Choudhury, and Sebastian
+arXiv
+
+Scherer. Learning heuristic search via imitation.
+preprint arXiv:1707.03034, 2017. 3
+
+[5] Simon Brodeur, Ethan Perez, Ankesh Anand, Florian
+Golemo, Luca Celotti, Florian Strub, Jean Rouat, Hugo
+Larochelle, and Aaron Courville. Home: A household multi-
+modal environment. arXiv preprint arXiv:1711.11017, 2017.
+1
+
+[6] Angel Chang, Angela Dai, Thomas Funkhouser, Maciej Hal-
+ber, Matthias Niessner, Manolis Savva, Shuran Song, Andy
+Zeng, and Yinda Zhang. Matterport3D: Learning from RGB-
+D data in indoor environments. International Conference on
+3D Vision (3DV), 2017. 5
+
+[7] Abhishek Das, Samyak Datta, Georgia Gkioxari, Stefan Lee,
+Devi Parikh, and Dhruv Batra. Embodied question answer-
+ing. In Proceedings of the IEEE Conference on Computer
+Vision and Pattern Recognition (CVPR), 2018. 1, 2
+
+[8] Abhishek Das, Georgia Gkioxari, Stefan Lee, Devi Parikh,
+and Dhruv Batra. Neural Modular Control for Embodied
+Question Answering. In Proceedings of the Conference on
+Robot Learning (CoRL), 2018. 2
+
+[9] Harm de Vries, Kurt Shuster, Dhruv Batra, Devi Parikh, Ja-
+son Weston, and Douwe Kiela. Talk the walk: Navigating
+new york city through grounded dialogue. arXiv preprint
+arXiv:1807.03367, 2018. 2
+
+[10] Richard E Fikes, Peter E Hart, and Nils J Nilsson. Learning
+and executing generalized robot plans. Artiﬁcial intelligence,
+3:251–288, 1972. 2
+
+[11] Daniel Fried, Ronghang Hu, Volkan Cirik, Anna Rohrbach,
+Jacob Andreas, Louis-Philippe Morency, Taylor Berg-
+Kirkpatrick, Kate Saenko, Dan Klein, and Trevor Darrell.
+Speaker-follower models for vision-and-language naviga-
+tion. In Advances in Neural Information Processing Systems
+(NIPS), 2018. 1, 2, 3, 5, 6
+
+[12] Eric Kolve, Roozbeh Mottaghi, Daniel Gordon, Yuke Zhu,
+Abhinav Gupta, and Ali Farhadi. AI2-THOR: An Interactive
+3D Environment for Visual AI. arXiv, 2017. 1, 2
+
+[13] Chih-Yao Ma, Jiasen Lu, Zuxuan Wu, Ghassan AlRegib,
+Zsolt Kira, Richard Socher, and Caiming Xiong.
+Self-
+monitoring navigation agent via auxiliary progress estima-
+
+In Proceedings of the International Conference on
+
+tion.
+Learning Representations (ICLR), 2019. 1, 2, 3, 4, 5, 6, 7
+
+[14] Piotr Mirowski, Razvan Pascanu, Fabio Viola, Hubert Soyer,
+Andrew J Ballard, Andrea Banino, Misha Denil, Ross
+Goroshin, Laurent Sifre, Koray Kavukcuoglu, et al. Learn-
+ing to navigate in complex environments. In Proceedings of
+the International Conference on Learning Representations
+(ICLR), 2017. 2
+
+[15] Arsalan Mousavian, Alexander Toshev, Marek Fiser, Jana
+Visual representations
+arXiv preprint
+
+Kosecka, and James Davidson.
+for semantic target driven navigation.
+arXiv:1805.06066, 2018. 2
+
+[16] Stuart J Russell and Peter Norvig. Artiﬁcial intelligence: a
+modern approach. Malaysia; Pearson Education Limited,,
+2016. 3
+
+[17] Manolis Savva, Angel X Chang, Alexey Dosovitskiy,
+Thomas Funkhouser, and Vladlen Koltun. Minos: Multi-
+modal indoor simulator for navigation in complex environ-
+ments. arXiv preprint arXiv:1712.03931, 2017. 1
+
+[18] Xin Wang, Qiuyuan Huang, Asli Celikyilmaz, Jianfeng Gao,
+Dinghan Shen, Yuan-Fang Wang, William Yang Wang, and
+Lei Zhang. Reinforced cross-modal matching and self-
+supervised imitation learning for vision-language navigation.
+In Proceedings of the IEEE Conference on Computer Vision
+and Pattern Recognition (CVPR), 2019. 2, 6
+
+[19] Xin Wang, Wenhan Xiong, Hongmin Wang,
+
+and
+William Yang Wang. Look before you leap: Bridging
+model-free and model-based reinforcement
+learning for
+planned-ahead vision-and-language navigation.
+In Euro-
+pean Conference on Computer Vision (ECCV), 2018. 1, 2,
+6
+
+[20] Greg Wayne, Chia-Chun Hung, David Amos, Mehdi Mirza,
+Arun Ahuja, Agnieszka Grabska-Barwinska, Jack Rae, Piotr
+Mirowski, Joel Z Leibo, Adam Santoro, et al. Unsupervised
+predictive memory in a goal-directed agent. arXiv preprint
+arXiv:1803.10760, 2018. 2
+
+[21] Christopher Makoto Wilt and Wheeler Ruml. Building a
+In Eighth Annual Symposium
+
+heuristic for greedy search.
+on Combinatorial Search, 2015. 3
+
+[22] Yi Wu, Yuxin Wu, Georgia Gkioxari, and Yuandong Tian.
+Building generalizable agents with a realistic and rich 3d en-
+vironment. arXiv preprint arXiv:1801.02209, 2018. 1, 2
+
+[23] Fei Xia, Amir R Zamir, Zhiyang He, Alexander Sax, Jitendra
+Malik, and Silvio Savarese. Gibson env: Real-world percep-
+tion for embodied agents. In Proceedings of the IEEE Con-
+ference on Computer Vision and Pattern Recognition, pages
+9068–9079, 2018. 1
+
+[24] Yuehua Xu, Alan Fern, and Sung Wook Yoon. Discrimi-
+In
+
+native learning of beam-search heuristics for planning.
+IJCAI, pages 2041–2046, 2007. 3
+
+[25] Haonan Yu, Xiaochen Lian, Haichao Zhang, and Wei Xu.
+Guided feature transformation (gft): A neural language
+grounding module for embodied agents.
+arXiv preprint
+arXiv:1805.08329, 2018. 2
+
+6740
+
+

@@ -1,0 +1,1860 @@
+Learning to Compose Dynamic Tree Structures for Visual Contexts
+
+Kaihua Tang1, Hanwang Zhang1, Baoyuan Wu2, Wenhan Luo2, Wei Liu2
+
+1 Nanyang Technological University
+
+2 Tencent AI Lab
+
+kaihua001@e.ntu.edu.sg, hanwangzhang@ntu.edu.sg,
+
+{wubaoyuan1987, whluo.china}@gmail.com, wl2223@columbia.edu
+
+Abstract
+
+We propose to compose dynamic tree structures that
+place the objects in an image into a visual context, help-
+ing visual reasoning tasks such as scene graph generation
+and visual Q&A. Our visual context tree model, dubbed
+VCTREE, has two key advantages over existing structured
+object representations including chains and fully-connected
+graphs: 1) The efﬁcient and expressive binary tree encodes
+the inherent parallel/hierarchical relationships among ob-
+jects, e.g., “clothes” and “pants” are usually co-occur and
+belong to “person”; 2) the dynamic structure varies from
+image to image and task to task, allowing more content-
+/task-speciﬁc message passing among objects. To construct
+a VCTREE, we design a score function that calculates the
+task-dependent validity between each object pair, and the
+tree is the binary version of the maximum spanning tree
+from the score matrix. Then, visual contexts are encoded by
+bidirectional TreeLSTM and decoded by task-speciﬁc mod-
+els. We develop a hybrid learning procedure which inte-
+grates end-task supervised learning and the tree structure
+reinforcement learning, where the former’s evaluation re-
+sult serves as a self-critic for the latter’s structure explo-
+ration. Experimental results on two benchmarks, which re-
+quire reasoning over contexts: Visual Genome for scene
+graph generation and VQA2.0 for visual Q&A, show that
+VCTREE outperforms state-of-the-art results while discov-
+ering interpretable visual context structures.
+
+1. Introduction
+
+Objects are not alone. They are placed in the visual con-
+text: a coherent object conﬁguration attributed to the fact
+that they co-vary with each other. Extensive studies in cog-
+nitive science show that our brains inherently exploit visual
+contexts to understand cluttered visual scenes comprehen-
+sively [4, 6, 37]. For example, even the girl’s leg and the
+horse are not fully observed in Figure 1, we can still infer
+“girl riding horse”. Inspired by this, modeling visual con-
+
+Chain
+
+Fully-Connected Graph
+
+What is on the 
+
+little girl’s head?
+
+Helmet
+
+Is the girl sitting on 
+
+the horse correctly?
+
+Yes
+
+Dynamic Tree (ours)
+
+Figure 1. Illustrations of different object-level visual context struc-
+tures: chains [57], fully-connected graphs [50], and dynamic tree
+structures constructed by the proposed VCTREE. For the purpose
+of efﬁcient context encoding by using TreeLSTM [44], we trans-
+form the multi-branch trees (left) to the equivalent left-child right-
+sibling binary trees [14], where the left branches (red) indicate the
+hierarchical relations and right branches (blue) indicate the par-
+allel relations. The key advantages of VCTREE over chains and
+graphs are hierarchical, dynamic, and efﬁcient.
+
+texts is also indispensable in many modern computer vi-
+sion systems. For example, state-of-the-art CNN architec-
+tures capture the context by convolutions of various recep-
+tive ﬁelds and encode it into multi-scale feature map pyra-
+mid [8, 27, 60]. Such pixel-level visual context (or local
+context [16]) arguably plays one of the key roles in clos-
+ing the performance gap of the “mid-level” vision between
+humans and machines, such as R-CNN based object detec-
+tion [27, 29, 40], instance segmentation [18, 38], and FCN
+
+6619
+
+based semantic segmentation [8, 9, 56].
+
+Modeling visual contexts explicitly on the object-level
+has also been shown effective in “high-level” vision tasks
+such as image captioning [54] and visual Q&A [46].
+In
+fact, the visual context serves as a powerful inductive bias
+that connects objects in a particular layout for high-level
+reasoning [26, 30, 46, 54, 36, 28]. For example, the spa-
+tial layout of “person” on “horse” is useful for determining
+the relationship “ride”, which is in turn informative to lo-
+calize the “person” if we want to answer “who is riding on
+the horse?”. However, those works assume that the con-
+text is a scene graph, whose detection per se is a high-
+level task and not yet reliable. Without high-quality scene
+graphs, we have to use a prior layout structure. As shown in
+Figure 1, two popular structures are chains [57] and fully-
+connected graphs [7, 10, 15, 25, 50, 55, 49], where the con-
+text is encoded by sequential models such as bidirectional
+LSTM [19] for chains and CRF-RNN [61] for graphs.
+
+However,
+
+these two prior structures are sub-optimal.
+First, chains are oversimpliﬁed and may only capture sim-
+ple spatial information or co-occurrence bias; though fully-
+connected graphs are complete, they lack the discrimina-
+tion between hierarchical relations, e.g., “helmet afﬁliated
+to head”, and parallel relations, e.g., “girl on horse”; in addi-
+tion, dense connections could also lead to message passing
+saturation in the subsequent context encoding [50]. Second,
+visual contexts are inherently content-/task-driven, e.g., the
+object layouts should vary from content to content, question
+to question. Therefore, ﬁxed chains and graphs are incom-
+patible with the dynamic nature of visual contexts [47].
+
+In this paper, we propose a model dubbed VCTREE, pi-
+oneering to compose dynamic tree structures for encoding
+object-level visual context for high-level visual reasoning
+tasks, such as scene graph generation (SGG) and visual
+Q&A (VQA). Given a set of object proposals in an im-
+age (e.g., obtained from Faster-RCNN [40]), we maintain
+a trainable task-speciﬁc score matrix of the objects, where
+each entry indicates the contextual validity of the pairwise
+objects. Then, a maximum spanning tree can be trimmed
+from the score matrix, e.g., the multi-branch trees shown in
+Figure 1. This dynamic structure represents a “hard” hierar-
+chical layout bias of what objects should gain more contex-
+tual information from others, e.g., objects on the person’s
+head are most informative given the question “what on the
+little girl’s head?”; while the whole person’s body is more
+important given the question “Is the girl sitting on the horse
+correctly?”. To avoid the saturation issue caused by the
+densely connected arbitrary number of children, we further
+morph the multi-branch trees to the equivalent left-child
+right-sibling binary trees [14], where the left branches (red)
+indicate the hierarchical relations and right branches (blue)
+indicate the parallel relations, then use TreeLSTM [44] to
+encode the context.
+
+As the above VCTREE construction is in a discrete
+and non-differentiable nature, we develop a hybrid learn-
+ing strategy using REINFORCE [20, 41, 48] for tree struc-
+ture exploration and supervised learning for context encod-
+ing and its subsequent tasks. In particular, the evaluation
+result (Recall for SGG and Accuracy for VQA) from super-
+vised task can be exploited as a critic function that guide
+the “action” of tree construction. We evaluate VCTREE
+on two benchmarks: Visual Genome [24] for SGG and
+VQA2.0 [17] for VQA. For SGG, we achieve a new state-
+of-the-art on all three standard tasks, i.e., Scene Graph Gen-
+eration, Scene Graph Classiﬁcation, and Predicate Classiﬁ-
+cation; for VQA, we achieve competitive results on single
+In particular, VCTREE helps high-
+model performances.
+level vision models ﬁght against the dataset bias. For ex-
+ample, we achieve 4.1% absolute gain in proposed Mean
+Recall@100 metric of Predicate Classiﬁcation than MO-
+TIFS [57], and observe higher improvement in VQA2.0 bal-
+anced pair subset [45] than normal validation set. Qualita-
+tive results also show that VCTREE composes interpretable
+structures.
+
+2. Related Work
+
+Visual Context Structures. Despite the consensus on the
+value of visual contexts, existing context models are diver-
+siﬁed into a variety of implicit or explicit approaches. Im-
+plicit models directly encode surrounding pixels into multi-
+scale feature maps, e.g., dilated convolution [56] presents a
+efﬁcient way to increase receptive ﬁeld, applicable in var-
+ious dense prediction tasks [8, 9]; feature pyramid struc-
+ture [27] combines low-resolution contextual features with
+high-resolution detailed features, facilitating object detec-
+tion with rich semantics. Explicit models incorporate con-
+textual cues through object connections. However, such
+methods [25, 50, 57] group objects into ﬁxed layouts, i.e.,
+chains or graphs.
+Learning to Compose Structures. Learning to compose
+structures is becoming popular in NLP for sentence rep-
+resentation, e.g., Cho et al. [11] applied a gated recur-
+sive convolutional neural network (grConv) to control the
+bottom-up feature ﬂow for a dynamic structure; Choi et
+al. [12] combines TreeLSTM with Gumbel-Softmax, al-
+lowing task-speciﬁc tree structures automatically learned
+from plain text. Yet, only few works compose visual struc-
+tures for images. Conventional approaches construct a sta-
+tistical dependency graph/tree for the entire dataset based
+on object categories [13] or exemplars [32]. Those sta-
+tistical methods cannot put per-image objects in a context
+as a whole to reason over content-/task-speciﬁc fashion.
+Socher et al. [43] constructed a bottom-up tree structure to
+parse images; however, their tree structure learning is super-
+vised while ours is reinforced, which does not require tree
+ground-truth.
+
+6620
+
+(a) Feature Extraction
+
+(cid:144)(cid:2869)(cid:144)(cid:2870)(cid:144)(cid:2871)
+
+RoI
+
+Spatial
+
+(b) Tree Construction
+
+(cid:144)(cid:2869) (cid:144)(cid:2870) (cid:144)(cid:2871)
+
+(cid:144)(cid:2869)(cid:144)(cid:2870)(cid:144)(cid:2871)
+
+(cid:144)(cid:2869)
+
+(cid:144)(cid:2871)
+
+(cid:144)(cid:2870)
+
+REINFORCE
+
+(c) Context Encoding
+
+(d1) Scene Graph Generation
+
+Visual
+
+Context
+
+R
+e
+l
+a
+t
+i
+o
+n
+ 
+M
+o
+d
+e
+l
+
+Man
+
+Ride
+
+Wear
+
+Motorcycle
+
+Helmet
+
+Scene Graph
+
+(d2) Visual Question Answering
+Context
+Attention
+
+man’s head?
+
+Q: What is on the 
+
+Visual
+
+Context
+
+Visual
+Attention
+
+A: Helmet
+
+Supervised Learning
+
+Figure 2. The framework of the proposed VCTREE model. We extract visual features from proposals and construct a dynamic VCTREE
+using the learnable score matrix. The tree structure is used to encode the object-level visual context, which will be decoded for each speciﬁc
+end-task. Parameters in stages (c)&(d) are trained by supervised learning, while those in stage (b) are using REINFORCE with a self-critic
+baseline.
+
+Visual Reasoning Tasks. Scene Graph Generation (SGG)
+task [50, 52] is derived from Visual Relationship Detection
+(VRD) [31, 53]. Early work on VRD [31] treats objects as
+isolated individuals, while SGG considers each image as a
+whole. Along with the widely used message passing mech-
+anism [50], a variety of context models [25, 26, 34, 51]
+have been exploited in SGG to ﬁne-tune local predictions
+through rich global contexts, making it the best competition
+ﬁeld for different contextual models. Visual Question An-
+swering (VQA) as a high-level task bridges the gap between
+computer vision and natural language processing. State-of-
+the-art VQA models [1, 3, 45] rely on bag-of-object visual
+attentions which can be considered as a trivial context struc-
+ture. However, we propose to learn a tree context structure
+that is dynamic to visual content and questions.
+
+3. Approach
+
+TreeLSTM) to encode the contextual cues using the con-
+structed VCTREE.
+(d) The encoded contexts will be de-
+coded for each speciﬁc end-task detailed in Section 3.3 and
+Section 3.4.
+
+3.1. VCTREE Construction
+
+VCTREE construction aims to learn a score matrix S,
+which approximates the task-dependent validity between
+each object pair. Two principles guide the formulation of
+this matrix: 1) inherent object correlations should be main-
+tained, e.g., “man wears helmet” in Figure 2; (2) task re-
+lated object pair has higher score than irrelevant ones, e.g.,
+given question “what is on the man’s head?”, “man-helmet”
+pair should be more important than “man-motorcycle” and
+“helmet-motorcycle” pairs. Therefore, we deﬁne each ele-
+ment of S as the product of the object correlation f (xi, xj)
+and the pairwise task-dependency g(xi, xj, q):
+
+As illustrated in Figure 2, our VCTREE model can be
+summarized into the following four steps.
+(a) We adopt
+Faster-RCNN to detect object proposals [40]. The visual
+feature of each proposal i is presented as xi, concatenat-
+ing a RoIAlign feature [18] vi ∈ R2048 and spatial feature
+bi ∈ R8, where 8 elements indicate the bounding box co-
+ordinates (x1, y1, x2, y2), center ( x1+x2
+), and size
+(x2 − x1, y2 − y1), respectively. Note that the visual feature
+xi is not limited to bounding box; segment feature from in-
+stance segmentations [18] or panoptic segmentations [23]
+could also be alternatives. (b) In Section 3.1, a learnable
+matrix will be introduced to construct VCTREE. Moreover,
+since the VCTREE construction is discrete in nature and the
+score matrix is non-differentiable from the loss of end-task,
+we develop a hybrid learning strategy in Section 3.5. (c)
+In Section 3.2, we employ Bidirectional Tree LSTM (Bi-
+
+, y1+y2
+
+2
+
+2
+
+Sij = f (xi, xj) · g(xi, xj, q),
+f (xi, xj) = σ (MLP(xi, xj)) ,
+g(xi, xj, q) = σ(h(xi, q)) · σ(h(xj, q)),
+
+(1)
+
+⎧⎨
+⎩
+
+where σ(·) is the sigmoid function; q is the task feature,
+e.g., the question feature encoded by GRU in VQA; MLP is
+a multi-layer perceptron; h(xi, q) is the object-task correla-
+tion in VQA, which will be introduced later in Section 3.4.
+In SGG, the entire g(xi, xj, q) is set to 1, as we assume
+that each object pair contributes equally without the ques-
+tion prior. We pretrain f (xi, xj) on Visual Genome [24]
+for a reasonable binary prior if two objects are related. Yet,
+such a pretrained model is not perfect due to the lack of co-
+herent graph-level constraint or question prior, so it will be
+further ﬁne-tuned in Section 3.5.
+
+Considering S as a symmetric adjacency matrix, we
+can obtain a maximum spanning tree using the Prim’s
+
+6621
+
+(cid:2196)(cid:2778)
+(cid:23)(cid:1870)(cid:1857)(cid:1857)
+(cid:2196)(cid:2779)
+(cid:2196)(cid:2780)
+(cid:19)(cid:1867)(cid:1867)(cid:1864)(cid:2196)(cid:2781) (cid:2196)(cid:2782) (cid:2196)(cid:2783)
+
+(cid:2196)(cid:2778) (cid:2196)(cid:2779) (cid:2196)(cid:2780)
+
+(cid:2196)(cid:2781)
+(cid:2196)(cid:2783)(cid:2196)(cid:2782)
+
+(cid:2196)(cid:2778)
+(cid:23)(cid:1870)(cid:1857)(cid:1857)
+(cid:2196)(cid:2782)
+(cid:2196)(cid:2779) (cid:2196)(cid:2780)
+(cid:19)(cid:1867)(cid:1867)(cid:1864)
+(cid:2196)(cid:2781) (cid:2196)(cid:2782) (cid:2196)(cid:2783)
+
+Figure 3. The maximum spanning tree from S. In each step, a
+node in the remaining pool is connected to the current tree, if it
+has the highest validity score.
+
+algorithm [39], with a root (source node) i satisfying
+arg maxi (cid:5)j (cid:2)= i Sij .
+In a nutshell, as illustrated in Fig-
+ure 3, we construct the tree recursively by connecting the
+node from the pool to the tree node if it has the most valid-
+ity. Note that during the tree structure exploration in Sec-
+tion 3.5, each of the i-th step t(i) in the above tree construc-
+tion is sampled from all possible choices in a multinomial
+distribution with the probability p(t(i)|t(1), ..., t(i−1), S) in
+proportion to the validity. The resultant tree is multi-branch
+and is merely a sparse graph with only one kind of connec-
+tion, which is still unable to discriminate the hierarchical
+and parallel relations in the subsequent context encoding.
+To this end, we convert the multi-branch tree into an equiv-
+alent binary tree, i.e., VCTREE by changing non-leftmost
+edges into right branches as in Figure 1.
+In this fashion,
+the right branches (blue) indicate parallel contexts, and left
+ones (red) indicate hierarchical contexts. Such a binary tree
+structure achieves signiﬁcant improvements in our SGG and
+VQA experiments compared to its multi-branch alternative.
+
+3.2. TreeLSTM Context Encoding
+
+Given the above constructed VCTREE, we adopt Bi-
+
+TreeLSTM as our context encoder:
+
+D = BiTreeLSTM({zi}i=1,2,...,n),
+
+(2)
+
+where zi is the input node feature, which will be speciﬁed
+in each task, and D = [d1, d2, ..., dn] is the encoded object-
+level visual context. Each di = [
+hi] is the concatenated
+hidden states from both TreeLSTM [44] directions:
+
+hi;
+
+(cid:2)
+
+(cid:3)
+
+(cid:2)
+
+(cid:2)
+
+hi = TreeLSTM(zi,
+
+hp),
+
+(cid:3)
+
+(cid:3)
+
+(cid:3)
+
+hi = TreeLSTM(zi, [
+
+hl;
+
+hr]),
+
+(3)
+
+(4)
+
+where (cid:2)and(cid:3) denote the top-down and bottom-up direc-
+tions, respectively; we slightly abuse the subscripts p, l, r to
+denote the parent, left child, and right child of node i. The
+order of the concatenation [
+hr] in Eq. (4) indicates the
+explicit discrimination between the left and right branches
+in context encoding. We use zero vectors to pad all the miss-
+ing branches.
+
+hl;
+
+(cid:3)
+
+(cid:3)
+
+Relation(cid:1777)(cid:1815)(cid:1814)(cid:1820)(cid:1805)(cid:1824)(cid:1820)
+
+Object(cid:1777)(cid:1815)(cid:1814)(cid:1820)(cid:1805)(cid:1824)(cid:1820)
+
+Relationship Decoding
+
+D
+e
+c
+o
+d
+
+i
+
+n
+g
+
+O
+b
+j
+e
+c
+t
+ 
+
+Relation Context
+
+Union Box RoI Feature
+
+Bounding Box Feature
+
+O
+b
+j
+e
+c
+t
+ 
+
+P
+r
+e
+d
+i
+c
+t
+i
+o
+n
+
+R
+e
+l
+a
+t
+i
+o
+n
+ 
+
+P
+r
+e
+d
+i
+c
+t
+i
+o
+n
+
+Figure 4. The overview of our SGG Model. The object context
+feature will be used to decode object categories, and the pair-
+wise relationship decoding jointly fuses the relation context fea-
+ture, RoIAlign feature of union box, and bounding box feature,
+before prediction.
+
+3.3. Scene Graph Generation Model
+
+Now we detail the implementation of Eq. (2) and how to
+
+1, do
+
+n], do
+
+2, ..., do
+
+decode them for the SGG task as illustrated in Figure 4.
+Object Context Encoding. We employ BiTreeLSTM from
+Eq. (2) to encode object context representation into Do =
+i ∈ R512. We set inputs zi of Eq. (2) to
+[do
+[xi; W1 ˆci], i.e., concatenation of object visual features and
+embedded N-way original Faster-RCNN class probabilities,
+where W1 is the embedding matrix that maps each original
+label distribution ˆci into R200.
+Relation Context Encoding. We apply an additional Bi-
+TreeLSTM using the above do
+i as input zi to further encode
+the relation context Dr = [dr
+1, dr
+Context Decoding. The goal of SGG is to detect objects
+and then predict their relationship. Similar to [57], we adopt
+a dynamic object prediction which can be viewed as a de-
+coding process in a top-down direction using Eq. (3), that is,
+the object class of a child is dependent on its parent. Speciﬁ-
+cally, we set the input zi of Eq. (3) to be [do
+i ; W2cp], where
+cp is the predicted label distribution of the i’s parent, and
+W2 embeds it into R200, then the output hidden is passed to
+a softmax classiﬁer to achieve object label distribution ci.
+
+i ∈ R512.
+
+2, ..., dr
+
+n], dr
+
+i ; dr
+
+The relationship prediction is in a pairwise fashion. First,
+we collect three pairwise features for each object pair: (1)
+dij = MLP([dr
+j ]) as the context feature, (2) bij =
+MLP([bi; bj; bi∪j; bi∩j]) as the bounding box pair feature,
+with i ∪ j, i ∩ j being union box and intersection box, (3)
+vij as the RoIAlign feature [18] from the union bounding
+box of the object pair. All dij, vij, bij are under the same
+dimension R2048. Then, we fuse them into a ﬁnal pairwise
+feature: gij = dij · vij · bij , before feed it into the softmax
+predicate classiﬁer, where · is element-wise product.
+
+3.4. Visual Question Answering Model
+
+Now we detail the implementation of Eq. (2) for VQA,
+
+and illustrate our VQA model in Figure 5.
+
+6622
+
+Visual Attention Model
+
+(cid:963)
+
+attention
+
+Visual Feature
+
+Question
+
+BiTreeLSTM
+
+ 
+
+Q
+u
+e
+s
+t
+i
+o
+n
+G
+u
+i
+d
+e
+d
+G
+a
+t
+e
+
+ 
+
+P
+r
+e
+d
+i
+c
+t
+i
+o
+n
+
+C
+a
+n
+d
+i
+d
+a
+t
+e
+ 
+A
+n
+s
+w
+e
+r
+s
+
+Context Attention Model
+
+(cid:963)
+
+attention
+
+Context Feature
+
+Question
+
+Figure 5. The overview of our VQA framework. It contains two
+multimodal attention models for visual feature and context feature.
+Outputs from both models will be concatenated and passed to a
+question-guided gate before answer prediction.
+
+1, dq
+
+n], dq
+
+2, ..., dq
+
+Context Encoding. The context feature in VQA: Dq =
+[dq
+i ∈ R1024 is directly encoded from the
+bounding box visual feature xi by Eq. (2).
+Multimodal Attention Feature. We adopt a popular at-
+tention model from previous work [1, 45] to calculate the
+multimodal joint feature m ∈ R1024 for each question and
+image pair:
+
+m = fd( ˆz, q),
+
+(5)
+
+where q ∈ R1024 is the question feature from a one-layer
+GRU encoding the sentence; ˆz = (cid:5)N
+i=1 αizi is the atten-
+tive image feature calculated from the input feature set {zi},
+αi = exp (ui)/(cid:5)k exp (uk) is the attention weight from
+object-task correlation ui = h(zi, q) = MLP(cid:6)fd(zi, q)(cid:7),
+with the output of MLP being a scalar; fd can be any
+multi-modal feature fusion function, in particular, we adopt
+fd(x, y) = ReLU(W3x + W4y) − (W3x − W4y)2 as
+in [59], with W3 and W4 projecting x, y into the same di-
+mension. Therefore, we can use Eq. (5) to obtain both the
+multimodal visual attention feature mx by setting input zi
+to xi and multimodal contextual attention feature md by
+setting zi to dq
+i .
+Question Guided Gate Decoding. However, the impor-
+tance of mx and md varies from question to question, e.g.,
+“is there a dog?” only requires visual features for detection,
+while “is the man dressed formally?” is highly context de-
+pendent. Inspired by [42], we adopt a question guided gate
+to select the most related channels from [mx; md]. The
+gate vector g ∈ R2048 is deﬁned as:
+
+g = σ(cid:6)MLP([q; W5lq])(cid:7),
+
+(6)
+
+where lq ∈ R65 is a one-hot question type vector deﬁned by
+preﬁxed words of questions, which is embedded into R256
+by matrix W5, and σ(·) denotes the sigmoid function.
+
+Finally, we fuse g · [mx; md] as the ﬁnal VQA feature
+
+and feed it into the softmax classiﬁer.
+
+3.5. Hybrid Learning
+
+Due to the discrete nature of VCTREE construction, the
+score matrix S is not fully differentiable from the loss back-
+propagated from the end-task loss.
+Inspired by [20], we
+use a hybrid learning strategy that combines reinforcement
+learning, i.e., policy gradient [48] for the parameters θ of
+S in the tree construction and supervised learning for the
+rest parameters. Suppose a layout l, i.e., a constructed VC-
+TREE, is sampled from π(l|I, q; θ), i.e., the construction
+procedure in Section 3.1, where I is the given image, q is
+the task, e.g., questions in VQA. To avoid clutter, we drop
+I and q. Then, we deﬁne the reinforcement learning loss
+Lr(θ) as:
+
+Lr(θ) = −El∼π(l|θ)[r(l)],
+
+(7)
+
+where Lr(θ) aims to minimize the negative expected re-
+ward r(l), which can be the end-task evaluation met-
+rics such as Recall@100 for SGG and Accuracy for
+the above gradient will be ∇θLr(θ) =
+VQA. Then,
+−El∼π(l|θ)[r(l)∇θlogπ(l|θ)]. Since it is impractical to esti-
+mate all possible layouts, we use the Monte-Carlo sampling
+to estimate the gradient:
+
+∇θLr(θ) ≈ −
+
+1
+M
+
+M
+
+(cid:8)
+
+m=1
+
+(cid:9)r(lm)∇θlogπ(lm|θ)(cid:10),
+
+(8)
+
+where we set M to 1 in our implementation.
+
+To reduce the gradient variance, we apply a self-critic
+baseline [41] b = r(ˆl), where ˆl is the greedy constructed
+tree without sampling. So the original reward r(lm) can be
+replaced by r(lm) − b in Eq. (8). We observe faster conver-
+gence than using a traditional moving baseline [33].
+
+The overall hybrid learning will be alternatively con-
+ducted between supervised learning and reinforcement
+learning, where we ﬁrst train the supervised end-task on
+pretrained π(l|θ), then ﬁx the end-task as reward function
+to learn our reinforcement policy network, after that, we
+update the supervised end-task by new π(l|θ). The latter
+two stages are running alternatively 2 times in our model.
+
+4. Experiments on Scene Graph Generation
+
+4.1. Settings
+
+Dataset. Visual Genome (VG) [24] is a popular benchmark
+for SGG. It contains 108,077 images with tens of thousands
+of unique object and predicate relation categories, yet most
+of categories have very limited instances. Therefore, pre-
+vious works [26, 50, 58] proposed various VG splits that
+remove rare categories. We adopted the most popular one
+from [50], which selects top-150 object categories and top-
+50 predicate categories by frequency. The entire dataset is
+divided into the training set and test set by 70%, 30%, re-
+spectively. We further picked 5,000 images from training
+set as the validation set for hyper-parameter tuning.
+
+6623
+
+Model
+VRD [31]
+AsscEmbed [34]
+IMP⋄ [50]
+TFR [21]
+FREQ⋄ [57]
+MOTIFS⋄ [57]
+Graph-RCNN [51]
+Chain
+Overlap
+Multi-Branch
+VCTREE-SL
+VCTREE-HL
+
+Scene Graph Generation
+R@20 R@50 R@100 R@20 R@50 R@100 R@20 R@50 R@100
+
+Scene Graph Classiﬁcation
+
+Predicate Classiﬁcation
+
+-
+
+6.5
+14.6
+3.4
+20.1
+21.4
+
+-
+
+21.2
+21.4
+21.5
+21.7
+22.0
+
+0.3
+8.1
+20.7
+4.8
+26.2
+27.2
+11.4
+27.1
+27.3
+27.3
+27.7
+27.9
+
+0.5
+8.2
+24.5
+6.0
+30.1
+30.3
+13.7
+30.3
+30.4
+30.6
+31.1
+31.3
+
+-
+
+18.2
+31.7
+19.6
+29.3
+32.9
+
+-
+
+33.3
+33.7
+34.3
+35.0
+35.2
+
+11.8
+21.8
+34.6
+24.3
+32.3
+35.8
+29.6
+36.1
+36.5
+37.1
+37.9
+38.1
+
+14.1
+22.6
+35.4
+26.6
+32.9
+36.5
+31.6
+36.8
+37.1
+37.8
+38.6
+38.8
+
+-
+
+47.9
+52.7
+40.1
+53.6
+58.5
+
+-
+
+59.4
+59.5
+59.5
+59.8
+60.1
+
+27.9
+54.1
+59.3
+51.9
+60.6
+65.2
+54.2
+66.0
+66.0
+66.1
+66.2
+66.4
+
+35.0
+55.4
+61.3
+58.3
+62.2
+67.1
+59.1
+67.7
+67.8
+67.8
+67.9
+68.1
+
+Table 1. SGG performances (%) of various methods. ⋄ denotes the methods using the same Faster-RCNN detector as ours. IMP⋄ is reported
+from the re-implemented version [57].
+
+Model
+MOTIFS⋄ [57]
+FREQ⋄ [57]
+VCTREE-HL
+
+SGGen
+
+PredCls
+mR@100 mR@100 mR@100
+
+SGCls
+
+6.6
+7.1
+8.0
+
+8.2
+8.5
+10.8
+
+15.3
+16.0
+19.4
+
+Table 2. Mean recall (%) of various methods across all the 50 pred-
+icate categories.
+
+Protocols. We followed three conventional protocols to
+evaluate our SGG model: (1) Scene Graph Generation
+(SGGen): given an image, detect object bounding boxes
+and their categories, and predict their relationships; (2)
+Scene Graph Classiﬁcation (SGCls): given ground-truth
+object bounding boxes in an image, predict the object cate-
+gories and their relationships; (3) Predicate Classiﬁcation
+(PredCls): given the object categories and their bounding
+boxes in the image, predict their relationships.
+Metrics. Since the annotation in VG is incomplete and
+biased, we followed the conventional Recall@K (R@K =
+20,50,100) as the evaluation metrics [31, 50, 57]. How-
+ever, it is well-known that SGG models trained on biased
+datasets such as VG have low performances for less fre-
+quent categories. To this end, we introduced a balanced
+metric called: Mean Recall (mR@K). It calculates the re-
+call on each predicate category independently, and then av-
+erages the results. So, each category contributes equally.
+Such a metric reduces the inﬂuence of some common yet
+meaningless predicates, e.g., “on”, “of”, and gives equal
+attention to those infrequent predicates, e.g., “riding”, “car-
+rying”, which are more valuable to high-level reasoning.
+
+4.2. Implementation Details
+
+We adopted Faster-RCNN [40] with VGG backbone
+to detect object bounding boxes and extract RoI features.
+Since the performance of SGG highly depends on the under-
+lying detector, we used the same set of parameters as [57]
+for fair comparison. Object correlations f (xi, xj) in Eq. (1)
+will be pretrained on ground-truth bounding boxes with
+class-agnostic relationships (i.e., foreground/background
+
+Left Branch of 'Street' Node
+
+Right Branch of 'Street' Node
+
+21%
+
+3%
+3%33%%%%
+4%
+4%
+
+4%
+
+5%5555555555
+
+30%
+
+7%
+
+5%
+
+5%5555
+
+5%
+
+5%
+
+Car
+Man
+Tree
+Person
+Sign
+Bus
+Sidewalk
+Street
+Pole
+Vehicle
+Truck
+Building
+Others
+
+49%
+
+11%
+
+9%
+
+5%
+5%
+4%%%%
+3%33%%3%%%%%%%3333%3%3%%%%%%
+
+3%33%%%%%33333333%%%%%%%%33%%333%3%%%%%3%%%%%33%333333%3%3%%%3%%2%2%%%%%%2%%%%2%%%2%%%2%%%2%%%2%%%%%%%%%%%%%%%%2%22%%%%%%22%%%%%%22%%%%%%2%
+
+Sidewalk
+Street
+Sign
+Car
+Light
+Pole
+Tree
+Person
+Building
+Door
+People
+Man
+Others
+
+Figure 6. The statistics of left-branch (hierarchical) nodes and
+right-branch (parallel) nodes of the “street” category.
+
+relationships), using all possible symmetric pairs without
+sampling.
+In SGGen, top-64 object proposals were se-
+lected after non-maximal suppression (NMS) with 0.3 IoU.
+We set background/foreground ratio for predicate classiﬁ-
+cation to 3, and capped the number of training samples at
+64 (retained all foreground pairs if possible). Our model
+is optimized by SGD with momentum, using learning rate
+lr = 6 · 10−3 and batch size b = 5 for supervised learning,
+and lr = 6 · 10−4, b = 1 for reinforcement learning.
+
+4.3. Ablation Studies
+
+We investigated the inﬂuence of different structure con-
+struction policies. They are reported on the bottom half
+of Table 1. The ablative methods are (1) Chain: sorting
+
+all the objects by (cid:5)j:j(cid:2)=i Sij , then constructing a chain,
+
+which is different from the left-to-right ordered chain in
+MOTIFS [57]; (2) Overlap: iteratively constructing a bi-
+nary tree by selecting the node with largest number of over-
+lapped objects as parent, and dividing the rest nodes into
+left/right sub-trees by relatively positions of their bound-
+ing boxes; (3) Multi-Branch: the maximum spanning tree
+generated from score matrix S, using Child-Sum TreeL-
+STM [44] to incorporate context; (4) VCTREE-SL: the
+proposed VCTREE trained by supervised learning; (5) VC-
+TREE-HL: the complete version of VCTREE, trained by
+hybrid learning for structure exploration in Section 3.5. As
+we will show that Multi-Branch is signiﬁcantly worse than
+
+6624
+
+Model
+Graph
+Chain
+Overlap
+Multi-Branch
+VCTREE-SL
+VCTREE-HL
+
+VQA2.0 Validation Accuracy
+
+Yes/No Number Other All
+64.5
+64.6
+64.7
+64.7
+64.9
+65.1
+
+56.6
+56.9
+57.0
+56.9
+57.0
+57.1
+
+81.8
+81.8
+81.8
+82.1
+82.3
+82.6
+
+44.9
+44.5
+44.8
+44.3
+45.0
+45.1
+
+Balanced Pairs
+
+36.3
+36.3
+36.4
+36.6
+36.9
+37.2
+
+Table 3. Accuracies (%) of various context structures on the
+VQA2.0 validation set.
+
+VCTREE, so there is no need to conduct hybrid learning ex-
+periment on Multi-Branch. We observe that VCTREE per-
+forms better than other structures, and it is further improved
+by hybrid learning for structure exploration.
+
+4.4. Comparisons with State-of-the-Arts
+
+Comparing Methods. We compared VCTREE with state-
+of-the-art methods in Table 1: (1) VRD [31], FREQ [57]
+are methods without using visual contexts. (2) AssocEm-
+bed [34] assembles implicit contextual features by stacked
+hourglass backbone [35]. (3) IMP [50], TFR [21], MO-
+TIFS [57], Graph-RCNN [51] are explicit context models
+with a variety of structures.
+Quantitative Analysis. From Table 1, compared with the
+previous state-of-the-art MOTIFS [57], the proposed VC-
+TREE has the best performances. Interestingly, Overlap tree
+and Multi-Branch tree are better than other non-tree context
+models. From Table 2, the proposed VCTREE-HL shows
+larger absolute gains of PredCls under mR@100, which in-
+dicates that our model learns non-trivial visual context, i.e.,
+not merely class distribution bias as in FREQ and partially
+in MOTIFS. Note that MOTIFS [57] is even worse than its
+FREQ [57] baseline under mR@100.
+Qualitative Analysis. To better understand what context is
+learned by VCTREE, we visualized a statistics of left-/right-
+branch nodes for nodes classiﬁed as “street” in Figure 6.
+From the left pie, the hierarchical relations, we can see the
+node categories are long-tailed, i.e., top-10 categories cover
+the 73% of the instances; while the right pie, the parallel re-
+lations, are more uniformly distributed. This demonstrates
+that VCTREE captures the two types of context success-
+fully. More qualitative examples of VCTREEs and their
+generated scene graph can be viewed in Figure 7. The com-
+mon errors are generally synonymous labels, e.g., “jeans”
+vs. “pants”, “man” vs. “person”, and over-interpretation,
+e.g., the “tail” of bottom left “dog” is considered as “leg”,
+as it appears at the place where “leg” should be.
+
+5. Experiments on Visual Q&A
+
+5.1. Settings
+
+Datasets. We evaluated the proposed VQA model on
+VQA2.0 [17]. Compared with VQA1.0 [2], VQA2.0
+has more question-image pairs for
+training (443,757)
+
+Model
+Teney [45]
+MUTAN [5]
+MLB [22]
+DA-NTN [3]
+Count [59]
+Chain
+Graph
+VCTREE-HL
+
+VQA2.0 test-dev
+Yes/No Number Other
+81.82
+56.05
+56.50
+82.88
+56.34
+83.58
+84.29
+57.92
+58.97
+83.14
+58.93
+82.74
+83.53
+58.6
+59.11
+84.28
+
+44.21
+44.54
+44.92
+47.14
+51.62
+47.31
+47.09
+47.78
+
+All
+
+65.32
+66.01
+66.27
+67.56
+68.09
+67.42
+67.56
+68.19
+
+Table 4. Single-model accuracies (%) on VQA2.0 test-dev, where
+MUTAN and MLB are re-implemented versions from [3].
+
+Model
+Teney [45]
+MUTAN [5]
+MLB [22]
+DA-NTN [3]
+Count [59]
+Chain
+Graph
+VCTREE-HL
+
+VQA2.0 test-standard
+
+Yes/No Number Other
+56.26
+82.20
+56.91
+83.06
+56.52
+83.96
+84.60
+58.20
+59.11
+83.56
+58.95
+83.06
+58.82
+84.03
+59.34
+84.55
+
+43.90
+44.28
+44.77
+47.13
+51.39
+47.38
+47.08
+47.36
+
+All
+
+65.67
+66.38
+66.62
+67.94
+68.41
+67.68
+68.0
+68.49
+
+Table 5. Single-model accuracies (%) on VQA2.0 test-standard,
+where MUTAN and MLB are re-implemented versions from [3].
+
+3
+
+In VQA2.0,
+
+and validation (214,354), and all
+the question-answer
+pairs are balanced by making sure the same question
+can have different answers.
+the ground-
+truth accuracy of a candidate answer is considered as
+the average of min( #Humans votes
+, 1) over all 10 select 9
+sets. Question-answer pairs are organized in three answer
+types: i.e. “Yes/No”, “Number”, “Other”. There are also
+65 question types determined by preﬁxed words, which we
+used to generate question-guided gates. We also tested
+our models on a balanced subset of validation set, called
+Balanced Pairs [45], which requires the same question on
+different images with two different yet perfect (with 1.0
+ground-truth score) answers. Since Balanced Pairs strictly
+removes question-related bias, it reﬂects the ability of a con-
+text model to distinguish subtle differences between images.
+
+5.2. Implementation Details
+
+We employed a simple text preprocessing for questions
+and answers, which changes all characters into lower-case
+and removes special characters. Questions were encoded
+into a vocabulary of the size 13,758 without trimming. An-
+swers used a 3,000 vocabulary selected by frequency. For
+fair comparison, we used the same bottom-up feature [1] as
+previous methods [1, 3, 45, 59], which contains 10 to 100
+object proposals per image extracted by Faster-RCNN [40].
+We used the same Faster-RCNN detector to pretrain the
+f (xi, xj). Since candidate answers were represented by
+probabilities rather than one-hot vectors in VQA2.0, we al-
+lowed the cross-entropy loss calculating soft categories, i.e.,
+probabilities of ground-truth candidate answers. We used
+Adam optimizer with learning rate lr = 0.0015 and batch
+size b = 256, lr decayed at ratio of 0.5 every 20 epochs.
+
+6625
+
+Q: Where was the picture taken of the man?  Q: What is the man wearing on his head?
+
+A: Outside
+GT: Forest
+
+A: Hat
+
+Q: Is there any snow on the trees?
+
+Q: What sport is the man doing?
+
+A: No
+
+A: Snowboarding
+
+Q: What type of food is on the plate?
+
+Q: Does this kid look excited?
+
+A: Hot dog
+
+A: Yes
+
+Sign
+
+near
+
+near
+
+near
+
+near
+
+Horse
+
+near
+near
+
+Man
+
+Of
+
+Has
+
+Of
+
+Has
+
+On
+
+Wearing
+
+Tail
+
+Head
+
+Pant(Jean)
+
+Table
+
+On
+
+On
+
+With
+
+On
+
+Fork
+
+Glass
+
+Near
+
+Near
+
+Near
+
+Cup
+
+Near
+
+On
+
+Under
+
+Plate
+
+On
+
+Of
+
+Food
+
+Head
+Ear_1
+Ear_2
+Nose
+Leg
+Paw
+Leg(Tail)
+
+Has
+Of
+Has
+Of
+Has
+Of
+Has
+Of
+Has
+Of
+Has
+Of
+Has
+Of
+
+Dog
+
+On
+
+Chair
+
+Figure 7. Left: the learned tree structure and generated scene graphs in VG. Black color indicates correctly detected objects or predicates;
+red indicates the misclassiﬁed ones; blue indicates correct predictions that not labeled as ground-truth. Right: interpretable and dynamic
+trees subject to different questions in VQA2.0.
+
+5.3. Ablation Studies
+
+In addition to the 5 structure construction policies in-
+troduced in Section 4.3, we also implemented a fully-
+connected graph structure using the message passing mech-
+anism [50]. From Table 3, the proposed VCTREE-HL out-
+performs all the context models on three answer types.
+
+We further evaluated the above context models on
+VQA2.0 balanced pair subset [45]: the last column of Ta-
+ble 3, and found that the absolute gains between VCTREE-
+HL and other structures are even larger than those on the
+original validation set. Meanwhile, as reported in [45], dif-
+ferent architectures or hyper-parameters in non-contextual
+VQA model normally gain less improvements on the bal-
+anced pair subset than overall validation set. Thus, it sug-
+gests that VCTREE indeed use better context structures to
+alleviate the question-answer bias in VQA.
+
+5.4. Comparisons with State-of-the-Arts
+
+Comparing Methods. Table 4 & 5 reports the single-model
+performances of various state-of-the-art methods [3, 5, 22,
+45, 59] on both test-dev and test-standard sets. For fair com-
+parison, the reported methods are all using the same Faster-
+RCNN features [1] as ours.
+Quantitative Analysis. The proposed VCTREE-HL shows
+the best overall performance in both test-dev and test-
+standard. Note that though Count [59] has close overall per-
+
+formance to our VCTREE, it mainly improves the “Num-
+ber” task by the elaborately designed model, while the pro-
+posed VCTREE is a more general solution.
+
+Qualitative Analysis. We visualized several examples of
+VCTREE-HL on the validation set. They illustrate that the
+proposed VCTREE is able to learn dynamic structures with
+interpretability, e.g., in Figure 7, given the right middle im-
+age with the question “Is there any snow on the trees?”, the
+generated VCTREE locates the “tree” then searching for the
+“snow”, while with question “What sport is the man do-
+ing?”, the “man” appears to be the root.
+
+6. Conclusions
+
+In this paper, we proposed a dynamic tree structure
+called VCTREE to capture task-speciﬁc visual contexts,
+which can be encoded to support two high-level vision
+tasks: SGG and VQA. By exploiting VCTREE, we ob-
+served consistent performance gains in SGG on Visual
+Genome and in VQA on VQA2.0, compared to models with
+or without visual contexts. Besides, to justify that VCTREE
+learns non-trivial contexts, we conducted additional exper-
+iments against the category bias in SGG and the question-
+answer bias in VQA, respectively. In the future, we intend
+to study the potential of a dynamic forest as the underlying
+context structure.
+
+6626
+
+References
+
+[1] Peter Anderson, Xiaodong He, Chris Buehler, Damien
+Teney, Mark Johnson, Stephen Gould, and Lei Zhang.
+Bottom-up and top-down attention for image captioning and
+visual question answering. In CVPR, 2018. 3, 5, 7, 8
+
+[2] Stanislaw Antol, Aishwarya Agrawal, Jiasen Lu, Margaret
+Mitchell, Dhruv Batra, C Lawrence Zitnick, and Devi Parikh.
+Vqa: Visual question answering. In ICCV, 2015. 7
+
+[3] Yalong Bai, Jianlong Fu, Tiejun Zhao, and Tao Mei. Deep at-
+tention neural tensor network for visual question answering.
+In ECCV, 2018. 3, 7, 8
+
+[4] Moshe Bar. Visual objects in context. Nature Reviews Neu-
+
+roscience, 2004. 1
+
+[5] Hedi Ben-Younes, R´emi Cadene, Matthieu Cord, and Nico-
+las Thome. Mutan: Multimodal tucker fusion for visual
+question answering. In ICCV, 2017. 7, 8
+
+[6] Irving Biederman, Robert J Mezzanotte, and Jan C Rabi-
+nowitz. Scene perception: Detecting and judging objects un-
+dergoing relational violations. Cognitive Psychology, 1982.
+1
+
+[7] Long Chen, Hanwang Zhang, Jun Xiao, Xiangnan He, Shil-
+iang Pu, and Shih-Fu Chang. Scene dynamics: Counterfac-
+tual critic multi-agent training for scene graph generation.
+arXiv preprint arXiv:1812.02347, 2018. 2
+
+[8] Liang-Chieh Chen, George Papandreou, Iasonas Kokkinos,
+Kevin Murphy, and Alan L Yuille. Deeplab: Semantic image
+segmentation with deep convolutional nets, atrous convolu-
+tion, and fully connected crfs. TPAMI, 2018. 1, 2
+
+[9] Liang-Chieh Chen, George Papandreou, Florian Schroff, and
+Hartwig Adam. Rethinking atrous convolution for seman-
+tic image segmentation. arXiv preprint arXiv:1706.05587,
+2017. 2
+
+[10] Xinlei Chen, Li-Jia Li, Li Fei-Fei, and Abhinav Gupta. Iter-
+ative visual reasoning beyond convolutions. In CVPR, 2018.
+2
+
+[11] Kyunghyun Cho, Bart Van Merri¨enboer, Dzmitry Bahdanau,
+and Yoshua Bengio. On the properties of neural machine
+translation: Encoder-decoder approaches. In SSST-8, 2014.
+2
+
+[12] Jihun Choi, Kang Min Yoo, and Sang-goo Lee. Learning to
+
+compose task-speciﬁc tree structures. In AAAI, 2018. 2
+
+[13] Myung Jin Choi, Antonio Torralba, and Alan S Willsky. A
+tree-based context model for object recognition. TPAMI,
+2012. 2
+
+[14] Thomas H. Cormen, Clifford Stein, Ronald L. Rivest, and
+Charles E. Leiserson. Introduction to Algorithms. McGraw-
+Hill Higher Education, 2001. 1, 2
+
+[15] Bo Dai, Yuqi Zhang, and Dahua Lin. Detecting visual re-
+lationships with deep relational networks. In CVPR, 2017.
+2
+
+[16] Santosh K Divvala, Derek Hoiem, James H Hays, Alexei A
+Efros, and Martial Hebert. An empirical study of context in
+object detection. In CVPR, 2009. 1
+
+[17] Yash Goyal, Tejas Khot, Douglas Summers-Stay, Dhruv Ba-
+tra, and Devi Parikh. Making the v in vqa matter: Elevating
+the role of image understanding in visual question answer-
+ing. In CVPR, 2017. 2, 7
+
+[18] Kaiming He, Georgia Gkioxari, Piotr Doll´ar, and Ross Gir-
+
+shick. Mask r-cnn. In ICCV, 2017. 1, 3, 4
+
+[19] Sepp Hochreiter and J¨urgen Schmidhuber. Long short-term
+
+memory. Neural computation, 1997. 2
+
+[20] Ronghang Hu, Jacob Andreas, Marcus Rohrbach, Trevor
+Darrell, and Kate Saenko. Learning to reason: End-to-end
+module networks for visual question answering.
+In ICCV,
+2017. 2, 5
+
+[21] Seong Jae Hwang, Sathya N Ravi, Zirui Tao, Hyunwoo J
+Kim, Maxwell D Collins, and Vikas Singh. Tensorize, fac-
+torize and regularize: Robust visual relationship learning. In
+CVPR, 2018. 6, 7
+
+[22] Jin-Hwa Kim, Kyoung-Woon On, Woosang Lim, Jeonghee
+Kim, Jung-Woo Ha, and Byoung-Tak Zhang. Hadamard
+product for low-rank bilinear pooling.
+In ICLR, 2016. 7,
+8
+
+[23] Alexander Kirillov, Kaiming He, Ross Girshick, Carsten
+Rother, and Piotr Doll´ar. Panoptic segmentation. arXiv
+preprint arXiv:1801.00868, 2018. 3
+
+[24] Ranjay Krishna, Yuke Zhu, Oliver Groth, Justin Johnson,
+Kenji Hata, Joshua Kravitz, Stephanie Chen, Yannis Kalan-
+tidis, Li-Jia Li, David A Shamma, et al. Visual genome:
+Connecting language and vision using crowdsourced dense
+image annotations. IJCV, 2017. 2, 3, 5
+
+[25] Yikang Li, Wanli Ouyang, Bolei Zhou, Jianping Shi, Chao
+Zhang, and Xiaogang Wang. Factorizable net: An efﬁcient
+subgraph-based framework for scene graph generation.
+In
+ECCV, 2018. 2, 3
+
+[26] Yikang Li, Wanli Ouyang, Bolei Zhou, Kun Wang, and Xi-
+aogang Wang. Scene graph generation from objects, phrases
+and caption regions. In ICCV, 2017. 2, 3, 5
+
+[27] Tsung-Yi Lin, Piotr Doll´ar, Ross B Girshick, Kaiming He,
+Bharath Hariharan, and Serge J Belongie. Feature pyramid
+networks for object detection. In CVPR, 2017. 1, 2
+
+[28] Daqing Liu, Zheng-Jun Zha, Hanwang Zhang, Yongdong
+Zhang, and Feng Wu. Context-aware visual policy network
+for sequence-level image captioning. ACM on Multimedia
+Conference, 2018. 2
+
+[29] Wei Liu, Dragomir Anguelov, Dumitru Erhan, Christian
+Szegedy, Scott Reed, Cheng-Yang Fu, and Alexander C
+Berg. Ssd: Single shot multibox detector. In ECCV, 2016. 1
+[30] Yong Liu, Ruiping Wang, Shiguang Shan, and Xilin Chen.
+Structure inference net: Object detection using scene-level
+context and instance-level relationships. In CVPR, 2018. 2
+
+[31] Cewu Lu, Ranjay Krishna, Michael Bernstein, and Li Fei-
+Fei. Visual relationship detection with language priors. In
+ECCV, 2016. 3, 6, 7
+
+[32] Tomasz Malisiewicz and Alyosha Efros. Beyond categories:
+The visual memex model for reasoning about object relation-
+ships. In NIPS, 2009. 2
+
+[33] Volodymyr Mnih, Nicolas Heess, Alex Graves, et al. Recur-
+
+rent models of visual attention. In NIPS, 2014. 5
+
+[34] Alejandro Newell and Jia Deng. Pixels to graphs by associa-
+
+tive embedding. In NIPS, 2017. 3, 6, 7
+
+[35] Alejandro Newell, Kaiyu Yang, and Jia Deng. Stacked hour-
+glass networks for human pose estimation. In ECCV, 2016.
+7
+
+6627
+
+[54] Ting Yao, Yingwei Pan, Yehao Li, and Tao Mei. Exploring
+visual relationship for image captioning. In ECCV, 2018. 2
+[55] Guojun Yin, Lu Sheng, Bin Liu, Nenghai Yu, Xiaogang
+Wang, Jing Shao, and Chen Change Loy. Zoom-net: Mining
+deep feature interactions for visual relationship recognition.
+In ECCV, 2018. 2
+
+[56] Fisher Yu and Vladlen Koltun. Multi-scale context aggrega-
+
+tion by dilated convolutions. In ICLR, 2016. 2
+
+[57] Rowan Zellers, Mark Yatskar, Sam Thomson, and Yejin
+Choi. Neural motifs: Scene graph parsing with global con-
+text. In CVPR, 2018. 1, 2, 4, 6, 7
+
+[58] Ji Zhang, Mohamed Elhoseiny, Scott Cohen, Walter Chang,
+and Ahmed M Elgammal. Relationship proposal networks.
+In CVPR, 2017. 5
+
+[59] Yan Zhang, Jonathon Hare, and Adam Pr¨ugel-Bennett.
+Learning to count objects in natural images for visual ques-
+tion answering. In ICLR, 2018. 5, 7, 8
+
+[60] Rui Zhao, Wanli Ouyang, Hongsheng Li, and Xiaogang
+Wang. Saliency detection by multi-context deep learning.
+In CVPR, 2015. 1
+
+[61] Shuai Zheng, Sadeep Jayasumana, Bernardino Romera-
+Paredes, Vibhav Vineet, Zhizhong Su, Dalong Du, Chang
+Huang, and Philip HS Torr. Conditional random ﬁelds as
+recurrent neural networks. In ICCV, 2015. 2
+
+[36] Yulei Niu, Hanwang Zhang, Manli Zhang, Jianhong Zhang,
+Zhiwu Lu, and Ji-Rong Wen. Recursive visual attention in
+visual dialog. CVPR, 2019. 2
+
+[37] Aude Oliva and Antonio Torralba. The role of context in
+
+object recognition. Trends in Cognitive Sciences, 2007. 1
+
+[38] Pedro O Pinheiro, Tsung-Yi Lin, Ronan Collobert, and Piotr
+Doll´ar. Learning to reﬁne object segments. In ECCV, 2016.
+1
+
+[39] Robert Clay Prim. Shortest connection networks and some
+
+generalizations. Bell System Technical Journal, 1957. 4
+
+[40] Shaoqing Ren, Kaiming He, Ross Girshick, and Jian Sun.
+Faster r-cnn: Towards real-time object detection with region
+proposal networks. In NIPS, 2015. 1, 2, 3, 6, 7
+
+[41] Steven J. Rennie, Etienne Marcheret, Youssef Mroueh, Jerret
+Ross, and Vaibhava Goel. Self-critical sequence training for
+image captioning. In CVPR, 2017. 2, 5
+
+[42] Yang Shi, Tommaso Furlanello, Sheng Zha, and Animashree
+Anandkumar. Question type guided attention in visual ques-
+tion answering. In ECCV, 2018. 5
+
+[43] Richard Socher, Cliff C Lin, Chris Manning, and Andrew Y
+Ng. Parsing natural scenes and natural language with recur-
+sive neural networks. In ICML, 2011. 2
+
+[44] Kai Sheng Tai, Richard Socher, and Christopher D Manning.
+Improved semantic representations from tree-structured long
+short-term memory networks. In ACL, 2015. 1, 2, 4, 6
+
+[45] Damien Teney, Peter Anderson, Xiaodong He, and Anton
+van den Hengel. Tips and tricks for visual question answer-
+ing: Learnings from the 2017 challenge. In CVPR, 2018. 2,
+3, 5, 7, 8
+
+[46] Damien Teney, Lingqiao Liu, and Anton van den Hengel.
+Graph-structured representations for visual question answer-
+ing. In CVPR, 2017. 2
+
+[47] Takeo Watanabe, Alexander M Harner, Satoru Miyauchi,
+Yuka Sasaki, Matthew Nielsen, Daniel Palomo, and Ikuko
+Mukai. Task-dependent inﬂuences of attention on the acti-
+vation of human primary visual cortex. Proceedings of the
+National Academy of Sciences, 1998. 2
+
+[48] Ronald J Williams. Simple statistical gradient-following al-
+gorithms for connectionist reinforcement learning. Machine
+learning, 1992. 2, 5
+
+[49] Yingjie Xia, Luming Zhang, Zhenguang Liu, Liqiang Nie,
+and Xuelong Li. Weakly supervised multimodal kernel for
+categorizing aerial photographs. IEEE Transactions on Im-
+age Processing, 2017. 2
+
+[50] Danfei Xu, Yuke Zhu, Christopher B Choy, and Li Fei-Fei.
+In
+
+Scene graph generation by iterative message passing.
+CVPR, 2017. 1, 2, 3, 5, 6, 7, 8
+
+[51] Jianwei Yang, Jiasen Lu, Stefan Lee, Dhruv Batra, and Devi
+Parikh. Graph r-cnn for scene graph generation. In ECCV,
+2018. 3, 6, 7
+
+[52] Xu Yang, Kaihua Tang, Hanwang Zhang, and Jianfei Cai.
+Auto-encoding graphical inductive bias for descriptive image
+captioning. arXiv preprint arXiv:1812.02378, 2018. 3
+
+[53] Xu Yang, Hanwang Zhang, and Jianfei Cai. Shufﬂe-then-
+learning object-agnostic visual relationship fea-
+
+assemble:
+tures. In ECCV, 2018. 3
+
+6628
+
+

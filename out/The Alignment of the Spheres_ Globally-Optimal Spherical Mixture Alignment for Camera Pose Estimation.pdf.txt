@@ -1,0 +1,1643 @@
+Globally-Optimal Spherical Mixture Alignment for Camera Pose Estimation
+
+The Alignment of the Spheres:
+
+Dylan Campbell1, Lars Petersson1,2, Laurent Kneip3, Hongdong Li1 and Stephen Gould1
+
+1Australian National University
+firstname.lastname@anu.edu.au
+
+2Data61/CSIRO
+
+3ShanghaiTech
+
+lars.petersson@data61.csiro.au
+
+lkneip@shanghaitech.edu.cn
+
+Abstract
+
+Determining the position and orientation of a calibrated
+camera from a single image with respect to a 3D model is
+an essential task for many applications. When 2D–3D cor-
+respondences can be obtained reliably, perspective-n-point
+solvers can be used to recover the camera pose. However,
+without the pose it is non-trivial to ﬁnd cross-modality cor-
+respondences between 2D images and 3D models, particu-
+larly when the latter only contains geometric information.
+Consequently, the problem becomes one of estimating pose
+and correspondences jointly. Since outliers and local op-
+tima are so prevalent, robust objective functions and global
+search strategies are desirable. Hence, we cast the problem
+as a 2D–3D mixture model alignment task and propose the
+ﬁrst globally-optimal solution to this formulation under the
+robust L2 distance between mixture distributions. We derive
+novel bounds on this objective function and employ branch-
+and-bound to search the 6D space of camera poses, guaran-
+teeing global optimality without requiring a pose estimate.
+To accelerate convergence, we integrate local optimization,
+implement GPU bound computations, and provide an intu-
+itive way to incorporate side information such as semantic
+labels. The algorithm is evaluated on challenging synthetic
+and real datasets, outperforming existing approaches and
+reliably converging to the global optimum.
+
+1. Introduction
+
+Estimating the pose of a calibrated camera given a sin-
+gle image and a 3D model, is useful for many applications,
+including localization and tracking [20, 33], augmented re-
+ality [41], motion segmentation [44] and object recognition
+[3]. The problem can be cast as a 2D–3D alignment prob-
+lem in the image plane or on the unit sphere. The task is to
+ﬁnd the rotation and translation that aligns the projection of
+a 3D model with the 2D image data, using points [16, 12],
+lines [7], silhouettes [14], or mixture models [4]. This is vi-
+sualized in Figure 1 for mixture models on the unit sphere.
+
+I −→ F
+
+P −→GMM
+
+O
+
+R, t
+
+vMFMM
+
+qPNMM
+
+t
+
+Figure 1. Spherical mixture alignment for estimating the 6-DoF
+absolute pose (R, t) of a camera from a single image I, relative to
+a 3D model (e.g. point-set P), without 2D–3D correspondences.
+Our algorithm recovers the transformation by generating mixture
+distributions from the data — a von Mises–Fisher Mixture Model
+(vMFMM) from the image via a bearing vector set F and a Gaus-
+sian Mixture Model (GMM) from the 3D model, projected onto
+the sphere as a quasi-Projected Normal Mixture Model (qPNMM)
+— and applying branch-and-bound with tight novel bounds to ﬁnd
+R and t that optimally aligns these spherical mixtures.
+
+When 2D–3D correspondences are known, this becomes
+the well-studied Perspective-n-Point (PnP) problem [37,
+25]. However, correspondences between 2D and 3D modal-
+ities can be difﬁcult to estimate, not least for the general
+case of aligning an image with a texture-less 3D model.
+Even when the model contains visual information, such as
+SIFT features [40], repetitive elements, occlusions, and ap-
+pearance variations due to lighting and weather make the
+correspondence problem non-trivial. Methods that solve
+for pose and correspondences jointly avoid these problems.
+They include local optimization approaches [16, 43], which
+can only yield correct results when a good pose prior is pro-
+vided, and randomized global search [20], which becomes
+computationally intractable as the problem size increases.
+In contrast, globally-optimal approaches [7, 12] obviate the
+need for pose priors and guarantee optimality.
+
+111796
+
+This work is the ﬁrst to propose a globally-optimal so-
+lution to the 2D–3D mixture alignment problem for camera
+pose estimation, depicted in Figure 1. The algorithm opti-
+mizes the robust L2 density distance and uses the branch-
+and-bound framework to guarantee global optimality, ad-
+dressing the twin challenges of outliers and non-convexity.
+It provides a geometric solution without assuming that cor-
+respondences, pose priors, or training data are available.
+
+The primary contributions are (i) a new closed-form mix-
+ture distribution on the sphere, the quasi-Projected Normal
+mixture, that approximates the projection of a 3D Gaussian
+mixture; (ii) a new robust objective function, the L2 dis-
+tance between von Mises–Fisher and quasi-Projected Nor-
+mal mixture distributions; (iii) an extension of the objec-
+tive function to exploit information from deep networks to
+accelerate convergence; (iv) a fast local optimization algo-
+rithm using the objective function and closed-form gradient;
+(v) novel bounds on the objective function; and (vi) a glob-
+ally-optimal algorithm for camera pose estimation, with
+bound computations implemented on the GPU.
+
+An advantage of this approach is that aligning densities
+is closer to the fundamental 2D–3D problem of aligning
+physical and imaged surfaces than aligning discrete point
+samples, since densities model the underlying surfaces with
+arbitrarily accurate estimates [17], albeit at the limit. An-
+other advantage is that it leverages the adaptive compres-
+sion properties of mixture model clustering algorithms, en-
+abling the processing of large noisy point-sets. In addition,
+the continuous objective function admits the use of local
+gradient-based optimization, which greatly expedites con-
+vergence. The algorithm can also be applied to a wide range
+of 3D data, including mesh and volume representations as
+well as point-sets. Finally, the approach solves the prob-
+lem of extracting geometrically-meaningful elements in 2D
+and 3D by (optionally) using semantic information during
+optimization. This simple but effective extension reduces
+runtime and susceptibility to degenerate poses, using only
+easily-obtainable information.
+
+2. Related Work
+
+When 2D–3D correspondences are known, PnP solvers
+[37, 25] can accurately estimate the camera pose. However,
+outliers are almost always present in the correspondence set.
+When this is the case, the inlier set can be retrieved using
+RANSAC [20] or robust global optimization [19, 2, 18, 55].
+Some of these approaches [20, 19] can be applied when
+correspondences are not available by providing all possible
+permutations of the correspondence set. However this hard
+combinatorial problem quickly becomes infeasible. Match-
+ing and ﬁltering techniques have also been developed for
+large-scale localization problems to reduce the number of
+outliers in the initial set [49, 39, 61, 18, 55, 50]. These
+methods are only practical when 2D–3D correspondences
+
+can be found and so are mostly used with Structure-from-
+Motion (SfM) point-sets. Each 3D point in these datasets
+is at a visually-distinctive location and is augmented with
+an image feature, simplifying the correspondence problem.
+This is not the case for standard point-sets, which contain
+only geometric information.
+
+The problem is more complex when correspondences are
+not available at the outset. Local optimization approaches
+include SoftPOSIT [16], which iterates between solving for
+correspondences and solving for pose, and 2D/3D GMM
+registration [4], which projects 3D points into the cam-
+era plane then applies 2D Gaussian mixture alignment.
+This formulation treats points close to the camera iden-
+tically to distant points and so neglects 3D scale infor-
+mation and creates false optima. Moreover, these meth-
+ods only ﬁnd locally-optimal solutions within the conver-
+gence basin of the provided pose prior. To alleviate this,
+global optimization approaches have been proposed, in-
+cluding random-start local search [16] and BlindPnP [43],
+which uses Kalman ﬁltering to search over a probabilistic
+pose prior. RANSAC and variants [23] do not require a pose
+prior, but are only tractable for small numbers of points and
+outliers. Other approaches use regression forests or convo-
+lutional neural networks to learn 2D–3D correspondences
+from the data and thereby regress pose [52, 29, 5, 28]. These
+methods require a large training set of pose-labeled images,
+do not localize the camera with respect to an explicit 3D
+model, and cannot guarantee optimality.
+
+Globally-optimal approaches can provide this guarantee
+without needing a pose estimate. They certify that the com-
+puted camera pose is a global optimizer of the objective
+function. The Branch-and-Bound (BB) [35] algorithm has
+been widely used for this purpose, with tractability contin-
+uing to be a signiﬁcant impediment. For example, BB has
+been used for 2D–2D registration [6], relative pose estima-
+tion [24], 3D–3D rotational registration [38], 3D–3D regis-
+tration with known correspondences [45], full 3D–3D regi-
+stration [60], and robust 3D–3D registration [10].
+
+For 2D–3D registration, Brown et al. [7] proposed a
+globally-optimal method using BB with a geometric error.
+Trimming was used to make the objective function robust
+to outliers. However this requires knowing the true outlier
+fraction in advance; if incorrectly speciﬁed, the optimum
+may not occur at the correct pose. Campbell et al. [11, 12]
+proposed a globally-optimal inlier set cardinality maximiza-
+tion solution to the problem. While robust, this objective
+function is discrete and challenging to optimize, and oper-
+ates on sampled points instead of the underlying surfaces.
+
+Our work is the ﬁrst globally-optimal L2 density dis-
+tance minimization solution to the camera pose estimation
+problem. It removes the assumptions that correspondences,
+training data or pose priors are available and is guaranteed
+to ﬁnd the optimum of a robust objective function.
+
+11797
+
+Table 1. Probability distributions in R3 and S2.
+
+Distribution
+
+Gaussian
+
+Projected Normal
+
+quasi-Projected Normal
+
+von Mises–Fisher
+
+Notation Parameters Manifold
+
+N
+PN
+
+qPN
+
+vMF
+
+µ, σ2
+µ, σ2
+µ, σ2
+ˆµ, κ
+
+R3
+
+R3
+
+S2
+
+S2
+
+3. Probability Distributions on the Sphere
+
+2D directional data such as bearing vectors can be repre-
+sented as points on the unit 2-sphere. These can be treated
+as samples from an underlying probability distribution in
+S2. For images, this distribution models the projection of
+visible surfaces onto the sphere.
+In this section, we will
+outline the probability distributions used in this work and
+derive a closed-form approximation for the last. The distri-
+butions referred to in this paper are summarized in Table 1.
+The von Mises–Fisher distribution (vMF) [21], visual-
+ized in Figure 2, is the spherical analog of the isotropic
+Gaussian distribution and has a closed form in 3D, unlike
+more expressive non-isotropic distributions [30]. The prob-
+ability density function of the vMF distribution in 3D is
+
+vMF (f | ˆµ, κ) =
+
+exp(κ ˆµ⊺f )
+
+2πZ(κ)
+
+(1)
+
+for the random unit bearing vector f , mean direction ˆµ, and
+concentration κ > 0, and where
+
+Z(κ) = (exp (κ) − exp (−κ)) κ−1.
+
+(2)
+
+The Projected Normal (PN) distribution [42, 59, 58] is
+the projection of a Gaussian distribution N onto the sphere.
+That is, if a random variable p follows a Gaussian distri-
+bution, then the bearing vector f = p/kpk follows a PN
+distribution. For a Gaussian mixture that models the distri-
+bution of 3D surfaces in a scene, the associated PN mixture
+models the scene as observed by a 2D sensor, albeit with-
+out visibility constraints. The probability density function
+of the isotropic PN distribution in 3D [46] is
+
+2
+
+−ρ
+2
+
+2
+
+α
+
+e
+
++Φ (α) e
+
+2π (cid:20) α
+√2π
+
+2 (cid:0)1+α2(cid:1)(cid:21) (3)
+PN(f | µ, σ2) =
+for the bearing vector f , mean position µ ∈ R3, and vari-
+ance σ2, and where ρ = kµk/σ, α = ρµ⊺f /kµk, and Φ(·)
+is the cumulative distribution function of N .
+While PN is the true distribution, it does not have a
+closed form. Moreover, similarity measures between PN
+distributions, such as the L2 distance, are not tractable to
+compute, since they do not simplify to a closed form when
+integrated over the sphere and would therefore require time-
+consuming numerical integration. As a result, it is imprac-
+tical for alignment problems.
+Instead, we propose a new
+
+(a) κ = 1
+
+(b) κ = 10
+
+(c) κ → ∞
+
+Figure 2. 2D visualization of a 3D von Mises–Fisher distribution
+as the concentration parameter κ increases. As κ → ∞, the distri-
+bution approaches a delta function on the sphere.
+
+0.4
+
+0.3
+
+0.2
+
+0.1
+
+d
+o
+o
+h
+i
+l
+e
+k
+i
+L
+
+0
+
+0
+
+qPN
+PN
+
+0.04
+
+0.03
+
+0.02
+
+0.01
+
+E
+A
+M
+
+90
+
+∠(f , µ)
+
+180
+
+0
+
+0
+
+1
+
+2
+
+3
+
+4
+
+5
+
+ρ
+
+(a) Relative likelihood (ρ = 1)
+
+(b) Mean Absolute Error
+
+Figure 3. Comparison of the qPN and PN distributions. (a) The
+qPN and PN probability density functions are plotted with respect
+to the angle ∠(f , µ) for ρ = kµk/σ = 1. The distributions are
+very similar, even for this small value of ρ. (b) The Mean Absolute
+Error (MAE) across the entire angular range is plotted with respect
+to ρ and is less than 0.01 for all ρ > 1.
+
+closed-form distribution, the quasi-Projected Normal (qPN)
+distribution, that approximates a PN with a vMF distribu-
+tion. Its probability density function is given by
+
+qPN(cid:0)f | µ, σ2(cid:1) = vMF f (cid:12)(cid:12)(cid:12)(cid:12)(cid:12)
+
+µ
+kµk
+
+σ (cid:19)2
+,(cid:18)kµk
+
++1! . (4)
+
+This was derived by equating the vMF and PN density func-
+tions at f = ˆµ = µ/kµk, since they should evaluate to the
+same value in the direction of the mean vector. This gives
+
+κ
+
+=
+
+e
+
+2
+
+−ρ
+2
+
+2π (cid:20) ρ
+√2π
+
+2π (1 − e−2κ)
+which simpliﬁes as κ → ∞ and ρ = kµk/σ → ∞ to
+
++ Φ (ρ) e
+
+ρ
+
+2
+
+2 (cid:0)1+ρ2(cid:1)(cid:21) (5)
+
+σ (cid:19)2
+κ =(cid:18)kµk
+
++ 1.
+
+(6)
+
+While this derivation only proves equality in the limit in
+the direction of the mean vector, the empirical results in
+Figure 3 show that the distributions are very similar across
+the entire angular range, even for low values of ρ.
+
+4. Spherical Mixture Alignment
+
+The alignment of mixture distributions to estimate rel-
+ative sensor pose is a well-studied problem in R2, R3
+[15, 57, 27, 10], and the sphere S2 [54]. For 2D–3D cam-
+era pose estimation, we require a 3D positional and a 2D
+
+11798
+
+directional mixture distribution to model the input data. We
+model the distribution of 3D points p ∈ R3 in the set
+P = {pi}N1
+i=1 as a Gaussian Mixture Model (GMM). Let
+θ1 = (cid:8)µ1i, σ2
+i=1 be the parameter set of the n1-
+component GMM with means µ1i ∈ R3, variances σ2
+1i, and
+mixture weights φ1i > 0, whereP φ1i = 1, with density
+
+1i, φ1i(cid:9)n1
+
+n1
+
+p (p | θ1) =
+
+Xi=1
+
+φ1iN (cid:0)p | µ1i, σ2
+1i(cid:1) .
+
+(7)
+
+We also require a projection of this distribution onto the
+sphere. For this, we use the qPN Mixture Model (qPNMM)
+associated with this GMM, with density
+
+p (f | θ1) =
+
+n1
+
+Xi=1
+
+φ1i qPN(cid:0)f | µ1i, σ2
+1i(cid:1) .
+
+(8)
+
+Finally, we model the distribution of bearing vectors f ∈ S2
+in the set F = {fi}N2
+i=1 as a vMF Mixture Model (vMFMM)
+[22, 53]. Let θ2 = { ˆµ2j, κ2j, φ2j}n2
+j=1 be the parameter set
+of the n2-component vMFMM with mean directions ˆµ2j ∈
+S2, concentrations κ2j > 0, and mixture weights φ2j > 0,
+whereP φ2j = 1, with density
+
+n2
+
+p (f | θ2) =
+
+Xj=1
+
+φ2j vMF(cid:0)f | ˆµ2j, κ2j(cid:1) .
+
+(9)
+
+The bearing vector f corresponds to a 2D point imaged by
+a calibrated camera. That is, f ∝ K−1 ˆx where K is the
+matrix of intrinsic camera parameters and ˆx is the homoge-
+neous image point. These mixture distributions admit arbi-
+trarily accurate estimates of noisy surface densities [17] and
+can be computed efﬁciently from the data [9, 34, 53].
+
+The L2 distance between probability densities is a robust
+objective function that can be used to measure the alignment
+of two sets of sensor data, given a speciﬁc transformation
+[27, 54]. Unlike the Kullback–Leibler divergence, it is in-
+herently robust to outliers [51] and operates on statistical
+densities generated from the raw sensor data. The densities
+model the underlying surfaces of the scene, which is bene-
+ﬁcial because the fundamental 2D–3D registration problem
+is a surface alignment problem, not a discrete sampled point
+alignment problem.
+
+Lemma 1. (L2 objective function) The L2 distance between
+qPNMM and vMFMM models with rotation R ∈ SO(3)
+and translation t ∈ R3 can be minimized using the function
+
+f (R, t) =
+
+n1
+
+n1
+
+Xi=1
+− 2
+
+n1
+
+Xj=1
+Xi=1
+
+φ1iφ1jZ (K1i1j(t))
+Z(κ1i(t))Z(κ1j(t))
+
+φ1iφ2jZ (K1i2j(R, t))
+
+Z(κ1i(t))Z(κ2j)
+
+(10)
+
+n2
+
+Xj=1
+
+where
+
+κ1i(t)
+
+K1i1j(t) =(cid:13)(cid:13)(cid:13)(cid:13)
+K1i2j(R, t) =(cid:13)(cid:13)(cid:13)(cid:13)
+
+µ1i − t
+kµ1i − tk
+
++κ1j(t)
+
+(11)
+
+µ1j − t
+
+kµ1j − tk(cid:13)(cid:13)(cid:13)(cid:13)
++ κ2j ˆµ2j(cid:13)(cid:13)(cid:13)(cid:13)
+
++ 1
+
+(13)
+
+(12)
+
+κ1i(t)R
+
+µ1i − t
+kµ1i − tk
+(cid:19)2
+κ1i(t) =(cid:18)kµ1i − tk
+σ1i
+and Z(·) is deﬁned as given in (2).
+Proof. Given qPNMM and vMFMM models of the input
+data and a rigid transformation function T (θ1, R, t) =
+i=1, the L2 distance between den-
+
+sities for a rotation R and translation t is given by
+
+1i, φ1i(cid:9)n1
+[p (f | T (θ1, R, t)) − p (f | θ2)]2 df
+[p (f | T (θ1, R, t))]2 + [p (f | θ2)]2
+
+(cid:8)R(µ1i − t), σ2
+dL2 =ZS2
+=ZS2
+− 2p (f | T (θ1, R, t)) p (f | θ2) df .
+
+(14)
+
+(15)
+
+The function (10) is obtained by removing constant sum-
+mands and factors, substituting (8), (9), (4) and (1) into (15),
+
+and replacing integrals of the formRS2 exp(x⊺f ) df with the
+normalization constant of a vMF density with κ =kxk and
+ˆµ = x/κ; see appendix for details.
+
+The objective is then to ﬁnd a rotation and translation
+
+that minimizes the L2 distance between the densities
+
+(R∗, t∗) = arg min
+
+f (R, t).
+
+(16)
+
+R, t
+
+Furthermore, if semantic class labels are available, for
+example using CNN–based semantic segmentation for 2D
+images [47, 13, 48] and 3D point-sets [36, 26, 56], the op-
+timization problem can be formulated as a joint L2 dis-
+tance minimization over the semantic classes, providing
+semantic-aware alignment and accelerating convergence.
+That is, given a class label set Λ, one can construct sepa-
+rate mixture distributions for each class and solve
+
+(R∗, t∗) = arg min
+
+R, t Xl∈Λ
+
+φlfl(R, t).
+
+(17)
+
+where φl > 0 are the class weights and fl is the per-class
+function value computed according to (10).
+
+5. Branch-and-Bound
+
+To solve the highly non-convex L2 distance problem
+(16), the Branch-and-Bound (BB) algorithm [35] may be
+applied. It requires an efﬁcient way to branch the function
+domain and bound the function optimum for each branch,
+
+11799
+
+(a) Rotation Domain Ωr
+
+(b) Translation Domain Ωt
+
+Figure 4. Parameterization and branching of SE(3).
+(a) Rota-
+tions are parameterized by angle-axis 3-vectors in a solid radius-π
+ball. (b) Translations are parameterized by 3-vectors bounded by a
+cuboid with half-widths [τx, τy, τz]. The joint domain is branched
+into 6D cuboids using an adaptive octree-like branching strategy.
+
+such that the bounds converge as the branch size tends to
+zero. The efﬁciency of the algorithm depends on both the
+computational complexity of the bounds and how tight they
+are, since tighter bounds reduce the search space quicker by
+allowing suboptimal branches to be pruned.
+
+5.1. Parameterizing and Branching the Domain
+
+To ﬁnd a globally-optimal solution, the L2 distance must
+be optimized over the domain of 3D motions, that is, the
+group SE(3) = SO(3) × R3. For BB, the domain must
+be bounded, so we restrict the space of translations to the
+set Ωt, under the assumption that the camera is a ﬁnite dis-
+tance from the 3D model. The domains are shown in Fig-
+ure 4. We minimally parameterize rotation space SO(3)
+with angle-axis 3-vectors r with rotation angle krk and
+rotation axis ˆr = r/krk. As a result, the space of all
+3D rotations can be represented as a solid ball of radius
+π in R3. For ease of manipulation, we use the 3D cube
+circumscribing the π-ball as the rotation domain Ωr [38].
+The notation Rr ∈ SO(3) is used to denote the rotation
+matrix obtained from r using Rodrigues’ rotation formula.
+We parameterize translation space R3 with 3-vectors in a
+bounded domain chosen as the cuboid Ω′
+t containing the
+bounding box of the model. To avoid the non-physical case
+where the camera is located within a small value ζ of a
+3D surface, the translation domain is restricted such that
+t ∩ {t ∈ R3 | kµ − tk > ζ,∀µ ∈ θ1}. Fi-
+Ωt = Ω′
+nally, we branch the domain into 6D cuboids (6-orthotopes)
+Cr × Ct using an adaptive branching strategy that chooses
+to subdivide the rotation or translation dimensions based on
+which has the greater angular uncertainty, reducing redun-
+dant branching.
+
+5.2. Bounding the Branches
+
+The success of a branch-and-bound algorithm is predi-
+cated on the quality of its bounds. For L2 distance mini-
+mization, we require bounds on the minimum of the objec-
+tive function (10) within a transformation domain Cr × Ct.
+
+An upper bound can be found by evaluating the function
+at any transformation in the branch. A lower bound can
+be found using the bounds ψr and ψt on the rotation and
+translation uncertainty angles derived in Lemmas 3 and 5 in
+Campbell et al. [12], reproduced here as Lemmas 2 and 3.
+
+Lemma 2. (Rotation uncertainty angle bound) Given a 3D
+point p and a rotation cube Cr centered at r0 with surface
+Sr, then ∀r ∈ Cr,
+
+∠(Rrp, Rr0 p) 6 min(cid:26)max
+, ψr(p,Cr).
+
+r∈Sr
+
+∠(Rrp, Rr0 p), π(cid:27)
+
+(18)
+
+Lemma 3. (Translation uncertainty angle bound) Given a
+3D point p and a translation cuboid Ct centered at t0 with
+vertices Vt, then ∀t ∈ Ct,
+∠(p − t, p − t0) 6(max
+, ψt(p,Ct).
+
+∠(p − t, p − t0)
+
+if p /∈ Ct
+else
+
+t∈Vt
+π
+
+(19)
+
+Theorem 1. (Objective function bounds) For the transfor-
+mation domain Cr ×Ct centered at (r0, t0), the minimum of
+the objective function (10) has an upper bound
+
+d , f (Rr0 , t0)
+
+(20)
+
+and a lower bound
+
+d ,
+
+n1
+
+n1
+
+Xi=1
+− 2
+
+n1
+
+Xj=1
+Xi=1
+
+where
+
+φ1iφ1j min
+t∈Ct
+
+Z (K 1i1j(t))
+
+Z(κ1i(t))Z(κ1j(t))
+
+n2
+
+Xj=1
+
+φ1iφ2j max
+t∈Ct
+
+Z(cid:0)K 1i2j(t)(cid:1)
+
+Z(κ1i(t))Z(κ2j)
+
+(21)
+
+1j(t)+2κ1i(t)κ1j(t) cos A (22)
+
+1i(t)+κ2
+
+K 1i1j(t) =qκ2
+K 1i2j(t) =qκ2
+A = min{π, ∠(cid:0)µ1i − t0, µ1j − t0(cid:1)
+
+1i(t) + κ2
+
++ ψt(µ1i,Ct) + ψt(µ1j,Ct)}
+
+2j + 2κ1i(t)κ2j cos B (23)
+
+(24)
+
+(25)
+
+B = max{0, ∠(cid:0)µ1i − t0, R−1
+
+r0 ˆµ2j(cid:1)
+
+− ψt(µ1i,Ct) − ψr( ˆµ2j,Cr)}.
+
+Proof. The validity of the upper bound follows from
+
+f (Rr0 , t0) > min
+r∈Cr
+t∈Ct
+
+f (Rr, t).
+
+(26)
+
+11800
+
+πτxτzτy(32)
+
+7. Results
+
+That is, the function value at a speciﬁc point within the do-
+main is greater than or equal to the minimum within the
+domain. For the lower bound, observe that ∀t ∈ Ct,
+
+K1i1j(t) =vuut
+>qκ2
+
+= K 1i1j(t)
+
+2κ1i(t)κ1j(t) cos ∠(µ1i−t, µ1j−t)
++ κ2
+
+1i(t) + κ2
+
+1j(t)
+
+(27)
+
+1i(t)+κ2
+
+1j(t)+2κ1i(t)κ1j(t) cos A (28)
+
+(29)
+
+where (28) follows from the triangle inequality in spherical
+geometry and Lemma 3, since
+
+∠(a, b) 6 ∠(c, d) + ∠(a, c) + ∠(b, d)
+
+6 ∠(c, d) + ψt(µ1i,Ct) + ψt(µ1j,Ct)
+
+(30)
+
+(31)
+
+for a = µ1i−t, b = µ1j−t, c = µ1i−t0, and d = µ1j−t0.
+Also observe that ∀(r, t) ∈ (Cr × Ct),
+
+K1i2j(Rr, t) =vuut
+6qκ2
+
+= K 1i2j(t)
+
+2κ1i(t)κ2j cos∠(µ1i−t, R−1
++ κ2
+
+1i(t) + κ2
+
+2j
+
+r ˆµ2j)
+
+1i(t)+κ2
+
+2j +2κ1i(t)κ2j cos B
+
+(33)
+
+(34)
+
+where (33) follows from the reverse triangle inequality in
+spherical geometry and Lemmas 3 and 2. With K 1i1j and
+K 1i2j, a valid lower bound for (10) can be constructed by
+observing that Z(x) (2) is a monotonically increasing func-
+tion for x > 0 and the dependency of κ1i on t can be opti-
+mized separately. See the appendix for the full proof.
+
+6. The GOSMA Algorithm
+
+The Globally-Optimal Spherical Mixture Alignment
+(GOSMA) algorithm is outlined in Algorithm 1. It employs
+a depth-ﬁrst search strategy using a priority queue (line 5)
+where the priority is inverse to the lower bound. The algo-
+rithm terminates with ǫ-optimality, whereby the difference
+between the best function value d∗ and the global lower
+bound d is less than ǫ (line 6). Branching and bounding is
+performed on the GPU (line 7), with each thread computing
+the bounds for a single branch.
+
+We also developed a local optimization algorithm de-
+noted as Spherical Mixture Alignment (SMA), which was
+integrated into GOSMA (line 9). We use the quasi-Newton
+L-BFGS algorithm [8] to minimize (10), with the gradient
+derived in the appendix. SMA is run whenever the BB al-
+gorithm ﬁnds a sub-cube Cij that has an upper bound less
+than the best-so-far function value d∗ (line 9), initialized
+with the center transformation of Cij. In this way, BB and
+SMA collaborate, with SMA quickly converging to the clos-
+est local minimum and BB guiding the search into the con-
+vergence basins of better local minima. SMA accelerates
+
+Algorithm 1 GOSMA: a globally-optimal spherical mix-
+ture alignment algorithm for camera pose estimation
+Input: GMM–vMFMM pair, threshold ǫ, domain Ωr×Ωt
+Output: optimal function value d∗, camera pose (r∗, t∗)
+1: d∗ ← ∞
+2: Add domain Ωr × Ωt to priority queue Q
+3: loop
+Update lowest lower bound d from Q
+4:
+Remove set of hypercubes {Ci} from Q
+if d∗ − d 6 ǫ then terminate
+Evaluate dij & dij in parallel for subcubes of {Ci}
+for all sub-cubes Cij ∈ {Ci} do
+if dij < d∗ then (d∗, r∗, t∗) ← SMA(r0ij, t0ij)
+if dij < d∗ then add Cij to queue Q
+
+10:
+
+5:
+
+6:
+
+7:
+
+8:
+
+9:
+
+convergence since reducing d∗ early allows larger branches
+to be culled (line 10), greatly reducing the search space.
+
+The GOSMA algorithm, denoted GS, was evaluated
+with respect to the baseline algorithms SoftPOSIT [16],
+BlindPnP [43], RANSAC [20], and GOPAC [12], de-
+noted SP, BP, RS and GP respectively, using both syn-
+thetic and real data. The RANSAC approach uses the
+OpenGV framework [31] and the P3P algorithm [32] with
+randomly-sampled correspondences. To generate GMMs
+and vMFMMs, we cluster the point-set with DP-means [34]
+and the bearing vector set with DP-vMF-means [53], and ﬁt
+maximum likelihood mixture models to the clusters. These
+methods automatically select a parsimonious representation
+that adapts to the complexity of the scene geometry.
+
+We report the median translation error (in metres), ro-
+tation error (degrees), and runtime (seconds) including on-
+the-ﬂy mixture generation. We also report the success rate,
+a summary statistic deﬁned as the fraction of experiments
+where the correct pose was found: an angular error less than
+0.1 radians and a relative translation error less than 5%. Ex-
+cept where otherwise speciﬁed, the normalized L2 distance
+threshold ǫ was set to 0.1, the point-to-camera limit ζ was
+set to 0.5, the scale parameters for mixture model genera-
+tion λp and λf were set to 0.25m and 2◦ respectively, and
+semantic information was used in the real data experiments
+only, with class weights φl = |Λ|−1, the inverse of the num-
+ber of classes. All experiments were run on a 3.4GHz CPU
+and two GeForce GTX 1080Ti GPUs, and the C++ code is
+available on the ﬁrst author’s website.
+
+7.1. Synthetic Data Experiments
+
+To evaluate GOSMA under a range of perturbations, 25
+independent Monte Carlo simulations were performed per
+parameter setting using the framework of BlindPnP [43]:
+
+11801
+
+(a) 3D Results
+
+(b) 2D Results
+
+(c) Bound Evolution
+
+Figure 5. Sample 2D and 3D results for the random point data.
+(a) 3D points, true and GOSMA-estimated camera fulcra (com-
+pletely overlapping) and toroidal pose prior. (b) 2D points (dots)
+and 3D points projected using the GOSMA-estimated camera pose
+(circles), with 2D and 3D outliers shown in red. (c) Evolution over
+time of the upper (red) and lower (magenta) bounds, remaining un-
+explored volume (blue) and queue size (green) as a fraction of their
+maximum values.
+
+NI random 3D point inliers and ω3DNI outliers were gener-
+ated from [−1, 1]3; the inliers were projected to a 640× 480
+virtual image with a focal length of 800; normal noise with
+σ = 2 pixels was added to the 2D points; and ω2DNI ran-
+dom outlier points were added to the image. An example of
+the data and alignment results is shown in Figure 5.
+
+The time evolution of the global upper and lower bounds
+is shown in Figure 5(c). The plot reveals how local and
+global optimization strategies collaborate to decrease the
+upper bound with BB guiding the search into better con-
+vergence basins and SMA jumping to the nearest local min-
+imum (the staircase pattern). It also shows that the majority
+of the runtime is spent increasing the lower bound, indicat-
+ing that GOSMA will often ﬁnd the global optimum when
+terminated early, albeit without an optimality guarantee.
+
+To facilitate fair comparison with the local methods Soft-
+POSIT and BlindPnP, a torus pose prior was used for these
+experiments.
+It constrains the camera center to a torus
+around the 3D point-set with the optical axis directed to-
+wards the model [43]. The torus prior was represented as a
+50 component GMM for BlindPnP and 50 initial poses for
+SoftPOSIT. GOSMA and GOPAC were given a set of trans-
+lation cubes that approximated the torus and were not given
+any rotation prior. RANSAC was set to explore correspon-
+dence space for up to 120s. The results are shown in Fig-
+ure 6. Runtime values are clipped to an upper limit of 120s
+so that the scale is interpretable. GOSMA and GOPAC out-
+perform the other methods, reliably ﬁnding the correct pose
+while still being relatively efﬁcient. While GOSMA has
+longer runtimes in the ﬁrst two experiments, it has much
+better behaviour than the other methods when 2D outliers
+are present. For example, when ω2D = 1, the median
+runtime of GOPAC (167s) is more than 30x higher than
+GOSMA (5s), while both always ﬁnd the correct pose, with
+median angular errors below 1◦ and relative translation er-
+rors below 2%. In fact, this random point setup signiﬁcantly
+favors point-based methods such as GOPAC at the expense
+of our approach. For real surfaces, GOSMA is able to lever-
+
+1
+
+0.5
+
+0
+
+90
+
+60
+
+30
+
+e
+t
+a
+R
+s
+s
+e
+c
+c
+u
+S
+
+)
+s
+(
+
+e
+m
+
+i
+t
+n
+u
+R
+
+0
+
+20
+
+60
+NI
+
+100
+
+0
+
+0.5
+ω3D
+
+1
+
+0
+
+0.5
+ω2D
+
+1
+
+0
+
+0.5
+
+1
+
+ω3D = ω2D
+
+GS
+
+GP
+
+RS
+
+BP
+
+SP
+
+Figure 6. Results for the random points dataset with the torus prior.
+The success rates and median runtimes are plotted with respect
+to the number of inlier points (NI ), the fraction of additional 3D
+outliers (ω3D), 2D outliers (ω2D), and both, with default parameters
+NI = 30 inlier points and ω3D = ω2D = 0, for 25 Monte Carlo
+simulations per parameter value.
+
+age its ability to adaptively compress the data, allowing it to
+quickly process a very large number of points.
+
+7.2. Real Data Experiments
+
+The Stanford 2D-3D-Semantics (2D-3D-S) [1] dataset
+contains panoramic images, point-sets, and semantic anno-
+tations for both modalities. It is a large indoor dataset with
+approximately 1 million points per room and 8 million pix-
+els per photo, collected using a structured-light RGBD cam-
+era. We evaluated our algorithm on area 3 of the dataset,
+which contains lounges, ofﬁces and a conference room. The
+test data has 33 panoramic images taken from distinct cam-
+era poses where the camera is at least 50cm from any sur-
+face, and covers 13 rooms. Each room is a separate point-
+set, which models visibility constraints but assumes that the
+camera’s position is known to the room level. Using this
+information, we set the translation domain to be the room
+size. Semantic information is used by all methods in these
+tests: GOPAC and RANSAC use the pre-processing strat-
+egy from Campbell et al. [12], selecting points and pixels
+from furniture classes only, whereas GOSMA uses class la-
+bels during optimization (17), making more effective use of
+the information. We also randomly downsample the point-
+sets and images to 100k points and pixels to reduce the mix-
+ture generation time. The mixture scale parameters λp and
+λf [34, 53] were automatically selected to yield approxi-
+mately 10 components per semantic class, 60–100 compo-
+nents in total. For GOPAC, the inlier threshold θ was set to
+
+11802
+
+Table 2. Camera pose results for GOSMA (GS), GOSMA with-
+out class labels during optimization (GS-Λ), GOPAC (GP) and
+RANSAC (RS) for area 3 of the Stanford 2D-3D-S panoramic im-
+age dataset. Translation error, rotation error and runtime quartiles
+(Q2 Q1
+
+Method
+
+Q3 ) and the success rate are reported.
+GS-Λ
+0.15 0.14 0.09
+2.18 2.38 1.25
+1.13 0.91
+4.4
+19.1 12.8
+1.8 1.4
+
+Translation error (m) 0.08 0.05
+Rotation error (◦)
+
+Runtime (s)
+
+GS
+
+Success rate
+
+1.00
+
+0.85
+
+GP
+
+RS
+
+0.27 0.56 0.39
+2.06
+0.23 0.15 0.10
+4.61 3.78 2.47
+108
+5.10 18.3 8.94
+120
+902
+43.7 902 448
+120 120
+0.82
+
+0.09
+
+2.5◦ and the angular tolerance η was set to 0.25◦.
+
+Qualitative and quantitative results are given in Figure 7
+and Table 2. Note that GOPAC and RANSAC were termi-
+nated at 900s and 120s respectively. GOSMA outperforms
+the other methods considerably, ﬁnding the correct pose
+in all cases with a small median runtime. We also tested
+GOSMA without semantic labels during optimization, only
+during pre-processing (GS-Λ), the same as for GOPAC and
+RANSAC. While this is more accurate and much faster than
+GOPAC, optimizing across the semantic classes provides
+another large accuracy and runtime gain. We would like
+to emphasize the difﬁculty of this problem setup:
+the al-
+gorithm is given an image, a point-set and semantic class
+labels, and is required to estimate the camera pose. Com-
+pared to the synthetic data experiments, the sheer number
+of points and pixels, many of which are outliers, precludes
+the use of traditional methods.
+
+8. Discussion and Conclusion
+
+In this paper, we have proposed a novel mixture align-
+ment formulation for the camera pose estimation problem
+using the robust L2 density distance on the sphere. Further-
+more, we have developed a novel algorithm to minimize this
+distance using branch-and-bound, guaranteeing optimality
+regardless of initialisation. To accelerate convergence, a lo-
+cal optimization algorithm was developed and integrated,
+GPU bound computations were implemented, and a princi-
+pled way to incorporating side information such as seman-
+tic labels was devised. The algorithm outperformed other
+local and global methods on challenging synthetic and real
+datasets, ﬁnding the global optimum reliably.
+
+This approach has several limitations, however. Firstly,
+it scales quadratically with the number of mixture compo-
+nents, which scales with surface complexity. Secondly, it
+is unable to resolve certain degenerate poses, such as when
+a wall ﬁlls the ﬁeld-of-view of the camera.
+In this case,
+many camera poses satisfy the 2D information. Thirdly, it
+does not use a geometric objective function, which reduces
+its interpretability. A robust objective function in the image
+space such as intersection-over-union would be preferred,
+
+(a) 3D point-set and ground-truth (gray), GOSMA (black), GOPAC (red)
+and RANSAC (blue) camera poses. Object points are highlighted in green.
+
+(b) 3D points projected onto the image using the GOSMA (top), GOPAC
+(middle), and RANSAC (bottom) camera poses. For clarity, only object
+points are plotted.
+Figure 7. Qualitative camera pose results for ofﬁce 3 of the Stan-
+ford 2D-3D-S dataset, showing the pose of the camera when cap-
+turing the image and the projection of 3D object points onto it.
+Only GOSMA found the correct pose as deﬁned in this section.
+Best viewed in color.
+
+although it is not tractable for mixtures on the sphere. Fi-
+nally, the quality of its pose estimate depends on how well
+the mixtures represent the physical and projected surfaces
+in the real scene and image. While they can represent these
+surfaces arbitrarily accurately, the number of components
+is limited by practical considerations. Anisotropic densities
+would be preferred for this reason, however only isotropic
+densities, which model surfaces as points with a symmet-
+ric ﬁeld of inﬂuence, have a tractable closed form on the
+sphere. Hence, further investigation is warranted into align-
+ing representations that model surfaces with fewer parame-
+ters, such as wireframes or meshes.
+
+11803
+
+References
+
+[1] I. Armeni, A. Sax, A. R. Zamir, and S. Savarese. Joint 2D-
+3D-semantic data for indoor scene understanding. ArXiv e-
+prints, Feb. 2017. 7
+
+[2] E. Ask, O. Enqvist, and F. Kahl. Optimal geometric ﬁtting
+under the truncated L2-norm.
+In Proceedings of the 2013
+Conference on Computer Vision and Pattern Recognition,
+pages 1722–1729. IEEE, June 2013. 2
+
+[3] M. Aubry, D. Maturana, A. A. Efros, B. C. Russell, and
+J. Sivic. Seeing 3D chairs: exemplar part-based 2D-3D
+alignment using a large dataset of CAD models. In Proceed-
+ings of the 2014 Conference on Computer Vision and Pattern
+Recognition, pages 3762–3769. IEEE, June 2014. 1
+
+[4] N. Baka, C. Metz, C. J. Schultz, R.-J. van Geuns, W. J.
+Niessen, and T. van Walsum. Oriented Gaussian mix-
+ture models for nonrigid 2D/3D coronary artery registration.
+IEEE Transactions on Medical Imaging, 33(5):1023–1034,
+2014. 1, 2
+
+[5] E. Brachmann, A. Krull, S. Nowozin, J. Shotton, F. Michel,
+DSAC – Differentiable
+S. Gumhold, and C. Rother.
+RANSAC for camera localization.
+In Proceedings of the
+2017 Conference on Computer Vision and Pattern Recogni-
+tion, pages 2492–2500, July 2017. 2
+
+[6] T. M. Breuel.
+
+Implementation techniques for geometric
+branch-and-bound matching methods. Computer Vision and
+Image Understanding, 90(3):258–294, June 2003. 2
+
+[7] M. Brown, D. Windridge, and J.-Y. Guillemaut. Globally op-
+timal 2D-3D registration from points or lines without corre-
+spondences. In Proceedings of the 2015 International Con-
+ference on Computer Vision, pages 2111–2119, Dec. 2015.
+1, 2
+
+[8] R. H. Byrd, P. Lu, J. Nocedal, and C. Zhu. A limited memory
+algorithm for bound constrained optimization. SIAM Journal
+on Scientiﬁc Computing, 16(5):1190–1208, 1995. 6
+
+[9] D. Campbell and L. Petersson. An adaptive data represen-
+tation for robust point-set registration and merging. In Pro-
+ceedings of the 2015 International Conference on Computer
+Vision, pages 4292–4300. IEEE, Dec. 2015. 4
+
+[10] D. Campbell and L. Petersson. GOGMA: Globally-Optimal
+In Proceedings of the 2016
+Gaussian Mixture Alignment.
+Conference on Computer Vision and Pattern Recognition,
+pages 5685–5694. IEEE, June 2016. 2, 3
+
+[11] D. Campbell, L. Petersson, L. Kneip, and H. Li. Globally-
+optimal inlier set maximisation for simultaneous camera
+pose and feature correspondence. In Proceedings of the 2017
+International Conference on Computer Vision, pages 1–10.
+IEEE, Oct. 2017. 2
+
+[12] D. Campbell, L. Petersson, L. Kneip, and H. Li. Globally-
+optimal inlier set maximisation for camera pose and corre-
+spondence estimation. IEEE Transactions on Pattern Analy-
+sis and Machine Intelligence, preprint, June 2018. 1, 2, 5, 6,
+7
+
+[13] L.-C. Chen, Y. Zhu, G. Papandreou, F. Schroff, and H. Adam.
+Encoder-decoder with atrous separable convolution for se-
+mantic image segmentation. In Proceedings of the 2018 Eu-
+ropean Conference on Computer Vision, Sept. 2018. 4
+
+[14] G. K. Cheung, S. Baker, and T. Kanade. Visual hull align-
+ment and reﬁnement across time: A 3D reconstruction algo-
+rithm combining shape-from-silhouette with stereo. In Pro-
+ceedings of the 2003 Conference on Computer Vision and
+Pattern Recognition, volume 2, pages II–375. IEEE, June
+2003. 1
+
+[15] H. Chui and A. Rangarajan. A feature registration frame-
+work using mixture models.
+In Proceedings of the 2000
+Workshop on Mathematical Methods in Biomedical Image
+Analysis, pages 190–197. IEEE, June 2000. 3
+
+[16] P. David, D. Dementhon, R. Duraiswami, and H. Samet.
+SoftPOSIT: simultaneous pose and correspondence de-
+termination.
+International Journal of Computer Vision,
+59(3):259–284, 2004. 1, 2, 6
+
+[17] L. Devroye. A course in density estimation. Progress in Prob-
+
+ability and Statistics. Birkh¨auser Boston Inc., 1987. 2, 4
+
+[18] O. Enqvist, E. Ask, F. Kahl, and K. ˚Astr¨om. Tractable algo-
+rithms for robust model estimation. International Journal of
+Computer Vision, 112(1):115–129, 2015. 2
+
+[19] O. Enqvist and F. Kahl. Robust optimal pose estimation. In
+Proceedings of the 2008 European Conference on Computer
+Vision, pages 141–153. Springer, Oct. 2008. 2
+
+[20] M. A. Fischler and R. C. Bolles. Random sample consen-
+sus: a paradigm for model ﬁtting with applications to image
+analysis and automated cartography. Communications of the
+ACM, 24(6):381–395, 1981. 1, 2, 6
+[21] R. Fisher. Dispersion on a sphere.
+
+In Proceedings of the
+Royal Society of London A: Mathematical, Physical and En-
+gineering Sciences, volume 217, pages 295–305. Royal So-
+ciety, May 1953. 3
+
+[22] S. Gopal and Y. Yang. Von Mises-Fisher clustering models.
+In T. Jebara and E. P. Xing, editors, Proceedings of the 31st
+International Conference on Machine Learning, volume 32
+of Proceedings of Machine Learning Research, pages 154–
+162. PMLR, June 2014. 4
+
+[23] W. E. L. Grimson. Object Recognition by Computer: The
+Role of Geometric Constraints. MIT Press, Cambridge, MA,
+USA, 1990. 2
+
+[24] R. I. Hartley and F. Kahl. Global optimization through rota-
+tion space search. International Journal of Computer Vision,
+82(1):64–79, Apr. 2009. 2
+
+[25] J. A. Hesch and S. I. Roumeliotis. A direct least-squares
+(DLS) method for PnP.
+In Proceedings of the 2011 Inter-
+national Conference on Computer Vision, pages 383–390.
+IEEE, Nov. 2011. 1, 2
+
+[26] Q. Huang, W. Wang, and U. Neumann. Recurrent slice net-
+works for 3D segmentation of point clouds. In Proceedings
+of the 2018 IEEE Conference on Computer Vision and Pat-
+tern Recognition, pages 2626–2635, 2018. 4
+
+[27] B. Jian and B. C. Vemuri. Robust point set registration us-
+ing Gaussian mixture models. IEEE Transactions on Pattern
+Analysis and Machine Intelligence, 33(8):1633–1645, 2011.
+3, 4
+
+[28] A. Kendall and R. Cipolla. Geometric loss functions for cam-
+era pose regression with deep learning. In Proceedings of the
+2017 Conference on Computer Vision and Pattern Recogni-
+tion, pages 6555–6564, July 2017. 2
+
+11804
+
+[29] A. Kendall, M. Grimes, and R. Cipolla. PoseNet: A convolu-
+tional network for real-time 6-DOF camera relocalization. In
+Proceedings of the 2015 International Conference on Com-
+puter Vision, pages 2938–2946, Dec. 2015. 2
+
+[30] J. T. Kent. The Fisher–Bingham distribution on the sphere.
+Journal of the Royal Statistical Society. Series B (Method-
+ological), pages 71–80, 1982. 3
+
+[31] L. Kneip and P. Furgale. OpenGV: A uniﬁed and generalized
+approach to real-time calibrated geometric vision.
+In Pro-
+ceedings of the 2014 International Conference on Robotics
+and Automation, pages 1–8. IEEE, June 2014. 6
+
+[32] L. Kneip, D. Scaramuzza, and R. Siegwart. A novel
+parametrization of the perspective-three-point problem for a
+direct computation of absolute camera position and orienta-
+tion. In Proceedings of the 2011 Conference on Computer Vi-
+sion and Pattern Recognition, pages 2969–2976. IEEE, June
+2011. 6
+
+[33] L. Kneip, Z. Yi, and H. Li. SDICP: Semi-dense tracking
+based on iterative closest points. In M. W. J. Xianghua Xie
+and G. K. L. Tam, editors, Proceedings of the 2015 British
+Machine Vision Conference, pages 100.1–100.12. BMVA
+Press, Sept. 2015. 1
+
+[34] B. Kulis and M. I. Jordan. Revisiting k-means: New algo-
+rithms via Bayesian nonparametrics. In Proceedings of the
+29th International Conference on Machine Learning, pages
+1131–1138. Omnipress, 2012. 4, 6, 7
+
+[35] A. H. Land and A. G. Doig. An automatic method of solving
+discrete programming problems. Econometrica: Journal of
+the Econometric Society, pages 497–520, 1960. 2, 4
+
+[36] L. Landrieu and S. Martin. Large-scale point cloud seman-
+tic segmentation with superpoint graphs. In Proceedings of
+the 2018 IEEE Conference on Computer Vision and Pattern
+Recognition, Salt Lake City, USA, June 2018. 4
+
+[37] V. Lepetit, F. Moreno-Noguer, and P. Fua. EPnP: An accurate
+O(n) solution to the PnP problem. International Journal of
+Computer Vision, 81(2):155–166, 2009. 1, 2
+
+[38] H. Li and R. Hartley. The 3D-3D registration problem revis-
+ited. Proceedings of the 2007 International Conference on
+Computer Vision, pages 1–8, Oct. 2007. 2, 5
+
+[39] Y. Li, N. Snavely, D. Huttenlocher, and P. Fua. Worldwide
+pose estimation using 3D point clouds.
+In Proceedings of
+the 2012 European Conference on Computer Vision, pages
+15–29. Springer-Verlag, Oct. 2012. 2
+
+[40] D. G. Lowe. Distinctive image features from scale-invariant
+International Journal of Computer Vision,
+
+keypoints.
+60(2):91–110, 2004. 1
+
+[41] E. Marchand, H. Uchiyama, and F. Spindler. Pose estimation
+for augmented reality: a hands-on survey. IEEE Transactions
+on Visualization and Computer Graphics, 22(12):2633–
+2651, 2016. 1
+
+[42] K. Mardia. Statistics of Directional Data. Probability and
+
+Mathematical Statistics. Academic Press, 1972. 3
+
+[43] F. Moreno-Noguer, V. Lepetit, and P. Fua. Pose priors for
+simultaneously solving alignment and correspondence.
+In
+Proceedings of the 2008 European Conference on Computer
+Vision, pages 405–418. Springer, Oct. 2008. 1, 2, 6, 7
+
+[44] C. F. Olson. A general method for geometric feature match-
+ing and model extraction. International Journal of Computer
+Vision, 45(1):39–54, 2001. 1
+
+[45] C. Olsson, F. Kahl, and M. Oskarsson.
+
+Branch-and-
+bound methods for Euclidean registration problems. IEEE
+Transactions on Pattern Analysis and Machine Intelligence,
+31(5):783–794, 2009. 2
+
+[46] T. M. Pukkila and C. R. Rao. Pattern recognition based on
+scale invariant discriminant functions. Information Sciences,
+45(3):379–389, 1988. 3
+
+[47] O. Ronneberger, P. Fischer, and T. Brox. U-net: Convo-
+lutional networks for biomedical image segmentation.
+In
+Proceedings of the 2015 International Conference on Med-
+ical Image Computing and Computer-Assisted Intervention,
+pages 234–241. Springer, 2015. 4
+
+[48] S. Rota Bul`o, L. Porzi, and P. Kontschieder. In-place acti-
+vated batchnorm for memory-optimized training of DNNs.
+In Proceedings of the 2018 IEEE Conference on Computer
+Vision and Pattern Recognition, pages 5639–5647, Salt Lake
+City, USA, June 2018. 4
+
+[49] T. Sattler, B. Leibe, and L. Kobbelt. Fast image-based lo-
+calization using direct 2D-to-3D matching. In Proceedings
+of the 2011 International Conference on Computer Vision,
+pages 667–674. IEEE, Nov. 2011. 2
+
+[50] T. Sattler, B. Leibe, and L. Kobbelt. Efﬁcient effective pri-
+oritized matching for large-scale image-based localization.
+IEEE Transactions on Pattern Analysis and Machine Intelli-
+gence, 39(9):1744–1756, Sept. 2017. 2
+
+[51] D. W. Scott. Parametric statistical modeling by minimum in-
+tegrated square error. Technometrics, 43(3):274–285, 2001.
+4
+
+[52] J. Shotton, B. Glocker, C. Zach, S. Izadi, A. Criminisi, and
+A. Fitzgibbon. Scene coordinate regression forests for cam-
+era relocalization in RGB-D images. In Proceedings of the
+2013 Conference on Computer Vision and Pattern Recogni-
+tion, pages 2930–2937. IEEE, June 2013. 2
+
+[53] J. Straub, T. Campbell, J. P. How, and J. W. Fisher. Small-
+variance nonparametric clustering on the hypersphere.
+In
+Proceedings of the 2015 Conference on Computer Vision and
+Pattern Recognition, pages 334–342. IEEE, June 2015. 4, 6,
+7
+
+[54] J. Straub, T. Campbell, J. P. How, and J. W. Fisher III. Efﬁ-
+cient global point cloud alignment using Bayesian nonpara-
+metric mixtures.
+In Proceedings of the 2017 Conference
+on Computer Vision and Pattern Recognition, pages 2403–
+2412. IEEE, July 2017. 3, 4
+
+[55] L. Sv¨arm, O. Enqvist, F. Kahl, and M. Oskarsson. City-scale
+localization for cameras with known vertical direction. IEEE
+Transactions on Pattern Analysis and Machine Intelligence,
+39(7):1455–1461, 2016. 2
+
+[56] M. Tatarchenko, J. Park, V. Koltun, and Q.-Y. Zhou. Tangent
+convolutions for dense prediction in 3D. In Proceedings of
+the 2018 IEEE Conference on Computer Vision and Pattern
+Recognition, pages 3887–3896, Salt Lake City, USA, June
+2018. 4
+
+[57] Y. Tsin and T. Kanade. A correlation-based approach to
+In Proceedings of the 2004
+
+robust point set registration.
+
+11805
+
+European Conference on Computer Vision, pages 558–569.
+Springer, May 2004. Point-set available at http://www.
+cs.cmu.edu/˜ytsin/KCReg/KCReg.zip. 3
+
+[58] F. Wang and A. E. Gelfand. Directional data analysis un-
+Statistical
+
+der the general projected normal distribution.
+Methodology, 10(1):113–127, 2013. 3
+
+[59] G. Watson. Statistics on Spheres, volume 6 of University of
+Arkansas Lecture Notes in the Mathematical Sciences. Wi-
+ley, 1983. 3
+
+[60] J. Yang, H. Li, D. Campbell, and Y. Jia. Go-ICP: A glob-
+ally optimal solution to 3D ICP point-set registration. IEEE
+Transactions on Pattern Analysis and Machine Intelligence,
+38(11):2241–2254, Nov. 2016. 2
+
+[61] B. Zeisl, T. Sattler, and M. Pollefeys. Camera pose voting for
+large-scale image-based localization. In Proceedings of the
+2015 International Conference on Computer Vision, pages
+2704–2712. IEEE, Dec. 2015. 2
+
+11806
+
+

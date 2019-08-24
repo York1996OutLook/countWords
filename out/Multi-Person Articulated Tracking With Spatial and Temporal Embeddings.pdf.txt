@@ -1,0 +1,1897 @@
+Multi-person Articulated Tracking with Spatial and Temporal Embeddings
+
+Sheng Jin1,2 Wentao Liu1 Wanli Ouyang3,4 Chen Qian 1
+
+1 SenseTime Research
+
+2 Tsinghua University
+
+3 The University of Sydney
+
+4 SenseTime Computer Vision Research Group, Australia
+
+1
+
+{jinsheng, qianchen}@sensetime.com, liuwtwinter@gmail.com
+
+3
+
+wanli.ouyang@sydney.edu.au
+
+Abstract
+
+We propose a uniﬁed framework for multi-person pose
+estimation and tracking. Our framework consists of two
+main components, i.e. SpatialNet and TemporalNet. The
+SpatialNet accomplishes body part detection and part-level
+data association in a single frame, while the TemporalNet
+groups human instances in consecutive frames into trajec-
+tories. Speciﬁcally, besides body part detection heatmaps,
+SpatialNet also predicts the Keypoint Embedding (KE) and
+Spatial Instance Embedding (SIE) for body part associa-
+tion. We model the grouping procedure into a differen-
+tiable Pose-Guided Grouping (PGG) module to make the
+whole part detection and grouping pipeline fully end-to-
+end trainable. TemporalNet extends the spatial group-
+ing of keypoints to temporal grouping of human instances.
+Given human proposals from two consecutive frames, Tem-
+poralNet exploits both appearance features encoded in Hu-
+man Embedding (HE) and temporally consistent geomet-
+ric features embodied in Temporal Instance Embedding
+(TIE) for robust tracking. Extensive experiments demon-
+strate the effectiveness of our proposed model. Remarkably,
+we demonstrate substantial improvements over the state-of-
+the-art pose tracking method from 65.4% to 71.8% Multi-
+Object Tracking Accuracy (MOTA) on the ICCV’17 Pose-
+Track Dataset.
+
+1. Introduction
+
+(a)
+
+(b)
+
+(c)
+
+KE
+
+SIE
+
+KE
+
+SIE
+
+HE
+
+TIE
+
+HE
+
+TIE
+
+Image
+
+ Mask
+
+KE
+
+KE+PGG
+
+Figure 1. (a) Pose estimation with KE or SIE. SIE may over-
+segment a single pose into several parts (column 2), while KE may
+erroneously group far-away body parts together (column 3). (b)
+Pose tracking with HE or TIE. Poses are color-coded by predicted
+track ids and errors are highlighted by eclipses. TIE is not robust
+to camera zooming and movement (column 2), while HE is not ro-
+bust to human pose changes (column 3). (c) Effect of PGG mod-
+ule. Comparing KE before/after PGG (column 3/4), PGG makes
+embeddings more compact and accurate, where pixels with similar
+color have a higher conﬁdence of belonging to the same person.
+
+Multi-person articulated tracking aims at predicting the
+body parts of each person and associating them across tem-
+poral periods. It has stimulated much research interest be-
+cause of its importance in various applications such as video
+understanding and action recognition [5]. In recent years,
+signiﬁcant progress has been made in single frame human
+pose estimation [3, 9, 12, 25]. However, multi-person ar-
+ticulated tracking in complex videos remains challenging.
+Videos may contain a varying number of interacting people
+with frequent body part occlusion, fast body motion, large
+pose changes, and scale variation. Camera movement and
+
+zooming further pose challenges to this problem.
+
+Pose tracking [14] can be viewed as a hierarchical de-
+tection and grouping problem. At the part level, body parts
+are detected and grouped spatially into human instances in
+every single frame. At the human level, the detected human
+instances are grouped temporally into trajectories.
+
+Embedding can be viewed as a kind of permutation-
+invariant instance label to distinguish different instances.
+Body parts with similar embeddings have the higher
+possibility of belonging to the same person.
+Previous
+works [21] perform keypoint grouping with Keypoint Em-
+
+15664
+
+bedding (KE). KE [21] is a set of 1-D appearance embed-
+ding maps where joints of the same person have similar em-
+bedding values and those of different people have dissimilar
+ones. However, due to the over-ﬂexibility of the embedding
+space, such representations are difﬁcult to interpret and hard
+to learn [24]. Arguably, a more natural way for the human to
+assign ids to targets is by counting in a speciﬁc order (from
+left to right and/or from top to bottom). This inspires us
+to enforce geometric ordering constraints on the embedding
+space to facilitate training. Speciﬁcally, we add six auxil-
+iary ordinal-relation prediction tasks for faster convergence
+and better interpretation of KE by encoding the knowledge
+of geometric ordering. Recently, Spatial Instance Embed-
+ding (SIE) [23, 24] is introduced for keypoint grouping. SIE
+is a 2-D embedding map, where each pixel is encoded with
+the predicted human center location (x, y). Fig. 1(a) illus-
+trates the typical error patterns of pose estimation with KE
+or SIE. SIE may over-segment a single pose into several
+parts (column 2), while KE sometimes erroneously groups
+far-away body parts together (column 3). KE better pre-
+serves intra-class consistency but has difﬁculty in separating
+instances for lack of geometric constraints. Since KE cap-
+tures appearance features while SIE extracts geometric in-
+formation, they are naturally complementary to each other.
+Thus, we combine them to achieve better grouping results.
+
+In this paper, we propose to extend the idea of using ap-
+pearance and geometric information in a single frame to
+the temporal grouping of human instances for pose track-
+ing. Previous pose tracking algorithms mostly rely on
+task-agnostic similarity metrics such as the Object Key-
+point Similarity (OKS) [34, 36] and Intersection over Union
+(IoU) [8]. However, such simple geometric cues are not ro-
+bust to fast body motion, pose changes, camera movement
+and zoom. For robust pose tracking, we extend the idea of
+part-level spatial grouping to human-level temporal group-
+ing. Speciﬁcally, we extend KE to Human Embedding (HE)
+for capturing holistic appearance features and extend SIE
+to Temporal Instance Embedding (TIE) for achieving tem-
+poral consistency. Intuitively, appearance features encoded
+by HE are more robust to fast motion, camera movement
+and zoom, while temporal information embodied in TIE is
+more robust to body pose changes and occlusion. We pro-
+pose a novel TemporalNet to enjoy the best of both worlds.
+Fig. 1(b) demonstrates typical error patterns of pose track-
+ing with HE or TIE. HE exploits scale-invariant appearance
+features which are robust to camera zooming and movement
+(column 1), and TIE preserves temporal consistency which
+is robust to human pose changes (column 4).
+
+Bottom-up pose estimation methods follow the two-
+stage pipeline to generate body part proposals at the ﬁrst
+stage and group them into individuals in the second stage.
+Since the grouping is mainly used as post-processing, i.e.
+graph based optimization [11, 12, 14, 16, 27] or heuris-
+
+tic parsing [3, 24], no error signals from the grouping re-
+sults are back-propagated. We instead propose a fully dif-
+ferentiable Pose-Guided Grouping (PGG) module, making
+detection-grouping fully end-to-end trainable. We are able
+to directly supervise the grouping results and the group-
+ing loss is back-propagated to the low-level feature learn-
+ing stages. This enables more effective feature learning
+by paying more attention to the mistakenly grouped body
+parts. Moreover, to obtain accurate regression results, post-
+processing clustering [23] or extra reﬁnement [24] are re-
+quired. Our PGG helps to produce accurate embeddings
+(see Fig. 1(c)). To improve the pose tracking accuracy, we
+further extend PGG to the temporal grouping of TIE.
+
+In this work, we aim at unifying pose estimation and
+tracking in a single framework. SpatialNet detects body
+parts in a single frame and performs part-level spatial
+grouping to obtain body poses. TemporalNet accomplishes
+human-level temporal grouping in consecutive frames to
+track targets across time. These two modules share the fea-
+ture extraction layers to make a more efﬁcient inference.
+
+The main contributions are summarized as follows:
+
+• For pose tracking, we extend the KE and SIE in still
+images to Human Embedding (HE) and Temporal In-
+stance Embeddings (TIE) in videos. HE captures
+human-level global appearance features to avoid drift-
+ing in camera motion, while TIE provides smoother
+geometric features to obtain temporal consistency.
+
+• A fully differentiable Pose-Guided Grouping (PGG)
+module for both pose estimation and tracking, which
+enables the detection and grouping to be fully end-to-
+end trainable. The introduction of PGG and its group-
+ing loss signiﬁcantly improves the spatial/temporal
+embedding prediction accuracy.
+
+2. Related Work
+
+2.1. Multi person Pose Estimation in Images
+
+Recent multi-person pose estimation approaches can be
+classiﬁed into top-down and bottom-up methods. Top-
+down methods [7, 9, 34, 25] locate each person with a
+bounding box then apply single-person pose estimation.
+They mainly differ in the choices of human detectors [29]
+and single-person pose estimators [22, 33, 20]. They highly
+rely on the object detector and may fail in cluttered scenes,
+occlusion, person-to-person interaction, or rare poses. More
+importantly, top-down methods perform single-person pose
+estimation individually for each human candidate. Thus,
+its inference time is proportional to the number of people,
+making it hard for achieving real-time performance. Addi-
+tionally, the interface between human detection and pose es-
+timation is non-differentiable, making it difﬁcult to train in
+an end-to-end manner. Bottom-up approaches [3, 12, 27]
+
+5665
+
+SpatialNet
+
+Auxiliary Tasks
+
+Heatmap
+
+T-1 th
+Frame
+
+Convs
+
+KE
+
+SIE
+
+Feature
+
+PGG
+
+HE branch
+
+SpatialNet
+Feature
+
+T th
+
+Frame
+
+Convs
+
+Auxiliary Tasks
+
+Heatmap
+
+KE
+
+SIE
+
+PGG
+
+TIE branch
+
+TemporalNet
+
+Figure 2. The overview of our framework for pose tracking.
+
+detect body part candidates and group them into individ-
+uals. Graph-cut based methods [12, 27] formulate group-
+ing as solving a graph partitioning based optimization prob-
+lem, while [3, 24] utilize the heuristic greedy parsing al-
+gorithm to speed up decoding. However, these bottom-up
+approaches only use grouping as post-processing and no er-
+ror signals from grouping results are back-propagated.
+
+More recently, efforts have been devoted to end-to-end
+training or joint optimization. For top-down methods, Xie
+et al. [35] proposes a reinforcement learning agent to bridge
+the object detector and the pose estimator. For bottom-up
+methods, Newell et al. [21] proposes the keypoint embed-
+ding (KE) to tag instances and train by pairwise losses. Our
+framework is a bottom-up method inspired by [21]. [21] su-
+pervises the grouping in an indirect way. It trains keypoint
+embedding descriptors to ease the post-processing group-
+ing. However, no direct supervision on grouping results is
+provided. Even if the pairwise loss of KE is low, it is still
+possible to produce wrong grouping results, but [21] does
+not model such grouping loss. We instead propose a dif-
+ferentiable Pose-Guided Grouping (PGG) module to learn
+to group body parts, making the whole pipeline fully end-
+to-end trainable, yielding signiﬁcant improvement in pose
+estimation and tracking.
+
+Our work is also related to [23, 24], where spatial in-
+stance embeddings (SIE) are introduced to aid body part
+grouping. However, due to lack of grouping supervision,
+their embeddings are always noisy [23, 24] and additional
+clustering [23] or reﬁnement [24] is required. We instead
+employ PGG and additional grouping losses to learn to
+group SIE, making it end-to-end trainable while resulting
+in much more compact embedding representation.
+
+2.2. Multi person Pose Tracking
+
+Recent works on multi-person pose tracking mostly fol-
+low the tracking-by-detection paradigm, in which human
+body parts are ﬁrst detected in each frame, then data associ-
+ation is performed over time to form trajectories.
+
+Ofﬂine pose tracking methods take future frames into
+consideration, allowing for more robust predictions but hav-
+ing high computational complexity. ProTracker [8] em-
+ploys 3D Mask R-CNN to improve the estimation of body
+
+parts by leveraging temporal context encoded within a slid-
+ing temporal window. Graph partitioning based meth-
+ods [11, 14, 16] formulate multi-person pose tracking into
+an integer linear programming (ILP) problem and solve
+spatial-temporal grouping. Such methods achieve compet-
+itive performance in complex videos by enforcing long-
+range temporal consistency.
+
+Our approach is an online pose tracking approach, which
+is faster and ﬁts for practical applications. Online pose
+tracking methods [6, 26, 38, 34] mainly use bi-partite graph
+matching to assign targets in the current frame to existing
+trajectories. However, they only consider part-level geo-
+metric information and ignore global appearance features.
+When faced with fast pose motion and camera movement,
+such geometrical trackers are prone to tracking errors. We
+propose to extend SpatialNet to TemporalNet to capture
+both appearance features in HE and temporal coherence in
+TIE, resulting in much better tracking performance.
+
+3. Method
+
+As demonstrated in Figure 2, we unify pose estimation
+and tracking in a single framework. Our framework consists
+of two major components: SpatialNet and TemporalNet.
+
+SpatialNet tackles multi-person pose estimation by body
+part detection and part-level spatial grouping. It processes a
+single frame at a time. Given a frame, SpatialNet produces
+heatmaps, keypoint embedding (KE), spatial instance em-
+bedding (SIE) and geometric-ordinal maps simultaneously.
+Heatmaps model the body part locations. KE encodes the
+part-level appearance features, while SIE captures the ge-
+ometric information about human centers. The auxiliary
+geometric-ordinal maps enforce ordering constraints on the
+embedding space to facilitate training of KE. PGG is uti-
+lized to make both KE and SIE be more compact and dis-
+criminative. We ﬁnally generate the body pose proposals by
+greedy decoding following [21].
+
+TemporalNet extends SpatialNet to deal with online
+human-level temporal grouping. It consists of HE branch
+and TIE branch, and shares the same low-level feature ex-
+traction layers with SpatialNet. Given body pose propos-
+als, HE branch extracts region-speciﬁc embedding (HE) for
+each human instance. TIE branch exploits the temporally
+coherent geometric embedding (TIE). Given HE and TIE as
+pairwise potentials, a simple bipartite graph matching prob-
+lem is solved to generate pose trajectories.
+
+3.1. SpatialNet: Part level Spatial Grouping
+
+Throughout the paper, we use following notations. Let
+p = (x, y) ∈ R2 be the 2-D position in an image, and
+pj,k ∈ R2 the location of body part j for person k. We
+use Pk = {pj,k}j=1:J to represent the body pose of the
+kth person. We use 2D Gaussian conﬁdence heatmaps to
+model the body part locations. Let Cj,k be the conﬁdence
+
+5666
+
+heatmap for the jth body part of kth person, which is calcu-
+2/σ2) for each po-
+lated by Cj,k(p) = exp(−kp − pj,kk2
+sition p in the image, where σ is set as 2 in the experi-
+ments. Following [3], we take the maximum of the conﬁ-
+dence heatmaps to get the ground truth conﬁdence heatmap,
+i.e. C ∗
+
+j (p) = maxk C ∗
+
+j,k(p).
+
+The detection loss is calculated by weighted ℓ2 distance
+
+respect to the ground truth conﬁdence heatmaps.
+
+Ldet = X
+
+j
+
+X
+
+p
+
+kC ∗
+
+j (p) − Cj(p)k2
+2.
+
+(1)
+
+3.1.1 Keypoint Embedding (KE) with auxiliary tasks
+
+We follow [21] to produce the keypoint embedding K for
+each type of body part. However, such kind of embedding
+representation has several drawbacks. First, the embedding
+is difﬁcult to interpret [21, 24]. Second, it is hard to learn
+due to its over-ﬂexibility with no direct supervision avail-
+able. To overcome these drawbacks, we introduce several
+auxiliary tasks to facilitate training and improve interpreta-
+tion. The idea of auxiliary learning [32] has shown effective
+both in supervised learning [28] and reinforcement learn-
+ing [15]. Here, we explore auxiliary training in the context
+of keypoint embedding representation learning.
+
+By auxiliary training, we explicitly enforce the embed-
+ding maps to learn geometric ordinal relations. Speciﬁcally,
+we deﬁne six auxiliary tasks: to predict the ’left-to-right’
+l2r, ’right-to-left’ r2l, ’top-to-bottom’ t2b, ’bottom-to-top’
+b2t, ’far-to-near’ f2n and ’near-to-far’ n2f orders of hu-
+man instances in a single image. For example, in the ‘left-
+to-right’ map, the person from left to right in the images
+should have low to high order (value). Fig. 4 (c)(d)(e) visu-
+alize some example predictions of the auxiliary tasks. We
+see human instances are clearly arranged in the correspond-
+ing geometric ordering. We also observe that KE (Fig. 4
+(b)) and the geometric ordinal-relation maps (c)(d)(e) share
+some similar patterns, which suggests that KE acquires
+some knowledge of geometric ordering.
+
+Following [21], K is trained with pairwise grouping loss
+LKE = Lpull + Lpush. The pull loss (Eq. 2) is computed as
+the squared distance between the human reference embed-
+ding and the predicted embedding of each joint. The push
+loss (Eq. 3) is calculated between different reference em-
+beddings, which exponentially drops to zero as the increase
+of embedding difference. Formally, we deﬁne the reference
+embedding for the kth person as ¯m·,k = 1
+
+J Pj mj(pj,k).
+
+Lpull =
+
+1
+J · K X
+
+k
+
+X
+
+j
+
+km(pj,k) − ¯m·,kk2
+2.
+
+(2)
+
+Lpush =
+
+1
+K 2 X
+
+k
+
+X
+
+k′
+
+exp{−
+
+1
+2
+
+( ¯m·,k − ¯m·,k′ )2}.
+
+(3)
+
+For auxiliary training, we replace the push loss with the
+
+ordinal loss but keep the pull loss (Eq. 2) the same.
+
+Laux =
+
++
+
+X
+
+k′
+
+1
+K 2 X
+1
+J · K X
+
+k
+
+k
+
+log(1 + exp(Ord ∗ ( ¯m·,k − ¯m·,k′ )))
+
+km(pj,k) − ¯m·,kk2
+2,
+
+(4)
+
+X
+
+j
+
+where Ord = {1, −1} indicates the ground-truth order for
+person k and k′. In l2r, r2l, t2b, and b2t, we sort human in-
+stances by their centroid locations. For example, in l2r , if
+kth person is on the left of k′th person, then Ord = 1, oth-
+erwise Ord = −1. In f2n and n2f, we sort them according
+to the head size kpheadtop,k − pneck,kk2
+2.
+
+3.1.2 Spatial Instance Embedding (SIE)
+
+For lack of geometric information, KE has difﬁculty in sep-
+arating instances and tends to erroneously group with dis-
+tant body parts. To remedy this, we combine KE with SIE
+to embody instance-wise geometric cues. Concretely, we
+predict the dense offset spatial vector ﬁelds (SVF), where
+each 2-D vector encodes the relative displacement from the
+human center to its absolute location p. Fig. 4(f)(g) visu-
+alize the spatial vector ﬁelds of x-axis and y-axis, which
+distinguish the left/right sides and upper/lower sides rela-
+tive to its body center. As shown in Fig. 3, subtracted by its
+coordinate, SVF can be decoded to SIE in which each pixel
+is encoded with the human center location.
+
+We denote the spatial vector ﬁelds (SVF) by ˆS, and SIE
+by S. We use ℓ1 distance to train SVF, where the ground
+truth spatial vector is the displacement from the person cen-
+ter to each body part.
+
+LSIE =
+
+1
+
+J · K
+
+J
+
+K
+
+X
+
+j=1
+
+X
+
+k=1
+
+k ˆS(pj,k) − (pj,k − p·,k)k1,
+
+(5)
+
+where p·,k = 1
+
+J Pj pj,k, is the center of person k.
+3.2. Pose Guided Grouping (PGG) Module
+
+In prior bottom-up methods [3, 23, 24], detection and
+grouping are separated. We reformulate the grouping pro-
+cess into a differentiable Pose-Guided Grouping (PGG)
+module for end-to-end training. By directly supervising the
+grouping results, more accurate estimation is obtained.
+
+Our PGG is based on Gaussian Blurring Mean Shift
+(GBMS) [4] algorithm and inspired by [17], which is orig-
+inally proposed for segmentation. However, directly apply-
+ing GBMS in the challenging articulate tracking task is not
+desirable. First, the complexity of GBMS is O(n2), where
+n is the number of feature vectors to group. Direct use of
+
+5667
+
+Max
+
+Heatmap
+
+Mask
+
+KE
+
+SVF
+
+SIE
+
+PGG
+
+SVF
+
+SIE
+
+X
+
+Y
+
+KE
+
+SIE
+
+SIE
+
+Figure 3. Spatial keypoint grouping with Pose-Guided Grouping
+(PGG). We obtain more compact and accurate Keypoint Embed-
+ding (KE) and Spatial Instance Embedding (SIE) with PGG.
+
+Algorithm 1 Pose-Guided Grouping
+Input: KE K, SIE S, Mask M, and iteration number R.
+Output: X
+
+1: Concatenate K and S, mask-selected by M, and re-
+
+shape to X(1) ∈ RD×N .
+
+2: Initialize X = (cid:2)X(1)(cid:3)
+3: for r = 1, 2, · · · R do
+4:
+
+Gaussian Afﬁnity W(r) ∈ RN ×N . W(r)(i, j) =
+
+5:
+
+6:
+
+exp(− δ2
+
+2 kx(r)
+
+i − x(r)
+
+j k2
+
+2), ∀x(r)
+
+i
+
+, x(r)
+
+j ∈ X(r).
+
+Normalization Matrix. D(r) = diag(cid:0)W(r) · ~1(cid:1)
+Update. X(r+1) = X(r)W(r)(cid:0)D(r)(cid:1)−1
+X = (cid:2)X ; X(r+1)(cid:3)
+
+7:
+8: end for
+9: return X
+
+GBMS on the whole image will lead to huge memory con-
+sumption. Second, the predicted embeddings are always
+noisy especially in background regions, where no supervi-
+sion is available during training. As illustrated in the top
+row of Fig. 4, embedding noises exist in the background
+area (the ceiling or the ﬂoor). The noise in these irrele-
+vant regions will affect the mean-shift grouping accuracy.
+We propose a novel Pose-Guided Grouping module to ad-
+dress the above drawbacks. Considering the sparseness of
+the matrix (body parts only occupy a small area in images),
+we propose to use the human pose mask to guide group-
+ing, which rules out irrelevant areas and signiﬁcantly re-
+duces the memory cost. As shown in Fig. 3, we apply max
+along the channel ¯C(p) = maxj Cj(p) and generate the
+instance-agnostic pose mask M ∈ RW ×H , by thresholding
+at τ = 0.2. M(p) is 1 if ¯C(p) > τ , otherwise 0.
+
+Both spatial (KE and SIE) and temporal (TIE) embed-
+dings can be grouped by PGG. Take spatial grouping for
+
+example, we reﬁne KE and SIE with PGG module to get
+more compact and discriminative embedding descriptors.
+The Pose-Guided Grouping algorithm is summarized in
+Alg. 1. KE and SIE are ﬁrst concatenated to D × W × H
+dimensional feature maps. Then embeddings are selected
+according to the binary pose mask M and reshaped to
+X(1) ∈ RD×N as initialization, where N is the number
+of non-zero elements in M, (N ≪ W × H). Recurrent
+mean-shift grouping is then applied to X(1) for R itera-
+tions.
+In each iteration, the Gaussian afﬁnity is ﬁrst cal-
+culated with the isotropic multivariate normal kernel W =
+exp(− δ2
+2), where the kernel bandwidth δ is em-
+pirically chosen as 5 in the experiments. W ∈ RN ×N can
+be viewed as the weighted adjacency matrix. The diago-
+nal matrix of afﬁnity row sum D = diag(W · ~1) is used
+for normalization, where ~1 means a vector with all entries
+one. We then update X with the normalized Gaussian ker-
+nel weighted mean, X = XWD−1. After several itera-
+tions of grouping reﬁnement, the embeddings become dis-
+tinct for heterogeneous pairs and similar for homogeneous
+ones. When training, we apply the pairwise pull/push losses
+(Eq. 2 and 3) over all iterations of grouping results X .
+
+2 kx − xik2
+
+3.3. TemporalNet: Human Temporal Grouping
+
+1, . . . P t
+
+TemporalNet extends SpatialNet to perform human-level
+temporal grouping in an online manner. Formally, we use
+the superscript t to distinguish different frames. I t denotes
+the input frame at time-step t, which contains K t persons.
+SpatialNet is applied to I t to estimate a set of poses P t =
+{P t
+K t }. TemporalNet aims at temporally grouping
+human pose proposals P t in the current frame with already
+tracked poses P t−1 in the previous frame. TemporalNet ex-
+ploits both human-level appearance features (HE) and tem-
+porally coherent geometric information (TIE) to calculate
+the total pose similarity. Finally, we generate the pose tra-
+jectories by solving the bipartite graph matching problems,
+using pose similarity as pairwise potentials.
+
+3.3.1 Human Embedding (HE)
+
+To obtain human-level appearance embedding (HE), we in-
+troduce a region-speciﬁc HE branch based on [37]. Given
+predicted pose proposals, HE brach ﬁrst calculates human
+bounding boxes to cover the corresponding human key-
+points. For each bounding box, ROI-Align pooling [9] is ap-
+plied to the shared low-level feature maps to extract region-
+adapted ROI features. The ROI features are then mapped
+to the human embedding H ∈ R3072. HE is trained with
+triplet loss [31], pulling HE of the same instance closer, and
+pushing apart embeddings of different instances.
+LHE = X
+
+max(0, kHk1 −Hk2 k2
+
+2 −kHk1 −Hk3 k2
+
+2 +α),
+
+k1=k2
+k16=k3
+
+5668
+
+(6)
+
+(a)
+(a)
+
+(b)
+
+(c)
+
+(d)
+
+(e)
+
+(f)
+
+(g)
+
+Figure 4. (a) input image. (b) the average KE. (c)(d)(e) predicted ’left-to-right’, ’top-to-bottom’ and ’far-to-near’ geometric-relation maps.
+We use colors to indicate the predicted orders, where the brighter color means the higher ordinal value. (f)(g) are the spatial vector ﬁelds
+of x-axis and y-axis respectively. The bright color means positive offset relative to the human center, while dark color means negative.
+
+where the margin term α is set to 0.3 in the experiments.
+
+3.3.2 Temporal Instance Embedding (TIE)
+
+To exploit the temporal information for pose tracking, we
+naturally extend the Spatial Instance Embedding (SIE) to
+the Temporal Instance Embedding (TIE). TIE branch con-
+catenates low-level features, body part detection heatmaps
+and SIE from two neighboring frames. The concatenated
+feature maps are then mapped to dense TIE.
+
+TIE is a task-speciﬁc representation which measures the
+displacement between the keypoint of one frame and the
+human center of another frame. This design utilizes the
+mutual information between keypoint and human in adja-
+cent frames to handle occlusion and pose motion simulta-
+neously. Speciﬁcally, we introduce bi-directional temporal
+vector ﬁelds (TVF), which are denoted as ˆT and ˆT ′ respec-
+tively. Forward TVF ˆT encodes the relative displacement
+from the human center in (t − 1)-th frame to body parts in
+the t-th frame, it temporally propagates the human centroid
+embeddings from (t−1)-th to t-th frame. In contrast, Back-
+ward TVF ˆT ′ represents the offset from current t-th frame
+body center to body parts in the previous frame.
+
+LT IE =
+
+1
+
+J · K t
+
++
+
+1
+
+J · K t−1
+
+J
+
+K t
+
+X
+
+j=1
+
+X
+
+k=1
+
+J
+
+X
+
+j=1
+
+K t−1
+
+X
+
+k′=1
+
+k ˆT (pt
+
+j,k) − (pt
+
+j,k − pt−1
+
+·,k )k1
+
+k ˆT ′(pt−1
+
+j,k′ ) − (pt−1
+
+j,k′ − pt
+
+·,k′ )k1,
+
+(7)
+
+·,k = 1
+
+J Pj pt
+
+where pt
+j,k, is the center of person k at time
+step t. Simply subtracted from absolute locations, we get
+the corresponding Forward TIE T and Backward TIE T ′.
+Thereby, TIE encodes the temporally propagated human
+centroid. Likewise, we also extend the idea of spatial group-
+ing to temporal grouping. TemporalNet outputs Forward
+TIE T and Backward TIE T ′, which are reﬁned by PGG
+independently. Take Forward TIE T for example, we gen-
+erate pose mask M using body heatmaps from the t-th
+
+frame. We rule out irrelevant regions of T and reshape it to
+X(1) ∈ RD×N . Subsequently, recurrent mean-shift group-
+ing is applied. Again, additional grouping losses (Eq. 2,3)
+are used to train TIE.
+
+3.3.3 Pose Tracking
+
+The problem of temporal pose association is formulated as
+a bipartite graph based energy maximization problem. The
+estimated poses P t are then associated with the previous
+poses P t−1 by bipartite graph matching.
+
+ˆz = argmax
+
+z X
+
+P t
+
+k∈P t
+
+X
+
+P t−1
+
+k′ ∈P t−1
+
+ΨP t
+
+k,P t−1
+
+k′
+
+· zP t
+
+k,P t−1
+
+k′
+
+(8)
+
+s.t. ∀P t
+
+k ∈ P t, X
+
+P t−1
+
+k′ ∈P t−1
+
+and ∀P t−1
+
+k′ ∈ P t−1, X
+
+zP t
+
+k,P t−1
+
+k′
+
+≤ 1
+
+zP t
+
+k,P t−1
+
+k′
+
+≤ 1,
+
+P t
+
+k∈P t
+
+k′
+
+k,P t−1
+
+k and P t−1
+
+∈ {0, 1} is a binary variable which implies
+
+where zP t
+if the pose hypothesis P t
+are associated. The
+pairwise potentials Ψ represent the similarity between pose
+hypothesis. Ψ = λHEΨHE + λT IEΨT IE, with ΨHE for
+human-level appearance similarity and ΨT IE for temporal
+smoothness. λHE and λT IE are hyperparameters to bal-
+ance them, with λHE = 3 and λT IE = 1.
+
+k′
+
+The human-level appearance similarity is calculated as
+the ℓ2 embedding distance: ΨHE = kHk − Hk′ k2
+2. And the
+temporal smoothness term ΨT IE is computed as the simi-
+larity between the encoded human center locations in SIE S
+and the temporally propagated TIE T , T ′.
+
+ΨT IE =
+
+1
+2J
+
+J
+
+X
+
+j=1
+
+(cid:16)kT ′(pt−1
+
+j,k′ ) − S t(pt
+
+j,k)k2
+2
+
++ kT (pt
+
+j,k) − S t−1(pt−1
+
+j,k′ )k2
+
+2(cid:17) ,
+
+(9)
+
+The bipartite graph matching problem (Eq. 8) is solved
+
+using Munkres algorithm to generate pose trajectories.
+
+5669
+
+3.4. Implementation Details
+
+Following [21], SpatialNet uses the 4-stage stacked-
+hourglass as its backbone. We ﬁrst train SpatialNet with-
+out PGG. The total losses consist of Ldet, LKE, Laux and
+LSIE, with their weights 1:1e-3:1e-4:1e-4. We set the ini-
+tial learning rate to 2e-4 and reduce it to 1e-5 after 250K it-
+erations. Then we ﬁne-tune SpatialNet with PGG included.
+In practice, we have found the iteration number R = 1 is
+sufﬁcient, and more iterations do not lead to much gain.
+
+TemporalNet uses 1-stage hourglass model [22]. When
+training, we simply ﬁx SpatialNet and train TemporalNet
+for another 40 epochs with a learning rate of 2e-4. We ran-
+domly select a pair of images I t and I t′
+from a range-5
+temporal window (kt − t′k1 ≤ 5) in a video clip as input.
+
+4. Experiments
+
+4.1. Datasets and Evaluation
+
+MS-COCO Dataset [19] contains over 66k images with
+150k people and 1.7 million labeled keypoints, for pose es-
+timation in images. For the MS-COCO results, we follow
+the same train/val split as [21], where a held-out set of 500
+training images are used for evaluation.
+
+ICCV’17 PoseTrack Challenge Dataset [13] is a
+large-scale benchmark for multi-person articulated track-
+ing, which contains 250 video clips for training and 50 se-
+quences of videos for validation.
+
+Evaluation Metrics: We follow [13] to use AP to evalu-
+ate multi-person pose estimation and the multi-object track-
+ing accuracy (MOTA) [2] to measure tracking performance.
+
+4.2. Comparisons with the State of the art Methods
+
+We compare our model with the state-of-the-art methods
+on both pose estimation and tracking on the ICCV’17 Pose-
+Track validation set. As a common practice [13], additional
+images from MPII-Pose [1] and MS-COCO [19] are used
+for training. Table 1 demonstrates our single-frame pose
+estimation performance. We show that our model achieves
+the state-of-the-art 77.0 mAP without single-person pose
+reﬁnement. Table 2 evaluates the multi-person articulated
+tracking performance. Our model outperforms the state-
+of-the-art methods by a large margin. Compared with the
+winner of ICCV’17 PoseTrack Challenge (ProTracker [8]),
+our method obtains an improvement of 16.6% in MOTA.
+Our model further improves over the current state-of-the-
+art pose tracker (FlowTrack [34]) by 6.4% in MOTA with
+comparable single frame pose estimation accuracy, indicat-
+ing the effectiveness of our TemporalNet.
+
+4.3. Ablation Study
+
+We extensively evaluate the effect of each component in
+our framework. Table 3 summarizes the single-frame pose
+estimation results, and Table 4 the pose tracking results.
+
+Method
+ProTracker [8]
+PoseFlow [36]
+BUTDS [16]
+ArtTrack [13]
+ML Lab [38]
+FlowTrack [34]
+Ours
+
+Head
+69.6
+66.7
+79.1
+78.7
+83.8
+81.7
+83.8
+
+Shou
+73.6
+73.3
+77.3
+76.2
+84.9
+83.4
+81.6
+
+Elb
+60.0
+68.3
+69.9
+70.4
+76.2
+80.0
+77.1
+
+Wri
+49.1
+61.1
+58.3
+62.3
+64.0
+72.4
+70.0
+
+Hip
+65.6
+67.5
+66.2
+68.1
+72.2
+75.3
+77.4
+
+Knee
+58.3
+67.0
+63.5
+66.7
+64.5
+74.8
+74.5
+
+Ankl
+46.0
+61.3
+54.9
+58.4
+56.6
+67.1
+70.8
+
+Total
+60.9
+66.5
+67.8
+68.7
+72.6
+76.9
+77.0
+
+Table 1. Comparisons with the state-of-the-art methods on single-
+frame pose estimation on ICCV’17 PoseTrack Challenge Dataset.
+
+Method
+
+ArtTrack [13]
+ProTracker [8]
+BUTD2 [16]
+PoseFlow [36]
+JointFlow [6]
+FlowTrack [34]
+Ours
+
+MOTA MOTA MOTA MOTA MOTA MOTA MOTA MOTA
+Total
+Head
+66.2
+53.4
+
+Knee Ankl
+51.6
+41.7
+
+Shou
+64.2
+
+Elb
+53.2
+
+Wri
+43.7
+
+Hip
+53.0
+
+61.7
+
+71.5
+
+59.8
+
+-
+
+65.5
+
+70.3
+
+67.0
+
+-
+
+57.3
+
+56.3
+
+59.8
+
+-
+
+45.7
+
+45.1
+
+51.6
+
+-
+
+54.3
+
+55.5
+
+60.0
+
+-
+
+53.1
+
+50.8
+
+58.4
+
+-
+
+45.7
+
+37.5
+
+50.5
+
+-
+
+73.9
+
+75.9
+
+63.7
+
+56.1
+
+65.5
+
+65.1
+
+53.5
+
+55.2
+
+56.4
+
+58.3
+
+59.8
+
+65.4
+
+78.7
+
+79.2
+
+71.2
+
+61.1
+
+74.5
+
+69.7
+
+64.5
+
+71.8
+
+Table 2. Comparisons with the state-of-the-art methods on multi-
+person pose tracking on ICCV’17 PoseTrack Challenge Dataset.
+
+6.0e-5
+
+4.0e-5
+
+2.0e-5
+
+0.0
+
+0
+
+5.0e-4
+4.0e-4
+3.0e-4
+2.0e-4
+1.0e-4
+0.0
+
+iters
+
+100K 200K 300K
+(a) Pull Loss
+
+0
+
+100K 200K 300K
+(b) Push Loss
+
+iters
+
+Figure 5. Learning curves of keypoint embedding (KE) with (or-
+ange) or without (cyan) auxiliary training.
+
+100
+
+y
+c
+n
+e
+u
+q
+e
+r
+F
+
+80
+
+60
+
+40
+
+20
+
+0
+
+0
+
+1% 2% 3% 4% 5%
+
+Memory Cost Ratio
+
+n
+o
+i
+t
+a
+m
+
+i
+t
+s
+E
+ 
+e
+s
+o
+P
+
+g
+n
+i
+k
+c
+a
+r
+T
+ 
+e
+s
+o
+P
+
+Runtime Analysis
+
+161ms
+
+N x 34ms
+
+110ms
+
+123ms
+
+14700 ms
+
+21ms
+
+16ms
+
+0.57ms
+
+Faster RCNN [27]
+Resnet152-SPPE [32]
+Assoc. Embed. [19]
+SpatialNet
+
+PoseTrack [14]
+HE branch
+
+TIE branch
+Tracking algorithm
+
+(a)
+
+(b)
+
+Figure 6. (a) Histogram of the memory cost ratio between PGG
+and GBMS [4] memory cost of PGG
+memory cost of GBMS on the PoseTrack val set. Using
+the instance-agnostic pose mask, PGG reduces the memory con-
+sumption to about 1%, i.e. 100 times more efﬁcient. (b) Runtime
+analysis. CNN processing time is measured on one GTX-1060
+GPU, while PoseTrack [14] and our tracking algorithm is tested
+on a single core of a 2.4GHz CPU. N denotes the number of peo-
+ple in a frame, which is 5.97 on average for PoseTrack val set.
+
+For pose estimation, we choose [21] as our baseline,
+which proposes KE for spatial grouping. We also compare
+with one alternative embedding approach [18] for design
+justiﬁcation. In BBox [18], instance location information
+is encoded as the human bounding box (x, y, w, h) at each
+pixel. The predicted bounding boxes are then used to group
+keypoints into individuals. However, such representation
+is hard to learn due to large variations of its embedding
+space, resulting in worse pose estimation accuracy com-
+
+5670
+
+pared to KE and SIE. KE provides part-level appearance
+cues, while SIE encodes the human centroid constraints.
+When combined together, a large gain is obtained (74.0%
+vs. 70.9%/71.3%). As shown in Fig. 5, adding auxiliary
+tasks (+aux) dramatically speeds up the training of KE, by
+enforcing geometric constraints on the embedding space. It
+also facilitates representation learning and marginally en-
+hances pose estimation. As shown in Table 3, employing
+PGG signiﬁcantly improves the pose estimation accuracy
+(2.3% for KE, 3.8% for SIE, and 2.7% for both combined).
+End-to-end model training and direct grouping supervision
+together account for the improvement. Additionally, using
+the instance-agnostic pose mask, the memory consumption
+is remarkably reduced to about 1%, as shown in Fig. 6(a),
+demonstrating the efﬁciency of PGG. Combining both KE
+and SIE with PGG, further boosts the pose estimation per-
+formance to 77.0% mAP.
+
+j,k) ≈ S(pt+1
+
+j,k) ≈ K(pt+1
+
+For pose tracking, we ﬁrst build a baseline tracker based
+on KE and/or SIE. It is assumed that KE and SIE change
+smoothly in consecutive frames, K(pt
+j,k ) and
+S(pt
+j,k ). Somewhat surprisingly, such a simple
+tracker already achieves competitive performance, thanks
+to the rich geometric information contained in KE and
+SIE. Employing TemporalNet for tracking signiﬁcantly im-
+proves over the baseline tracker, because of the combina-
+tion of the holistic appearance features of HE and tem-
+poral smoothness of TIE. Finally, incorporating spatial-
+temporal PGG to reﬁne KE, SIE and TIE, further increase
+the tracking performance (69.2% vs. 71.8% MOTA). We
+also compare with some widely used alternative tracking
+metrics, namely Object Keypoint Similarity (OKS), Inter-
+section over Union (IoU) of persons and DeepMatching
+(DM) [30] for design justiﬁcation. We ﬁnd that Tempo-
+ralNet signiﬁcantly outperforms other trackers with task-
+agnostic tracking metrics. OKS only uses keypoints for
+handling occlusion, while IoU and DM only consider hu-
+man in handling fast motion. In comparison, we kill two
+birds with one stone.
+
+MS-COCO Results. Our SpatialNet substantially im-
+proves over our baseline [21] on single frame pose estima-
+tion on the MS-COCO dataset. For fair comparisons, we
+use the same train/val split as [21] for evaluation. Table 5
+reports both single-scale (sscale) and multi-scale (mscale)
+Four different scales {0.5, 1, 1.5, 2} are used
+results.
+for multi-scale inference. Our sscale SpatialNet already
+achieves competitive performance against mscale baseline.
+By multi-scale inference, we further gain a signiﬁcant im-
+provement of 3% AP. All reported results are obtained with-
+out model ensembling or pose reﬁnement [3, 21].
+
+4.4. Runtime Analysis
+
+Fig. 6 (b) analyzes the runtime performance of pose esti-
+mation and tracking. For pose estimation, we compare with
+
+Head Shou Elb Wri Hip Knee Ankl Total
+79.3 75.6 67.4 60.2 67.8 61.6 55.8 67.7
+BBox [18]
+79.8 77.7 71.7 63.4 71.4 66.3 61.4 70.9
+KE [21]
+81.4 78.8 72.1 64.2 72.2 66.8 61.7 71.3
+SIE
+82.2 80.1 74.7 67.4 75.1 69.4 64.6 74.0
+KE+SIE
+KE+SIE+aux 82.3 80.3 74.9 67.8 75.2 70.1 65.6 74.3
+81.5 80.0 74.0 65.8 73.4 68.3 65.0 73.2
+KE+PGG
+83.4 80.6 74.3 67.4 76.0 71.8 67.6 75.1
+SIE+PGG
+83.8 81.6 77.1 70.0 77.4 74.5 70.8 77.0
+Ours
+
+Table 3. Ablation study on single-frame pose estimation (AP) on
+ICCV’17 PoseTrack validation set. aux means auxiliary train-
+ing with geometric ordinal prediction. Ours (KE+SIE+aux+PGG)
+combines KE+SIE+aux with PGG for accurate pose estimation.
+
+MOTA MOTA MOTA MOTA MOTA MOTA MOTA MOTA
+Head
+Total
+56.2
+60.1
+55.8
+62.5
+56.1
+62.9
+65.7
+72.9
+67.7
+75.4
+76.0
+68.5
+68.6
+76.2
+69.2
+76.9
+78.7
+71.8
+
+Wri
+47.1
+45.5
+45.7
+55.0
+57.1
+58.1
+58.4
+58.6
+61.1
+
+Knee
+57.0
+53.6
+53.8
+63.0
+64.4
+65.4
+65.3
+66.0
+69.7
+
+Shou
+60.4
+63.6
+64.0
+73.3
+76.1
+76.4
+76.7
+77.2
+79.2
+
+Ankl
+53.7
+48.6
+48.7
+58.5
+59.4
+60.5
+60.4
+61.2
+64.5
+
+Elb
+54.5
+54.3
+54.6
+64.6
+67.0
+67.7
+67.8
+68.4
+71.2
+
+Hip
+58.4
+59.3
+59.6
+68.7
+70.9
+71.7
+71.6
+72.4
+74.5
+
+OKS
+IoU
+DM [30]
+KE
+KE+SIE
+HE
+TIE
+HE+TIE
+Ours
+
+Table 4. Ablation study on multi-person articulated tracking on
+ICCV’17 PoseTrack validation set. Ours (HE+TIE+PGG) com-
+bines HE+TIE with PGG grouping for robust tracking.
+
+Assoc. Embed. [21] (sscale)
+Assoc. Embed. [21] (mscale)
+Ours (sscale)
+Ours (mscale)
+
+AP
+0.592
+0.654
+0.650
+0.680
+
+AP .50 AP .75
+0.646
+0.816
+0.714
+0.854
+0.865
+0.714
+0.747
+0.878
+
+AP M
+0.505
+0.601
+0.570
+0.626
+
+AP L
+0.725
+0.735
+0.781
+0.761
+
+Table 5. Multi-human pose estimation performance on the subset
+of MS-COCO dataset. mscale means multi-scale testing.
+
+both top-down and bottom-up [21] approaches. The top-
+down pose estimator uses Faster RCNN [29] and a ResNet-
+152 [10] based single person pose estimator (SPPE) [34].
+Since it estimates pose for each person independently, the
+runtime grows proportionally to the number of people.
+
+Compared with [21], our SpatialNet signiﬁcantly im-
+proves the pose estimation accuracy with the increase of
+limited computational complexity. For pose tracking, we
+compare with the graph-cut based tracker (PoseTrack [14])
+and show the efﬁciency of TemporalNet.
+
+5. Conclusion
+
+We have presented a uniﬁed pose estimation and track-
+ing framework, which is composed of SpatialNet and Tem-
+poralNet: SpatialNet tackles body part detection and part-
+level spatial grouping, while TemporalNet accomplishes the
+temporal grouping of human instances. We propose to ex-
+tend KE and SIE in still images to HE appearance features
+and TIE temporally consistent geometric features in videos
+for robust online tracking. An effective and efﬁcient Pose-
+Guided Grouping module is proposed to gain the beneﬁts of
+full end-to-end learning of pose estimation and tracking.
+
+5671
+
+References
+
+[1] Mykhaylo Andriluka, Leonid Pishchulin, Peter Gehler, and
+Bernt Schiele. 2d human pose estimation: New benchmark
+and state of the art analysis.
+In The IEEE Conference on
+Computer Vision and Pattern Recognition (CVPR), 2014. 7
+
+[2] Keni Bernardin and Rainer Stiefelhagen. Evaluating mul-
+tiple object tracking performance:
+the clear mot metrics.
+EURASIP Journal on Image and Video Processing, 2008. 7
+
+[3] Zhe Cao, Tomas Simon, Shih-En Wei, and Yaser Sheikh.
+Realtime multi-person 2d pose estimation using part afﬁn-
+ity ﬁelds. In The IEEE Conference on Computer Vision and
+Pattern Recognition (CVPR), 2017. 1, 2, 3, 4, 8
+
+[4] Miguel A. Carreiraperpinan. Generalised blurring mean-
+shift algorithms for nonparametric clustering. In The IEEE
+Conference on Computer Vision and Pattern Recognition
+(CVPR), 2008. 4, 7
+
+[5] Guilhem Cheron, Ivan Laptev, and Cordelia Schmid. P-cnn:
+Pose-based cnn features for action recognition. In The IEEE
+International Conference on Computer Vision (ICCV), 2015.
+1
+
+[6] Andreas Doering, Umar Iqbal, and Juergen Gall.
+
+Joint
+ﬂow: Temporal ﬂow ﬁelds for multi person tracking. arXiv
+preprint arXiv:1805.04596, 2018. 3, 7
+
+[7] Haoshu Fang, Shuqin Xie, and Cewu Lu. Rmpe: Re-
+arXiv preprint
+
+gional multi-person pose estimation.
+arXiv:1612.00137, 2016. 2
+
+[8] Rohit Girdhar, Georgia Gkioxari, Lorenzo Torresani,
+Manohar Paluri, and Du Tran. Detect-and-track: Efﬁcient
+pose estimation in videos. arXiv preprint arXiv:1712.09184,
+2017. 2, 3, 7
+
+[9] Kaiming He, Georgia Gkioxari, Piotr Doll´ar, and Ross Gir-
+shick. Mask r-cnn. arXiv preprint arXiv:1703.06870, 2017.
+1, 2, 5
+
+[10] Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun.
+Deep residual learning for image recognition. In The IEEE
+Conference on Computer Vision and Pattern Recognition
+(CVPR), 2016. 8
+
+[11] Eldar Insafutdinov, Mykhaylo Andriluka, Leonid Pishchulin,
+Siyu Tang, Evgeny Levinkov, Bjoern Andres, Bernt Schiele,
+and Saarland Informatics Campus. Arttrack: Articulated
+multi-person tracking in the wild. In The IEEE Conference
+on Computer Vision and Pattern Recognition (CVPR), 2017.
+2, 3
+
+[12] Eldar
+
+Insafutdinov, Leonid Pishchulin, Bjoern Andres,
+Mykhaylo Andriluka, and Bernt Schiele. Deepercut: A
+deeper, stronger, and faster multi-person pose estimation
+model.
+In European Conference on Computer Vision
+(ECCV), 2016. 1, 2, 3
+
+[13] U. Iqbal, A. Milan, M. Andriluka, E. Ensafutdinov, L.
+Pishchulin, J. Gall, and Schiele B. PoseTrack: A bench-
+mark for human pose estimation and tracking. In The IEEE
+Conference on Computer Vision and Pattern Recognition
+(CVPR), 2018. 7
+
+[15] Max Jaderberg, Volodymyr Mnih, Wojciech Marian Czar-
+necki, Tom Schaul, Joel Z Leibo, David Silver, and Koray
+Kavukcuoglu. Reinforcement learning with unsupervised
+auxiliary tasks. arXiv preprint arXiv:1611.05397, 2016. 4
+
+[16] Sheng Jin, Xujie Ma, Zhipeng Han, Yue Wu, Wei Yang,
+Wentao Liu, Chen Qian, and Wanli Ouyang. Towards multi-
+person pose tracking: Bottom-up and top-down methods. In
+ICCV PoseTrack Workshop, 2017. 2, 3, 7
+
+[17] Shu Kong and Charless Fowlkes. Recurrent pixel embedding
+arXiv preprint arXiv:1712.08273,
+
+for instance grouping.
+2017. 4
+
+[18] Xiaodan Liang, Yunchao Wei, Xiaohui Shen, Jianchao
+Yang, Liang Lin, and Shuicheng Yan. Proposal-free net-
+work for instance-level object segmentation. arXiv preprint
+arXiv:1509.02636, 2015. 7, 8
+
+[19] Tsung-Yi Lin, Michael Maire, Serge Belongie, James Hays,
+Pietro Perona, Deva Ramanan, Piotr Doll´ar, and C Lawrence
+Zitnick. Microsoft coco: Common objects in context.
+In
+European Conference on Computer Vision (ECCV), 2014. 7
+[20] Wentao Liu, Jie Chen, Cheng Li, Chen Qian, Xiao Chu, and
+Xiaolin Hu. A cascaded inception of inception network with
+attention modulated feature fusion for human pose estima-
+tion.
+In The Thirty-Second AAAI Conference on Artiﬁcial
+Intelligence, 2018. 2
+
+[21] Alejandro Newell, Zhiao Huang, and Jia Deng. Associa-
+tive embedding: End-to-end learning for joint detection and
+grouping.
+In Advances in Neural Information Processing
+Systems (NIPS), 2017. 1, 2, 3, 4, 7, 8
+
+[22] Alejandro Newell, Kaiyu Yang, and Jia Deng. Stacked hour-
+glass networks for human pose estimation. In European Con-
+ference on Computer Vision (ECCV), 2016. 2, 7
+
+[23] Xuecheng Nie, Jiashi Feng, Junliang Xing, and Shuicheng
+Yan. Generative partition networks for multi-person pose
+estimation. arXiv preprint arXiv:1705.07422, 2017. 2, 3, 4
+
+[24] George Papandreou, Tyler Zhu, Liang-Chieh Chen, Spyros
+Gidaris, Jonathan Tompson, and Kevin Murphy. Person-
+lab: Person pose estimation and instance segmentation with
+a bottom-up, part-based, geometric embedding model. arXiv
+preprint arXiv:1803.08225, 2018. 2, 3, 4
+
+[25] George Papandreou, Tyler Zhu, Nori Kanazawa, Alexander
+Toshev, Jonathan Tompson, Chris Bregler, and Kevin Mur-
+phy. Towards accurate multi-person pose estimation in the
+wild. arXiv preprint arXiv:1701.01779, 2017. 1, 2
+
+[26] Christian Payer, Thomas Neff, Horst Bischof, Martin
+Urschler, and Darko ˇStern.
+Simultaneous multi-person
+detection and single-person pose estimation with a single
+heatmap regression network. In ICCV PoseTrack Workshop,
+2017. 3
+
+[27] Leonid Pishchulin, Eldar Insafutdinov, Siyu Tang, Bjoern
+Andres, Mykhaylo Andriluka, Peter V Gehler, and Bernt
+Schiele. Deepcut: Joint subset partition and labeling for
+multi person pose estimation. In The IEEE Conference on
+Computer Vision and Pattern Recognition (CVPR), 2016. 2,
+3
+
+[14] Umar Iqbal, Anton Milan, and Juergen Gall. Pose-track:
+arXiv
+
+Joint multi-person pose estimation and tracking.
+preprint arXiv:1611.07727, 2016. 1, 2, 3, 7, 8
+
+[28] Charles R Qi, Hao Su, Matthias Nießner, Angela Dai,
+Mengyuan Yan, and Leonidas J Guibas. Volumetric and
+multi-view cnns for object classiﬁcation on 3d data. In The
+
+5672
+
+IEEE Conference on Computer Vision and Pattern Recogni-
+tion (CVPR). 4
+
+[29] Shaoqing Ren, Kaiming He, Ross Girshick, and Jian Sun.
+Faster R-CNN: Towards real-time object detection with re-
+gion proposal networks. In Advances in Neural Information
+Processing Systems (NIPS), 2015. 2, 8
+
+[30] Jerome Revaud, Philippe Weinzaepfel, Zaid Harchaoui, and
+Cordelia Schmid. Deepmatching: Hierarchical deformable
+dense matching. International Journal of Computer Vision
+(IJCV), 2015. 8
+
+[31] Florian Schroff, Dmitry Kalenichenko, and James Philbin.
+Facenet: A uniﬁed embedding for face recognition and clus-
+tering.
+In The IEEE Conference on Computer Vision and
+Pattern Recognition (CVPR), 2015. 5
+
+[32] Steven C Suddarth and YL Kergosien. Rule-injection hints
+as a means of improving network performance and learning
+time. In Neural Networks. 1990. 4
+
+[33] Shih-En Wei, Varun Ramakrishna, Takeo Kanade, and Yaser
+Sheikh. Convolutional pose machines. In The IEEE Confer-
+ence on Computer Vision and Pattern Recognition (CVPR),
+2016. 2
+
+[34] Bin Xiao, Haiping Wu, and Yichen Wei. Simple baselines
+for human pose estimation and tracking. In European Con-
+ference on Computer Vision (ECCV), 2018. 2, 3, 7, 8
+
+[35] Shuqin Xie, Zitian Chen, Chao Xu, and Cewu Lu. Environ-
+ment upgrade reinforcement learning for non-differentiable
+multi-stage pipelines. In The IEEE Conference on Computer
+Vision and Pattern Recognition (CVPR), 2018. 3
+
+[36] Yuliang Xiu, Jiefeng Li, Haoyu Wang, Yinghong Fang, and
+Cewu Lu. Pose ﬂow: Efﬁcient online pose tracking. arXiv
+preprint arXiv:1802.00977, 2018. 2, 7
+
+[37] Qian Yu, Xiaobin Chang, Yi-Zhe Song, Tao Xiang, and Tim-
+othy M Hospedales. The devil is in the middle: Exploiting
+mid-level representations for cross-domain instance match-
+ing. arXiv preprint arXiv:1711.08106, 2017. 5
+
+[38] Xiangyu Zhu, Yingying Jiang, and Zhenbo Luo. Multi-
+person pose estimation for posetrack with enhanced part
+afﬁnity ﬁelds. In ICCV PoseTrack Workshop, 2017. 3, 7
+
+5673
+
+

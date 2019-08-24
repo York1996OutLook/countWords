@@ -1,0 +1,932 @@
+Deep ChArUco: Dark ChArUco Marker Pose Estimation
+
+Danying Hu, Daniel DeTone, and Tomasz Malisiewicz
+
+{dhu,ddetone,tmalisiewicz}@magicleap.com
+
+Magic Leap, Inc.
+
+Abstract
+
+ChArUco boards are used for camera calibration,
+monocular pose estimation, and pose veriﬁcation in both
+robotics and augmented reality.
+Such ﬁducials are de-
+tectable via traditional computer vision methods (as found
+in OpenCV) in well-lit environments, but classical meth-
+ods fail when the lighting is poor or when the image un-
+dergoes extreme motion blur. We present Deep ChArUco,
+a real-time pose estimation system which combines two
+custom deep networks, ChArUcoNet and ReﬁneNet, with
+the Perspective-n-Point (PnP) algorithm to estimate the
+marker’s 6DoF pose. ChArUcoNet is a two-headed marker-
+speciﬁc convolutional neural network (CNN) which jointly
+outputs ID-speciﬁc classiﬁers and 2D point locations. The
+2D point locations are further reﬁned into subpixel coor-
+dinates using ReﬁneNet. Our networks are trained using
+a combination of auto-labeled videos of the target marker,
+synthetic subpixel corner data, and extreme data augmenta-
+tion. We evaluate Deep ChArUco in challenging low-light,
+high-motion, high-blur scenarios and demonstrate that our
+approach is superior to a traditional OpenCV-based method
+for ChArUco marker detection and pose estimation.
+
+1. Introduction
+
+In this paper, we refer to computer-vision-friendly 2D
+patterns that are unique and have enough points for 6DoF
+pose estimation as ﬁducials or markers. ArUco mark-
+ers [1, 2] and their derivatives, namely ChArUco mark-
+ers, are frequently used in augmented reality and robotics.
+For example, Fiducial-based SLAM [3, 4] reconstructs the
+world by ﬁrst placing a small number of ﬁxed and unique
+patterns in the world. The pose of a calibrated camera can
+be estimated once at least one such marker is detected. But
+as we will see, traditional ChArUco marker detection sys-
+tems are surprisingly frail. In the following pages, we mo-
+tivate and explain our recipe for creating a state-of-the-art
+Deep ChArUco marker detector based on deep neural net-
+works.
+
+Figure 1. Deep ChArUco is an end-to-end system for ChArUco
+marker pose estimation from a single image. Deep ChArUco is
+composed of ChArUcoNet for point detection (Section 3.1), Re-
+ﬁneNet for subpixel reﬁnement (Section 3.2), and the Perspective-
+n-Point (PnP) algorithm for pose estimation (Section 3.3). For this
+difﬁcult image, OpenCV does not detect enough points to deter-
+mine a marker pose.
+
+We focus on one of the most popular class of ﬁducials in
+augmented reality, namely ChArUco markers. In this paper,
+we highlight the scenarios under which traditional computer
+vision techniques fail to detect such ﬁducials, and present
+Deep ChArUco, a deep convolutional neural network sys-
+tem trained to be accurate and robust for ChArUco marker
+detection and pose estimation (see Figure 1). The main con-
+tributions of this work are:
+
+1. A state-of-the-art and real-time marker detector that
+improves the robustness and accuracy of ChArUco pat-
+tern detection under extreme lighting and motion
+
+2. Two novel neural network architectures for point ID
+
+classiﬁcation and subpixel reﬁnement
+
+3. A novel training dataset collection recipe involving
+
+auto-labeling images and synthetic data generation
+
+Overview: We discuss both traditional and deep
+learning-based related work in Section 2. We present
+ChArUcoNet, our two-headed custom point detection net-
+work, and ReﬁneNet, our corner reﬁnement network in
+Section 3. Finally, we describe both training and testing
+ChArUco datasets in Section 4, evaluation results in Sec-
+tion 5, and conclude with a discussion in Section 6.
+
+8436
+
+2. Related Work
+
+2.1. Traditional ChArUco Marker Detection
+
+A ChArUco board is a chessboard with ArUco markers
+embedded inside the white squares (see Figure 2). ArUco
+markers are modern variants of earlier tags like ARTag [5]
+and AprilTag [6]. A traditional ChArUco detector will ﬁrst
+detect the individual ArUco markers. The detected ArUco
+markers are used to interpolate and reﬁne the position of
+the chessboard corners based on the predeﬁned board lay-
+out. Because a ChArUco board will generally have 10 or
+more points, ChArUco detectors allow occlusions or par-
+tial views when used for pose estimation.
+In the classi-
+cal OpenCV method [7], the detection of a given ChArUco
+board is equivalent to detecting each chessboard inner cor-
+ner associated with a unique identiﬁer. In our experiments,
+we use the 5 × 5 ChArUco board which contains the ﬁrst
+12 elements of the DICT_5x5_50 ArUco dictionary as
+shown in Figure 2.
+
+detected objects. Deep Nets for keypoint estimation are
+popular in the human pose estimation literature. Since for
+a rigid object, as long as we can repeatably detect a smaller
+yet sufﬁcient number of 3D points in the 2D image, we can
+perform PnP to recover the camera pose. Albeit indirectly,
+keypoint-based methods do allow us to recover pose using
+a hybrid deep (for point detection) and classical (for pose
+estimation) system. One major limitation of most keypoint
+estimation deep networks is that they are too slow because
+of the expensive upsampling operations in hourglass net-
+works [13]. Another relevant class of techniques is those
+designed for human keypoint detection such as faces, body
+skeletons [14], and hands [15].
+
+Figure 3. Deﬁning ChArUco Point IDs. These three examples
+show different potential structures in the pattern that could be used
+to deﬁne a single ChArUco board. a) Every possible corner has
+an ID. b) Interiors of ArUco patterns chosen as IDs. c) Interior
+chessboard of 16 ids, from id 0 of the bottom left corner to id 15
+of the top right corner (our solution).
+
+2.4. Deep Nets for Feature Point Detection
+
+The last class of deep learning-based techniques relevant
+to our discussion is deep feature point detection systems–
+methods that are deep replacements for classical systems
+like SIFT [17] and ORB [18]. Deep Convolutional Neu-
+ral Networks like DeTone et al’s SuperPoint system [16]
+are used for joint feature point and descriptor computa-
+tion. SuperPoint is a single real-time uniﬁed CNN which
+performs the roles of multiple deep modules inside earlier
+deep learning for interest-point systems like the Learned In-
+variant Feature Transform (LIFT) [19]. Since SuperPoint
+networks are designed for real-time applications, they are a
+starting point for our own Deep ChArUco detector.
+
+3. Deep ChArUco: A System for ChArUco De-
+
+tection and Pose Estimation
+
+In this section, we describe the fully convolutional neu-
+ral network we used for ChArUco marker detection. Our
+network is an extension of SuperPoint [16] which includes
+a custom head speciﬁc to ChArUco marker point identiﬁ-
+cation. We develop a multi-headed SuperPoint variant, suit-
+able for ChArUco marker detection (see architecture in Fig-
+ure 4). Instead of using a descriptor head, as was done in
+the SuperPoint paper, we use an id-head, which directly re-
+gresses to corner-speciﬁc point IDs. We use the same point
+
+8437
+
+Figure 2. ChArUco = Chessboard + ArUco. Pictured is a 5x5
+ChArUco board which contains 12 unique ArUco patterns. For
+this exact conﬁguration, each 4x4 chessboard inner corner is as-
+signed a unique ID, ranging from 0 to 15. The goal of our algo-
+rithm is to detect these unique 16 corners and IDs.
+
+2.2. Deep Nets for Object Detection
+
+Deep Convolutional Neural Networks have become the
+standard tool of choice for object detection since 2015 (see
+systems like YOLO [8], SSD [9], and Faster R-CNN [10]).
+While these systems obtain impressive multi-category ob-
+ject detection results, the resulting bounding boxes are typ-
+ically not suitable for pose inference, especially the kind of
+high-quality 6DoF pose estimation that is necessary for aug-
+mented reality. More recently, object detection frameworks
+like Mask-RCNN [11] and PoseCNN [12] are building pose
+estimation capabilities directly into their detectors.
+
+2.3. Deep Nets for Keypoint Estimation
+
+Keypoint-based neural networks are usually fully-
+convolutional and return a set of skeleton-like points of the
+
+Figure 4. Two-Headed ChArUcoNet and ReﬁneNet. ChArUcoNet is a SuperPoint-like [16] network for detecting a speciﬁc ChArUco
+board. Instead of a descriptor head, we use a point ID classiﬁer head. One of the network heads detects 2D locations of ChArUco boards
+in X and the second head classiﬁes them in C. Both heads output per-cell distributions, where each cell is an 8x8 region of pixels. We use
+16 unique points IDs for our 5x5 ChArUco board. ChArUcoNet’s output is further reﬁned via a ReﬁneNet to obtain subpixel locations.
+
+localization head as SuperPoint – this head will output a
+distribution over pixel location for each 8x8 pixel region in
+the original image. This allows us to detect point locations
+at full image resolution without using an explicit decoder.
+
+Deﬁning IDs. In order to adapt SuperPoint to ChArUco
+marker detection, we must ask ourselves: which points do
+we want to detect? In general, there are multiple strategies
+for deﬁning point IDs (see Figure 3). For simplicity, we de-
+cided to use the 4x4 grid of interior chessboard corners for
+point localization, giving a total of 16 different point IDs to
+be detected. The ID classiﬁcation head will output distri-
+bution over 17 possibilities: a cell can belong to one of the
+16 corner IDs or an additional “dustbin” none-of-the-above
+class. This allows a direct comparison with the OpenCV
+method since both classical and deep techniques attempt to
+localize the same 16 ChArUco board-speciﬁc points.
+
+3.1. ChArUcoNet Network Architecture
+
+The ChArUcoNet architecture is identical to that of the
+SuperPoint [16] architecture, with one exception - the de-
+scriptor head in the SuperPoint network is replaced with a
+ChArUco ID classiﬁcation head C as shown in Figure 4.
+
+The network uses a VGG-style encoder to reduce the
+dimensionality of the image. The encoder consists of
+3x3 convolutional layers, spatial downsampling via pooling
+and non-linear activation functions. There are three max-
+pooling layers which each reduce the spatial dimensionality
+of the input by a factor of two, resulting in a total spatial
+reduction by a factor of eight. The shared encoder out-
+puts features with spatial dimension Hc × Wc. We deﬁne
+Hc = H/8 and Wc = W/8 for an image sized H ×W . The
+keypoint detector head outputs a tensor X ∈ RHc⇥Wc⇥65.
+Let Nc be the number of ChArUco points to be detected
+(e.g. for a 4x4 ChArUco grid Nc = 16). The ChArUco
+ID classiﬁcation head outputs a classiﬁcation tensor C ∈
+RHc⇥Wc⇥(Nc+1) over the Nc classes and a dustbin class,
+resulting in Nc + 1 total classes. The ChArUcoNet net-
+work was designed for speed–the network weights take 4.8
+
+Megabytes and the network is able to process 320 × 240
+sized images at approximately 100fps using an NVIDIA R 
+GeForce GTX 1080 GPU.
+
+3.2. ReﬁneNet Network Architecture
+
+To improve pose estimation quality, we additionally per-
+form subpixel localization – we reﬁne the detected integer
+corner locations into subpixel corner locations using Re-
+ﬁneNet, a deep network trained to produce subpixel co-
+ordinates. ReﬁneNet, our deep counterpart to OpenCV’s
+cornerSubPix, takes as input a 24 × 24 image patch and
+outputs a single subpixel corner location at 8× the resolu-
+tion of the central 8 × 8 region. ReﬁneNet performs soft-
+max classiﬁcation over an 8× enlarged central region – Re-
+ﬁneNet ﬁnds the peak inside the 64 × 64 subpixel region (a
+4096-way classiﬁcation problem). ReﬁneNet weights take
+up only 4.1 Megabytes due to a bottleneck layer which con-
+verts the 128D activations into 8D before the ﬁnal 4096D
+mapping. Both ChArUcoNet and ReﬁneNet use the same
+VGG-based backbone as SuperPoint [16].
+
+For a single imaged ChArUco pattern, there will be at
+most 16 corners to be detected, so using ReﬁneNet is as
+expensive as 16 additional forward passes on a network with
+24 × 24 inputs.
+
+3.3. Pose Estimation via PnP
+
+Given a set of 2D point locations and a known physi-
+cal marker size we use the Perspective-n-Point (PnP) algo-
+rithm [20] to compute the ChArUco pose w.r.t the camera.
+PnP requires knowledge of K, the camera intrinsics, so we
+calibrate the camera before collecting data. We calibrated
+the camera until the reprojection error fell below 0.15 pix-
+els. We use OpenCV’s solvePnPRansac to estimate the
+ﬁnal pose in our method as well as in the OpenCV baseline.
+
+4. ChArUco Datasets
+
+To train and evaluate our Deep ChArUco Detection sys-
+tem, we created two ChArUco datasets. The ﬁrst dataset
+
+8438
+
+focuses on diversity and is used for training the ChArUco
+detector (see Figure 5). The second dataset contains short
+video sequences which are designed to evaluate system per-
+formance as a function of illumination (see Figure 7).
+
+4.1. Training Data for ChArUcoNet
+
+We collected 22 short video sequences from a cam-
+era with the ChArUco pattern in a random but static pose
+in each video. Some of the videos include a ChArUco
+board taped to a monitor with the background changing,
+and other sequences involve lighting changes (starting with
+good lighting). Videos frames are extracted into the positive
+dataset with the resolution of 320 × 240, resulting in a to-
+tal of 7, 955 gray-scale frames. Each video sequence starts
+with at least 30 frames of good lighting. The ground truth
+of each video is auto-labeled from the average of the ﬁrst 30
+frames using the classical OpenCV method, as the OpenCV
+detector works well with no motion and good lighting.
+
+The negative dataset contains 91, 406 images in to-
+tal, including 82, 783 generic images from the MS-COCO
+dataset 1 and 8, 623 video frames collected in the ofﬁce. Our
+in-ofﬁce data contains images of vanilla chessboards, and
+adding them to our negatives was important for improving
+overall model robustness.
+
+We collect
+
+frames from videos depicting “other”
+ChArUco markers (i.e., different than the target marker de-
+picted in Figure 2). For these videos, we treated the clas-
+siﬁer IDs as negatives but treated the corner locations as
+“ignore.”
+
+g
+u
+a
+
+a
+t
+a
+d
+o
+n
+
+g
+u
+a
+
+a
+t
+a
+d
++
+
+Figure 5. ChArUco Training Set. Examples of ChArUco dataset
+training examples, before and after data augmentation.
+
+4.2. Data Augmentation for ChArUcoNet
+
+With data augmentation, each frame will undergo a ran-
+dom homographic transform and a set of random combina-
+tion of synthetic distortions under certain probability (see
+Table 1) during the training stage, which dramatically in-
+creases the diversity of the input dataset. The order and the
+extent of the applied distortion effects are also randomly se-
+lected for each frame. For example, Figure 5 shows frames
+from the training sequences (top row) and augmented with
+a set of distortions (bottom row).
+
+Effect
+
+Probability
+
+additive Gaussian noise
+motion blur
+Gaussian blur
+speckle noise
+brightness rescale
+shadow or spotlight effect
+homographic transform
+
+0.5
+0.5
+0.25
+0.5
+0.5
+0.5
+
+1.0 (positive set) / 0.0 (negative set)
+
+Table 1. Synthetic Effects Applied For Data Augmentation.
+During training we transform the images to capture more illumi-
+nation and pose variations.
+
+4.3. Synthetic Subpixel Corners for ReﬁneNet
+
+We train ReﬁneNet using a large database of syntheti-
+cally generated corner images. Each synthetic training im-
+age is 24×24 pixels and contains exactly one a ground-truth
+corner within the central 8 × 8 pixel region. For examples
+of such training image patches, see Figure 6.
+
+4.4. Evaluation Data
+
+For evaluation, we captured 26 videos of 1000 frames
+at 30Hz from a Logitech R  webcam (see examples in Fig-
+ure 7). Each video in this set focuses on one of the following
+effects:
+
+• Lighting brightness (20 videos with 10 different light-
+
+ing conﬁgurations)
+
+• Shadow / spotlight (3 videos)
+• Motion blur (3 videos)
+
+5. Evaluation and Results
+
+We compare our Deep ChArUco detector against a tradi-
+tional OpenCV-based ChArUco marker detector in a frame-
+by-frame manner. We ﬁrst evaluate both systems’ ability
+
+Figure 6. ReﬁneNet Training Images. 40 examples of syntheti-
+cally generated image patches for training ReﬁneNet.
+
+1MS-COCO 2014 train: http://images.cocodataset.org/zips/train2014.zip
+
+Figure 7. ChArUco Evaluation Set. Examples of frames from the
+ChArUco evaluation set. From left to right, each frame focuses on
+lighting (10lux), shadow, motion blur.
+
+8439
+
+Figure 8. Synthetic Motion Blur Test Example. Top row: input image applied with varying motion blur effect from kernel size 0 to 10;
+middle row: corners and ids detected by OpenCV detector, with detection accuracy [1. 1. 1. 1. 1. 0.125 0. 0. 0. 0. 0. 0. ]; bottom row:
+corners and ids detected from the Deep ChArUco, with detection accuracy [1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1.]
+
+to detect the 16 ChArUco markers for a ﬁxed set of im-
+ages, under increasing blur and lighting changes (synthetic
+effects). Then, on real sequences, we estimate the pose of
+the ChArUco board based on the Perspective-n-Point algo-
+rithm and determine if the pose’s reprojection error is below
+a threshold (typically 3 pixels). Below, we outline the met-
+rics used in our evaluation.
+
+• Corner Detection Accuracy (accuracy of ChArU-
+
+coNet)
+
+• ChArUco Pose Estimation Accuracy (combined accu-
+
+racy of ChArUcoNet and ReﬁneNet)
+
+A corner is correctly detected when the location is within
+a 3-pixel radius of the ground truth, and the point ID is iden-
+tiﬁed correctly based on ChArUcoNet ID classiﬁer. The
+corner detection accuracy is the ratio between the number
+of accurately detected corners and 16, the total number of
+marker corners. The average accuracy is calculated as the
+mean of detection accuracy across 20 images with different
+static poses. To quantitatively measure the pose estimation
+accuracy in each image frame, we use the mean reprojec-
+tion error ✏re as deﬁned below:
+
+✏re =
+
+Pn
+
+i=1 |PCi − ci|
+
+n
+
+,
+
+(1)
+
+where P is the camera projection matrix containing intrin-
+sic parameters. Ci represents the 3D location of a detected
+corner computed from the ChArUco pose, ci denotes the 2d
+pixel location of the corresponding corner in the image. n
+(≤ 16) is the total number of the detected ChArUco corners.
+
+5.1. Evaluation using synthetic effects
+
+In this section, we compare the overall accuracy of the
+Deep ChArUco detector and the OpenCV detector under
+synthetic effects, in which case, we vary the magnitude of
+the effect linearly. The ﬁrst two experiments are aimed to
+evaluate the accuracy of ChArUcoNet output, without rely-
+ing on ReﬁneNet.
+
+In each of our 20 synthetic test scenarios, we start with
+an image taken in an ideal environment - good lighting and
+random static pose (i.e., minimum motion blur), and gradu-
+ally add synthetic motion blur and darkening.
+
+Figure 9. Synthetic Motion Blur Test. We compare Deep
+ChArUco with the OpenCV approach on 20 random images from
+our test-set while increasing the amount of motion blur.
+
+5.1.1 Synthetic Motion Blur Test
+
+In the motion blur test, a motion blur ﬁlter along the hori-
+zontal direction was applied to the original image with the
+varying kernel size to simulate the different degrees of mo-
+tion blur. In Figure 9, we plot average detection accuracy
+versus the degree of motion blur (i.e., the kernel size). It
+shows that Deep ChArUco is much more resilient to the
+motion blur effect compared to the OpenCV approach. Fig-
+ure 8 shows an example of increasing motion blur and the
+output of both detectors. Both the visual examples and re-
+sulting plot show that OpenCV methods start to completely
+fail (0% detection accuracy) for kernel sizes of 6 and larger,
+while Deep ChArUco only degrades a little bit in perfor-
+mance (94% detection accuracy), even under extreme blur.
+
+5.1.2 Synthetic Lighting Test
+
+In the lighting test, we compare both detectors under differ-
+ent lighting conditions created synthetically. We multiply
+the original image with a rescaling factor of 0.6k to simulate
+increasing darkness. In Figure 11, we plot average detection
+accuracy versus the darkness degree, k. Figure 10 shows an
+example of increasing darkness and the output of both de-
+
+8440
+
+Figure 10. Synthetic Lighting Test Example. Top row: input image applied with a brightness rescaling factor 0.6k with k from 0 to 10;
+middle row: corners and ids detected by OpenCV detector with detection accuracy [1. 1. 1. 1. 0. 0. 0. 0. 0. 0. 0.]; bottom row: corners
+and ids detected from the Deep ChArUco with detection accuracy [1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 0. ]
+
+tectors. We note that Deep ChArUco is able to detect mark-
+ers in many cases where the image is “perceptually black”
+(see last few columns of Figure 10). Deep ChArUco detects
+more than 50% of the corners even when the brightness is
+rescaled by a factor of 0.69 ∼ .01, while the OpenCV de-
+tector fails at the rescaling factor of 0.64 ∼ .13.
+
+Figure 11. Synthetic Lighting Test. We compare Deep ChArUco
+with the OpenCV approach on 20 random images from our test-set
+while increasing the amount of darkness.
+
+5.2. Evaluation on real sequences
+
+First, we qualitatively show the accuracy of both detec-
+tors in real video clips captured in different scenarios as de-
+scribed in section 4.4, “Evaluation Data.” Figure 13 shows
+the results of both detectors under extreme lighting and mo-
+tion. Notice that the Deep ChArUco detector signiﬁcantly
+outperforms the OpenCV detector under these extreme sce-
+narios. Overall, our method detects more correct keypoints
+where a minimum number of 4 correspondences is neces-
+sary for pose estimation.
+
+In our large experiment, we evaluate across all 26, 000
+frames in the 26-video dataset, without adding synthetic ef-
+fects. We plot the fraction of correct poses vs. pose correct-
+ness threshold (as measured by reprojection error) in Fig-
+ure 12. Overall, we see that the Deep ChArUco system
+exhibits a higher detection rate (97.4% vs. 68.8% under
+a 3-pixel reprojection error threshold) and lower pose er-
+ror compared to the traditional OpenCV detector. For each
+
+sequence in this experiment, Table 3 lists the ChArUco de-
+tection rate (where ✏re < 3.0) and the mean ✏re.
+
+For sequences at 1 and 0.3 lux, OpenCV is unable to
+return a pose–they are too dark. For sequences with shad-
+ows, Deep ChArUco detects a good pose 100% of the time,
+compared to 36% for OpenCV. For videos with motion blur,
+Deep ChArUco works 78% of the time, compared to 27%
+for OpenCV. For a broad range of “bright enough” scenar-
+ios ranging from 3 lux to 700 lux, both Deep ChArUco and
+OpenCV successfully detect a pose 100% of the time, but
+Deep ChArUco has slightly lower reprojection error, ✏re on
+most sequences.2
+
+5.3. Deep ChArUco Timing Experiments
+
+At this point, it is clear that Deep ChArUco works well
+under extreme lighting conditions, but is it fast enough for
+real-time applications? We offer three options in network
+conﬁguration based on the application scenarios with dif-
+ferent requirements:
+
+• ChArUcoNet + ReﬁneNet: This is the recommended
+conﬁguration for the best accuracy under difﬁcult con-
+ditions like motion blur, low light, and strong imaging
+noise, but with longest post-processing time.
+
+• ChArUcoNet + cornerSubPix: For comparable accu-
+racy in well-lit environment with less imaging noise,
+this conﬁguration is recommended with moderate
+post-processing time.
+
+• ChArUcoNet + NoReﬁne: This conﬁguration is pre-
+ferred when only the rough pose of the ChArUco pat-
+tern is required, especially in a very noisy environment
+where cornerSubPix will fail. The processing time is
+therefore the shortest as the image only passes through
+one CNN.
+
+We compare the average processing speed of 320 × 240
+sized images using each of the above three conﬁgurations
+in Table 2. The reported framerate is an average across the
+evaluation videos described in Section 4.4. Experiments are
+performed using an NVIDIA R  GeForce GTX 1080 GPU.
+Since ChArUcoNet is fully convolutional, it is possible to
+
+2For per-video analysis on the 26 videos in our evaluation dataset,
+
+please see the Appendix.
+
+8441
+
+Video
+0.3lux
+0.3lux
+1lux
+1lux
+3lux
+3lux
+5lux
+5lux
+10lux
+10lux
+30lux
+30lux
+50lux
+50lux
+100lux
+100lux
+400lux
+400lux
+700lux
+700lux
+shadow 1
+shadow 2
+shadow 3
+motion 1
+motion 2
+motion 3
+
+deep acc
+
+cv acc
+
+deep ✏re
+
+100
+100
+100
+100
+100
+100
+100
+100
+100
+100
+100
+100
+100
+100
+100
+100
+100
+100
+100
+100
+100
+100
+100
+74.1
+78.8
+80.3
+
+0
+0
+0
+0
+
+100
+100
+100
+100
+100
+100
+100
+100
+100
+100
+100
+100
+100
+100
+100
+100
+42.0
+30.1
+36.9
+16.3
+32.1
+31.1
+
+0.427 (0.858)
+0.388 (0.843)
+0.191 (0.893)
+0.195 (0.913)
+0.098 (0.674)
+0.097 (0.684)
+0.087 (0.723)
+0.091 (0.722)
+0.098 (0.721)
+0.097 (0.738)
+0.100 (0.860)
+0.100 (0.817)
+0.103 (0.736)
+0.102 (0.757)
+0.121 (0.801)
+0.100 (0.775)
+0.086 (0.775)
+0.085 (0.750)
+0.102 (0.602)
+0.107 (0.610)
+0.254 (0.612)
+0.284 (0.618)
+0.285 (0.612)
+1.591 (0.786)
+1.347 (0.788)
+1.347 (0.795)
+
+cv ✏re
+nan
+nan
+nan
+nan
+0.168
+0.164
+0.137
+0.132
+0.106
+0.105
+0.092
+0.088
+0.101
+0.099
+0.107
+0.118
+0.093
+0.093
+0.116
+0.120
+0.122
+0.130
+0.141
+0.154
+0.160
+0.147
+
+Table 3. Deep ChArUco vs OpenCV Individual Video Sum-
+mary. We report the pose detection accuracy (percentage of
+frames with reprojection error less than 3 pixels) as well as the
+mean reprojection error, ✏re, for each of our 26 testing sequences.
+Notice that OpenCV is unable to return a marker pose for images
+at 1 lux or darker (indicated by nan). The deep reprojection er-
+ror column also lists the error without ReﬁneNet in parenthesis.
+ReﬁneNet reduces the reprojection error in all cases except the
+motion blur scenario, because in those cases the “true corner” is
+outside of the central 8 × 8 reﬁnement region.
+
+ogy. The key ingredients to our method are the following:
+ChArUcoNet, a CNN for pattern-speciﬁc keypoint detec-
+tion, ReﬁneNet, a subpixel localization network, a custom
+ChArUco pattern-speciﬁc dataset, comprising extreme data
+augmentation and proper selection of visually similar pat-
+terns as negatives. The ﬁnal Deep ChArUco system is ready
+for real-time applications requiring marker-based pose esti-
+mation.
+
+Furthermore, we used a speciﬁc ChArUco marker as an
+example in this work. By replacing the ChArUco marker
+with another pattern and collecting a new dataset (with
+manual labeling if the automatic labeling is too hard to
+achieve), the same training procedure could be repeated to
+produce numerous pattern-speciﬁc networks. Future work
+will focus on multi-pattern detection, integrating ChArU-
+coNet and ReﬁneNet into one model, and pose estimation
+of non-planar markers.
+
+8442
+
+Figure 12. Deep ChArUco vs OpenCV across entire evaluation
+dataset. Pose accuracy vs. reprojection error ✏re threshold is com-
+puted across all 26, 000 frames in the 26 videos of our evalua-
+tion set. Deep ChArUco exhibits higher pose estimation accuracy
+(97.4% vs. 68.8% for OpenCV) under a 3 pixel reprojection error
+threshold.
+
+Conﬁgurations
+
+Approx. fps (Hz)
+
+ChArUcoNet + ReﬁneNet
+ChArUcoNet + cornerSubPix
+ChArUcoNet + NoReﬁne
+OpenCV detector + cornerSubPix
+OpenCV detector + NoReﬁne
+
+24.9
+98.6
+100.7
+99.4
+101.5
+
+Table 2. Deep ChArUco Timing Experiments. We present tim-
+ing results for ChArUcoNet running on 320 × 240 images in three
+conﬁgurations: with ReﬁneNet, with an OpenCV subpixel reﬁne-
+ment step, and without reﬁnement. Additionally, we also list the
+timing performance of OpenCV detector and reﬁnement.
+
+apply the network to different image resolutions, depending
+on computational or memory requirements. To achieve the
+best performance with larger resolution images, we can pass
+a low-resolution image through ChArUcoNet to roughly lo-
+calize the pattern and then perform subpixel localization via
+ReﬁneNet in the original high-resolution image.
+
+6. Conclusion
+
+Our paper demonstrates that deep convolutional neu-
+ral networks can dramatically improve the detection rate
+for ChArUco markers in low-light, high-motion scenarios
+where the traditional ChArUco marker detection tools in-
+side OpenCV often fail. We have shown that our Deep
+ChArUco system, a combination of ChArUcoNet and Re-
+ﬁneNet, can match or surpass the pose estimation accu-
+racy of the OpenCV detector. Our synthetic and real-
+data experiments show a performance gap favoring our ap-
+proach and demonstrate the effectiveness of our neural net-
+work architecture design and the dataset creation methodol-
+
+Figure 13. Deep ChArUco vs OpenCV Qualitative Examples. Detector performance comparison under extreme lighting: shadows (top)
+and motion (bottom). Unlike OpenCV, Deep ChArUco appears unaffected by cast shadows.
+
+8443
+
+[13] A. Newell, K. Yang, and J. Deng, “Stacked hourglass
+networks for human pose estimation,” in European
+Conference on Computer Vision. Springer, 2016, pp.
+483–499.
+
+[14] Z. Cao, T. Simon, S.-E. Wei, and Y. Sheikh, “Real-
+time multi-person 2d pose estimation using part afﬁn-
+ity ﬁelds,” CVPR, 2017.
+
+[15] T. Simon, H. Joo, I. A. Matthews, and Y. Sheikh,
+“Hand keypoint detection in single images using mul-
+tiview bootstrapping.” in CVPR, vol. 1, 2017, p. 2.
+
+[16] D. DeTone, T. Malisiewicz, and A. Rabinovich,
+“Superpoint: Self-supervised interest point detection
+and description,”
+in CVPR Deep Learning for
+Visual SLAM Workshop, 2018. [Online]. Available:
+http://arxiv.org/abs/1712.07629
+
+[17] D. G. Lowe, “Distinctive image features from scale-
+invariant keypoints,” International journal of com-
+puter vision, vol. 60, no. 2, pp. 91–110, 2004.
+
+[18] E. Rublee, V. Rabaud, K. Konolige, and G. Bradski,
+“Orb: An efﬁcient alternative to sift or surf,” in Com-
+puter Vision (ICCV), 2011 IEEE international confer-
+ence on.
+
+IEEE, 2011, pp. 2564–2571.
+
+[19] K. M. Yi, E. Trulls, V. Lepetit, and P. Fua, “Lift:
+Learned invariant feature transform,” in European
+Conference on Computer Vision. Springer, 2016, pp.
+467–483.
+
+[20] R. Hartley and A. Zisserman, Multiple view geome-
+try in computer vision. Cambridge university press,
+2003.
+
+References
+
+[1] R. Munoz-Salinas, “Aruco: a minimal library for aug-
+mented reality applications based on opencv,” Univer-
+sidad de C´ordoba, 2012.
+
+[2] S. Garrido-Jurado, R. Mu˜noz-Salinas, F. J. Madrid-
+Cuevas, and M. J. Mar´ın-Jim´enez, “Automatic gener-
+ation and detection of highly reliable ﬁducial markers
+under occlusion,” Pattern Recognition, vol. 47, no. 6,
+pp. 2280–2292, 2014.
+
+[3] J. DeGol, T. Bretl, and D. Hoiem, “Improved structure
+from motion using ﬁducial marker matching,” in Pro-
+ceedings of the European Conference on Computer Vi-
+sion (ECCV), 2018, pp. 273–288.
+
+[4] H. Lim and Y. S. Lee, “Real-time single camera slam
+using ﬁducial markers,” in ICCAS-SICE, 2009. IEEE,
+2009, pp. 177–182.
+
+[5] M. Fiala, “Artag, a ﬁducial marker system using
+digital techniques,” in Computer Vision and Pattern
+Recognition, 2005. CVPR 2005. IEEE Computer Soci-
+IEEE, 2005, pp. 590–596.
+ety Conference on, vol. 2.
+
+[6] E. Olson, “Apriltag: A robust and ﬂexible visual ﬁdu-
+cial system,” in Robotics and Automation (ICRA),
+2011 IEEE International Conference on. IEEE, 2011,
+pp. 3400–3407.
+
+[7] G. Bradski and A. Kaehler, “Opencv,” Dr. Dobbs jour-
+
+nal of software tools, vol. 3, 2000.
+
+[8] J. Redmon, S. Divvala, R. Girshick, and A. Farhadi,
+“You only look once: Uniﬁed, real-time object detec-
+tion,” in Proceedings of the IEEE conference on com-
+puter vision and pattern recognition, 2016, pp. 779–
+788.
+
+[9] W. Liu, D. Anguelov, D. Erhan, C. Szegedy, S. Reed,
+C.-Y. Fu, and A. C. Berg, “Ssd: Single shot multibox
+detector,” in European conference on computer vision.
+Springer, 2016, pp. 21–37.
+
+[10] S. Ren, K. He, R. Girshick, and J. Sun, “Faster r-cnn:
+Towards real-time object detection with region pro-
+posal networks,” in Advances in neural information
+processing systems, 2015, pp. 91–99.
+
+[11] K. He, G. Gkioxari, P. Doll´ar, and R. Girshick, “Mask
+r-cnn,” in Computer Vision (ICCV), 2017 IEEE Inter-
+national Conference on.
+IEEE, 2017, pp. 2980–2988.
+
+[12] Y. Xiang, T. Schmidt, V. Narayanan, and D. Fox,
+“Posecnn: A convolutional neural network for 6d
+object pose estimation in cluttered scenes,” arXiv
+preprint arXiv:1711.00199, 2017.
+
+8444
+
+

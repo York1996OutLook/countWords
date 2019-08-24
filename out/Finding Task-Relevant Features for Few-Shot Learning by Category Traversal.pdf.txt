@@ -1,0 +1,1521 @@
+Finding Task-Relevant Features for Few-Shot Learning by Category Traversal
+
+Hongyang Li1,2∗ David Eigen2 Samuel Dodge2 Matthew Zeiler2 Xiaogang Wang1,3
+
+1The Chinese University of Hong Kong
+
+2Clarifai Inc.
+
+3SenseTime Research
+
+{yangli,xgwang}@ee.cuhk.edu.hk
+
+{deigen,samuel,zeiler}@clarifai.com
+
+Abstract
+
+Few-shot learning is an important area of research. Con-
+ceptually, humans are readily able to understand new con-
+cepts given just a few examples, while in more pragmatic
+terms, limited-example training situations are common in
+practice. Recent effective approaches to few-shot learn-
+ing employ a metric-learning framework to learn a feature
+similarity comparison between a query (test) example, and
+the few support (training) examples. However, these ap-
+proaches treat each support class independently from one
+another, never looking at the entire task as a whole. Be-
+cause of this, they are constrained to use a single set of fea-
+tures for all possible test-time tasks, which hinders the abil-
+ity to distinguish the most relevant dimensions for the task
+at hand. In this work, we introduce a Category Traversal
+Module that can be inserted as a plug-and-play module into
+most metric-learning based few-shot learners. This compo-
+nent traverses across the entire support set at once, identi-
+fying task-relevant features based on both intra-class com-
+monality and inter-class uniqueness in the feature space.
+Incorporating our module improves performance consider-
+ably (5%-10% relative) over baseline systems on both mini-
+ImageNet and tieredImageNet benchmarks, with overall
+performance competitive with recent state-of-the-art sys-
+tems.
+
+1. Introduction
+
+The goal of few-shot learning [38, 35, 30, 36, 33, 7, 25,
+26] is to classify unseen data instances (query examples)
+into a set of new categories, given just a small number of
+labeled instances in each class (support examples). Typi-
+cally, there are between 1 and 10 labeled examples per class
+in the support set; this stands in contrast to the standard
+classiﬁcation problem [19, 16, 20], in which there are of-
+ten thousands per class. Also classes for training and test
+set are the same in traditional problem whereas in few-shot
+learning the two sets are exclusive. A key challenge in few-
+
+∗This paper is the product of work during an internship at Clarifai Inc.
+
+(a)
+
+averaging/
+embedding/ 
+
+…
+
+ISOLATED
+
+(b)
+
+TRAVERSED
+
+mask
+
+Category 
+Traversal
+
+(a) A high-level illustration of the metric-based algo-
+Figure 1.
+rithms for few-shot learning. Both support and query are ﬁrst fed
+into a feature extractor fθ; in previous methods, the query is com-
+pared with support based on the feature similarity individually,
+without associating the most relevant information across classes.
+(b) The proposed Category Traversal Module (CTM) looks at all
+categories in the support set to ﬁnd task-relevant features.
+
+shot learning, therefore, is to make best use of the limited
+data available in the support set in order to ﬁnd the “right”
+generalizations as suggested by the task.
+
+A recent effective approach to this problem is to train
+a neural network to produce feature embeddings used to
+compare the query to each of the support samples. This
+is similar to metric learning using Siamese Networks [4, 6],
+trained explicitly for the few-shot classiﬁcation problem by
+iteratively sampling a query and support set from a larger la-
+beled training set, and optimizing to maximize a similarity
+score between the query and same-labeled examples. Op-
+timizing for similarity between query and support has been
+very effective [35, 38, 31, 14, 21, 2, 13]. Fig. 1 (a) illus-
+trates such a mechanism at a high level.
+
+However, while these approaches are able to learn rich
+features, the features are generated for each class in the sup-
+
+1
+
+distance
+
+Query
+
+1
+
+2
+
+1
+
+1
+
+1
+
+(a)
+
+Color Shape
+
+i.
+
+ii.
+
+iii.
+
+iv.
+
+v.
+
+(b)
+i.
+
+ii.
+
+iii.
+
+iv.
+
+Support Set (1-shot)
+
+Support Set (k-shot)
+
+Figure 2. Toy example illustrating the motivation for task-relevant
+features. (a) A task deﬁnes ﬁve classes (i)..(v) with two feature di-
+mensions, color and shape. The distance between query and sup-
+port is the same for classes (i, iii, iv, v). However, by taking the
+context of all classes into account, we see the relevant feature is
+color, so the class of the query image should be that of (iii): green.
+(b) In a k-shot (k > 1) case, most instances in one class share
+the property of color blue whilst their shape differ among them —
+making the color feature more representative.
+
+port set independently. In this paper, we extend the effective
+metric-learning based approaches to incorporate the context
+of the entire support set, viewed as a whole. By includ-
+ing such a view, our model ﬁnds the dimensions most rele-
+vant to each task. This is particularly important in few-shot
+learning: since very little labeled data is available for each
+task, it is imperative to make best use of all of the informa-
+tion available from the full set of examples, taken together.
+As a motivating example, consider Fig.2 (a), which de-
+picts a 5-way 1-shot task with two simple feature dimen-
+sions, color and shape. The goal of classiﬁcation is to de-
+termine the answer to a question:
+
+To which category in the support set does query belong?
+
+Here, the query is a green circle. We argue that because each
+example in the support set has a unique color, but shares its
+shape with other support examples, the relevant feature in
+this task is color. Therefore, the correct label assignment
+to the query should be class (iii): green. However, if fea-
+ture similarity to the query is calculated independently for
+each class, as is done in [38, 35, 36, 34, 21, 30, 23, 10], it
+is impossible to know which dimension (color or shape) is
+more relevant, hence categories (i, iii, iv, v) would all have
+equal score based on distance1. Only by looking at context
+
+1Note that if the feature extractor were to learn that color is more im-
+portant than shape in order to succeed in this particular task, it would fail
+on the task where color is shared and shape is unique — it is impossible
+for static feature comparison to succeed in both tasks.
+
+of the entire support set can we determine that color is the
+discriminating dimension for this task. Such an observa-
+tion motivates us to traverse all support classes to ﬁnd the
+inter-class uniqueness along the feature dimension.
+
+Moreover, under the multi-shot setting shown in Fig. 2
+(b), it can be even clearer that the color dimension is most
+relevant, since most instances have the same color of blue,
+while their shape varies. Thus, in addition to inter-class
+uniqueness, relevant dimensions can also be found using
+the intra-class commonality. Note in this k > 1 case, fea-
+ture averaging within each class is an effective way to re-
+duce intra-class variations and expose shared feature com-
+ponents; this averaging is performed in [35, 36]. While both
+inter- and intra-class comparisons are fundamental to clas-
+siﬁcation, and have long been used in machine learning and
+statistics [8], metric based few-shot learning methods have
+not yet incorporated any of the context available by looking
+between classes.
+
+To incorporate both inter-class as well as intra-class
+views of support set, we introduce a category traversal
+module (CTM). Such a module selects the most relevant
+feature dimensions after traversing both across and within
+categories. The output of CTM is bundled onto the fea-
+ture embeddings of the support and query set, making met-
+ric learning in the subsequent feature space more effective.
+CTM consists of a concentrator unit to extract the embed-
+dings within a category for commonality, and a projector
+unit to consider the output of the concentrator across cate-
+gories for uniqueness. The concentrator and projector can
+be implemented as convolutional layer(s). Fig. 1 (b) gives
+a description of how CTM is applied into existing metric-
+based few-shot learning algorithms. It can be viewed as a
+plug-and-play module to provide more discriminative and
+representative features by considering the global feature
+distribution in the support set – making metric learning in
+high-dimensional space more effective.
+
+We demonstrate the effectiveness of our category traver-
+sal module on the few-shot learning benchmarks. CTM
+is on par with or exceeding previous state-of-the-art.
+In-
+corporating CTM into existing algorithms [36, 38, 35], we
+witness consistent relative gains of around 5%-10% on both
+miniImageNet and tieredImageNet. The code suite is at:
+https://github.com/Clarifai/few-shot-ctm.
+
+2. Related Work
+
+Recent years have witnessed a vast amount of work on
+the few-shot learning task. They can be roughly catego-
+rized into three branches, (i) metric based, (ii) optimization
+based, and (iii) large corpus based.
+
+The ﬁrst branch of works are metric based approaches
+[35, 38, 36, 14, 34, 21, 30, 23, 2, 10]. Vinyals et al. [38]
+introduced the concept of episode training in few-shot learn-
+ing, where the training procedure mimics the test scenario
+
+2
+
+based on support-query metric learning. The idea is intu-
+itive and simple:
+these methods compare feature similar-
+ity after embedding both support and query samples into
+a shared feature space. The prototypical network [35] is
+built upon [38] by comparing the query with class proto-
+types in the support set, making use of class centroids to
+eliminate the outliers in the support set and ﬁnd dimensions
+common to all class samples. Such a practice is similar in
+spirit to our concentrator module, which we design to focus
+on intra-class commonality. Our work goes beyond this by
+also looking at all classes in the support set together to ﬁnd
+dimensions relevant for each task. In [14], a kernel genera-
+tor is introduced to modify feature embeddings, conditioned
+on the query image. This is a complementary approach to
+ours: while [14] looks to the query to determine what may
+be relevant for its classiﬁcation, we look at the whole of the
+support set to enable our network to better determine which
+features most pertain to the task. In [34], the feature embed-
+ding and classiﬁer weight creation networks are broken up,
+to enable zero-shot and few-shot tasks to both be performed
+within the same framework.
+
+There are also interesting works that explore the relation-
+ship between support and query to enable more complex
+comparisons between support and query features. The re-
+lation network [36] proposes evaluating the relationship of
+each query-support pair using a neural network with con-
+catenated feature embeddings. It can be viewed as a fur-
+ther extension to [35, 38] with a learned metric deﬁned by
+[23] propose a transductive
+a neural network. Liu et al.
+propagation network to propagate labels from known la-
+beled instances to unlabeled test instances, by learning a
+graph construction module that exploits the manifold struc-
+ture in the data. Garcia et al. [10] introduced the concept
+of a graph neural network to explicitly learn feature embed-
+dings by assimilating message-passing inference algorithms
+into neural-network counterparts. Oreshkin et al. [26] also
+learns a task-dependent metric, but conditions based on the
+mean of class prototypes, which can reduce inter-class vari-
+ations available to their task conditioning network, and re-
+quires an auxiliary task co-training loss not needed by our
+method to realize performance gains. Gao et al.
+[9] ap-
+plied masks to features in a prototypical network applied to
+a NLP few-shot sentence classiﬁcation task, but base their
+masks only on examples within each class, not between
+classes as our method does.
+
+All the approaches mentioned above base their algo-
+rithms on a metric learning framework that compares the
+query to each support class, taken separately. However,
+none of them incorporate information available across
+categories for the task, beyond the ﬁnal comparison of
+individually-created distance scores. This can lead to prob-
+lems mentioned in Section 1, where feature dimensions ir-
+relevant to the current task can end up dominating the sim-
+
+ilarity comparison. In this work, we extend metric-based
+approaches by introducing a category traversal module to
+ﬁnd relevant feature dimensions for the task by looking at
+all categories simultaneously.
+
+The second branch of literature are optimization based
+solutions [28, 22, 7, 25, 33]. For each task (episode), the
+learner samples from a distribution and performs SGD or
+unrolled weight updates for a few iterations to adapt a pa-
+rameterized model for the particular task at hand. In [28],
+a learner model is adapted to a new episodic task by a re-
+current meta-learner producing efﬁcient parameter updates.
+MAML [7] and its variants [25, 33] have demonstrated im-
+pressive results; in these works, the parameters of a learner
+model are optimized so that they can be quickly adapted to
+a particular task.
+
+At a high-level, these approaches incorporate the idea of
+traversing all support classes, by performing a few weight
+update iterations for the few-shot task. However, as pointed
+out by [33, 21], while these approaches iterate over sam-
+ples from all classes in their task updates, they often have
+trouble learning effective embeddings. [33] address this by
+applying the weight update “inner-loop” only to top layer
+weights, which are initialized by sampling from a genera-
+tive distribution conditioned on the task samples, and pre-
+training visual features using an initial supervised phase.
+By contrast, metric learning based methods achieve consid-
+erable success in learning good features, but have not made
+use of inter-class views to determine the most relevant di-
+mensions for each task. We incorporate an all-class view
+into a metric learning framework, and obtain competitive
+performance. Our proposed method learns both the feature
+embeddings and classiﬁcation dimensions, and is trained in
+an entirely from-scratch manner.
+
+The third branch is large-training-corpus based meth-
+ods [11, 15, 12, 27, 29]. In these, a base network is trained
+with large amount of data, but also must be able to adapt to
+a few-shot learning task without forgetting the original base
+model concepts. These methods provide stronger feature
+representations for base model classes that are still “com-
+patible” with novel few-class concept representations, so
+that novel classes with few examples can be readily mixed
+with classes from the base classiﬁer.
+
+3. Algorithm
+
+3.1. Description on Few Shot Learning
+
+In a few-shot classiﬁcation task, we are given a small
+support set of N distinct, previously unseen classes, with
+K examples each2. Given a query sample, the goal is to
+classify it into one of the N support categories.
+
+Training. The model is trained using a large training
+corpus Ctrain of labeled examples (of categories different
+
+2Typically, N is between 5 and 20, and K between 1 and 20.
+
+3
+
+Figure 3. Detailed breakdown of components
+in CTM. It extracts features common to ele-
+ments in each class via a concentrator o, and
+allows the metric learner to concentrate on
+more discriminative dimensions via a projec-
+tor p, constructed by traversing all categories
+in the support set.
+
+3.2. Category Traversal Module (CTM)
+
+Fig. 3 shows the overall design of our model. The cate-
+gory traversal module takes support set features fθ(S) as in-
+put, and produces a mask p via a concentrator and projector
+that make use of intra- and inter-class views, respectively.
+The mask p is applied to reduced-dimension features of both
+the support and query, producing improved features I with
+dimensions relevant for the current task. These improved
+feature embeddings are ﬁnally fed into a metric learner.
+
+3.2.1 Concentrator: Intra-class Commonality
+
+The ﬁrst component in CTM is a concentrator to ﬁnd
+universal features shared by all instances for one class.
+Denote the output shape from feature extractor fθ as
+(N K, m1, d1, d1), where m1, d1 indicate the number of
+channel and the spatial size, respectively. We deﬁne the
+concentrator as follows:
+
+fθ(S) : (N K, m1, d1, d1) Concentrator
+
+−−−−−−→ o : (N, m2, d2, d2),
+(4)
+where m2, d2 denote the output number of channel and spa-
+tial size. Note that the input is ﬁrst fed to a CNN module
+to perform dimension reduction; then samples within each
+class are averaged to have the ﬁnal output o. In the 1-shot
+setting, there is no average operation, as there is only one
+example for each class.
+
+In practice the CNN module could be either a simple
+CNN layer or a ResNet block [16]. The purpose is to re-
+move the difference among instances and extract the com-
+monality among instances within one category. This is
+achieved by way of an appropriate down-sampling from
+m1, d1 to m2, d2. Such a learned component is proved to
+be better than the averaging alternative [35], where the lat-
+ter could be deemed as a special case of our concentrator
+when m1 = m2, d1 = d2 without the learned parameters.
+
+from any that we will see in the eventual few-shot tasks dur-
+ing evaluation). The model is trained using episodes.
+In
+each episode, we construct a support set S and query set Q:
+
+S = {s
+
+Q = {q
+
+(1), · · · , s
+(1), · · · , q
+
+(c), · · · , s
+(c), · · · , q
+
+(N )} ⊂ Ctrain, |s
+(N )} ⊂ Ctrain, |q
+
+(c)| = K,
+(c)| = K,
+
+where c is the class index and K is the number of samples
+(c); the support set has a total number of N K sam-
+in class s
+ples and corresponds to a N -way K-shot problem. Let sj
+be a single sample, where j is the index among all samples
+in S. We deﬁne the label of sample i to be:
+
+l∗
+i
+
+, l(si) = c, si ∈ s
+
+(c).
+
+Similar notation applies for the query set Q.
+
+As illustrated in Fig. 1, the samples si, qj are ﬁrst fed
+into a feature extractor fθ(·). We use a CNN or ResNet [16]
+as the backbone for fθ. These features are used as input
+to a comparison module M(·, ·). In practice, M could be a
+direct pair-wise feature distance [35, 38] or a further relation
+unit [36, 10] consisting additional CNN layers to measure
+the relationship between two samples. Denote the output
+score from M as Y = {yij}. The loss L for this training
+episode is deﬁned to be a cross-entropy classiﬁcation loss
+averaged across all query-support pairs:
+
+yij = M(cid:0)fθ(si), fθ(qj)(cid:1),
+(N K)2 X
+
+i = l∗
+
+X
+
+1[l∗
+
+1
+
+i
+
+j
+
+j ] log yij.
+
+L = −
+
+(1)
+
+(2)
+
+Training proceeds by iteratively sampling episodes, and
+performing SGD update using the loss for each episode.
+
+Inference. Generalization performance is measured on
+test set episodes, where S, Q are now sampled from a cor-
+pus Ctest containing classes distinct from those used in
+Ctrain. Labels in the support set are known whereas those
+in the query are unknown, and used only for evaluation. The
+label prediction for the query is found by taking class with
+highest comparison score:
+
+ˆlj = arg max
+
+c
+
+ycj,
+
+(3)
+
+3.2.2 Projector: Inter-class Uniqueness
+
+K Pi yij and l∗
+
+where ycj = 1
+i = c. The mean accuracy is
+therefore obtained by comparing ˆlj with query labels for a
+length of test episodes (usually 600).
+
+The second component is a projector to mask out irrelevant
+features and select the ones most discriminative for the cur-
+rent few-shot task by looking at concentrator features from
+
+4
+
+Model
+
+5-way
+
+model size
+
+training time
+
+20-way
+
+1-shot
+
+5-shot
+
+(Mb)
+
+(sec. / episode)
+
+1-shot
+
+5-shot
+
+(i) sample-wise style baseline
+(ii) sample-wise, I 1
+
+37.20% 53.35%
+41.62% 58.77%
+
+(iii) baseline same size
+
+37.82% 53.46%
+
+(iv) cluster-wise style baseline
+(v) cluster-wise, I 2
+
+34.81% 50.93%
+39.55% 56.95%
+
+0.47
+0.55
+
+0.54
+
+0.47
+0.55
+
+0.0545
+0.0688
+
+0.0561
+
+0.0531
+0.0632
+
+17.96% 28.47%
+21.75% 32.26%
+
+18.11% 28.54%
+
+16.95% 27.37%
+19.96% 30.17%
+
+Table 1. Design choice of I(S) in
+the category traversal module (CTM)
+and comparison with baselines. We
+see a substantial improvement using
+CTM over the same-capacity baseline
+(ii, iii). The sample wise choice (ii)
+performs better, with marginal extra
+computation cost compared with (v).
+
+all support categories simultaneously:
+
+ˆo : (1, N m2, d2, d2)
+
+Projector
+−−−−→ p : (1, m3, d3, d3).
+
+(5)
+
+where ˆo is just a reshaped version of o; m3, d3 follow sim-
+ilar meaning as in the concentrator. We achieve the goal of
+traversing across classes by concatenating the class proto-
+types in the ﬁrst dimension (N ) to the channel dimension
+(m2), applying a small CNN to the concatenated features to
+produce a map of size (1, m3, d3, d3), and ﬁnally applying a
+softmax over the channel dimension m3 (applied separately
+for each of the d3 × d3 spatial dimensions) to produce a
+mask p. This is used to mask the relevant feature dimen-
+sions for the task in the query and support set.
+
+3.2.3 Reshaper
+
+In order to make the projector output p inﬂuence the fea-
+ture embeddings fθ(·), we need to match the shape between
+these modules in the network. This is achieved using a re-
+shaper network, applied separately to each of N K samples:
+
+fθ(·)
+
+Reshaper
+−−−−−→ r(·) : (N K, m3, d3, d3).
+
+It is designed in light-weight manner with one CNN layer.
+
+3.2.4 Design choice in CTM
+
+Armed by the components stated above we can generate a
+mask output by traversing all categories: fθ(S) → p. The
+effect of CTM is achieved by bundling the projector output
+onto the feature embeddings of both support and query, de-
+noted as I(·). The improved feature representations are thus
+promised to be more discriminative to be distinguished.
+
+For the query, the choice of I is simple since we do
+not have labels of query; the combination is an element-
+wise multiplication of embeddings and the projector out-
+put: I(Q) = r(Q) ⊙ p, where ⊙ stands for broadcasting
+the value of p along the sample dimension (N K) in Q.
+
+For the support, however, since we know the query la-
+bels, we can choose to mask p directly onto the embeddings
+(sample-wise), or if we keep (m2, d2, d2) = (m3, d3, d3),
+we can use it to mask the concentrator output o (cluster-
+wise). Mathematically, these two options are:
+
+option 1: I 1(S) = r(S) ⊙ p : (N K, m3, d3, d3),
+option 2: I 2(S) = o ⊙ p : (N, m3, d3, d3).
+
+We found that option 1 results in better performance, for a
+marginal increase in execution time due to its larger number
+of comparisons; details are provided in Sec. 4.2.1.
+
+3.3. CTM in Action
+
+The proposed category traversal module is a simple plug-
+and-play module and can be embedded into any metric-
+based few-shot learning approach. In this paper, we con-
+sider three metric-based methods and apply CTM to them,
+namely the matching network [38], the prototypical net-
+work [35] and the relation network [36]. As discussed in
+Sec. 1, all these three methods are limited by not consid-
+ering the entire support set simultaneously. Since features
+are created independently for each class, embeddings irrel-
+evant to the current task can end up dominating the metric
+comparison. These existing methods deﬁne their similarity
+metric following Eqn. (1); we modify them to use our CTM
+as follows:
+
+Y = M(cid:0)r(S) ⊙ p, r(Q) ⊙ p(cid:1), Y = {yij}.
+
+(6)
+
+As we show later (see Sec. 4.3.1), after integrating the pro-
+posed CTM unit, these methods get improved by a large
+margin (2%-4%) under different settings.
+
+4. Evaluation
+
+The experiments are designed to answer the following
+key questions: (1) Is CTM competitive to other state-of-the-
+art on large-scale few-shot learning benchmarks? (2) Can
+CTM be utilized as a simple plug-and-play and bring in gain
+to existing methods? What are the essential components and
+factors to make CTM work? (3) How does CTM modify
+the feature space to make features more discriminative and
+representative?
+
+4.1. Datasets and Setup
+
+Datasets. The miniImageNet dataset [38] is a subset of
+100 classes selected from the ILSVRC-12 dataset [32] with
+600 images in each class. It is divided into training, valida-
+tion, and test meta-sets, with 64, 16, and 20 classes respec-
+tively. The tieredImageNet dataset [30] is a larger subset
+of ILSVRC-12 with 608 classes (779,165 images) grouped
+into 34 higher-level nodes based on WordNet hierarchy [5].
+This set of nodes is partitioned into 20, 6, and 8 disjoint
+
+5
+
+sets of training, validation, and testing nodes, and the cor-
+responding classes consist of the respective meta-sets. As
+argued in [30], the split in tieredImageNet is more challeng-
+ing, with realistic regime of test classes that are less similar
+to training ones. Note that the validation set is only used for
+tuning model parameters.
+
+Evaluation metric. We report the mean accuracy (%) of
+600 randomly generated episodes as well as the 95% conﬁ-
+dence intervals on test set. In every episode during test, each
+class has 15 queries, following most methods [35, 36, 33].
+Implementation details. For training, the 5-way prob-
+lem has 15 query images while the 20-way problem has 8
+query images. The reason for a fewer number of query sam-
+ples in the 20-way setting is mainly due to the GPU memory
+considerations. The input image is resized to 84 × 84.
+
+We use Adam [18] optimizer with an initial learning rate
+of 0.001. The total training episodes on miniImageNet and
+tieredImageNet are 600,000 and 1,000,000 respectively.
+The learning rate is dropped by 10% every 200,000 episodes
+or when loss enters a plateau. The weight decay is set to be
+0.0005. Gradient clipping is also applied.
+
+4.2. Ablation Study
+
+Table 2. Ablation study on category traversal module.
+
+Factor
+
+miniImageNet accuracy
+1-shot
+
+5-shot
+
+CTM with shallow (4 layer) backbone
+
+41.62
+
+CTM with ResNet-18 backbone
+(i) w/o concentrator network o
+(ii) w/o projector p
+(iii) softmax all in p
+
+59.34
+55.41
+57.18
+57.77
+
+relation net baseline without CTM 58.21
+61.37
+62.05
+
+relation net M, CTM, MSE loss
+relation net M, CTM, cross entropy loss
+
+58.77
+
+77.95
+73.29
+74.25
+75.03
+
+74.29
+78.54
+78.63
+
+Which option for I(S) is better? Table 1 (ii, v) shows
+the comparison between I 1 and I 2. In general, the sample-
+wise choice I 1 is 2% better than I 2. Note the model size
+between these two are exactly the same; the only difference
+is how p is multiplied. However, a trivial drawback of I 1
+is the slightly slower time (0.0688 vs 0.0632) since it needs
+to broadcast p across all samples. Despite the efﬁciency, we
+choose the ﬁrst option as our preference to generate I(S) =
+I 1 nonetheless.
+
+4.2.1 Shallow Network Veriﬁcation
+
+4.2.2 CTM with Deeper Network
+
+We ﬁrst validate the effectiveness of category traversal by
+comparing against same-capacity baselines using a sim-
+ple backbone network. Speciﬁcally, a 4-layer neural net-
+work is adopted as backbone; we directly compute fea-
+ture similarity between I(S) and I(Q). The mean accu-
+racy on miniImageNet is reported. After feature embed-
+ding, m1 = 64, d1 = 21; the concentrator is a CNN layer
+with stride of 2, i.e., m2 = 32, d2 = 10. To compare be-
+tween choices (I 1 or I 2), the projector leaves dimensions
+unchanged, i.e., m3 = m2, d3 = d2.
+
+Baseline comparison. Results are reported in Tab. 1.
+Model size and training time are measured under the 5-way
+5-shot setting. The “baseline” in row (i) and (iv) evaluate a
+model with reshaper network and metric comparisons only,
+omitting CTM concentrator and projector. Row (ii) shows a
+model that includes our CTM. Since adding CTM increases
+the model capacity compared to the baseline (i), we also
+include a same-size model baseline for comparison, shown
+as “baseline same size” (iii), by adding additional layers to
+the backbone such that its model size is similar to (ii). Note
+that the only difference between (i) and (iv) is that the latter
+case takes average of samples within each category.
+
+We can see on average there is a 10% relative improve-
+ment using CTM in both 5-way and 20-way settings, com-
+pared to the baselines. Notably, the larger-capacity baseline
+improves only marginally over the original baseline, while
+the improvements using CTM are substantial. This shows
+that the performance increase obtained by CTM is indeed
+due to its ability to ﬁnd relevant features for each task.
+
+Table 2 reports the ablation analysis on different compo-
+nents of CTM. Using a deeper backbone for the feature ex-
+tractor increases performance by a large margin. Experi-
+ments in the second block investigate the effect of the con-
+centrator and projector, respectively. Removing each com-
+ponent alone results in a performance decrease (cases i, ii,
+iii)3. The accuracy is inferior (-3.93%, 1-shot case) if we re-
+move the network part of the concentrator, implying that its
+dimension reduction and spatial downsampling is important
+to the ﬁnal comparisons. Removing the projector p also re-
+sults in a signiﬁcant drop (-2.16%, 1-shot), conﬁrming that
+this step is necessary to ﬁnd task-speciﬁc discriminate di-
+mensions. An interesting result is that if we perform the
+softmax operation across all the locations (m3, d3, d3) in
+p, the accuracy (57.77%) is inferior to performing softmax
+along the channel dimension (m3) for each location sepa-
+rately (59.34%); this is consistent with the data, where ab-
+solute position in the image is only modestly relevant to any
+class difference.
+
+Moreover, we incorporate the relation module [36] as the
+metric learner for the last module M.
+It consists of two
+CNN blocks with two subsequent fc layers generating the
+relationship score for one query-support pair. The baseline
+relation net model without CTM has an accuracy of 58.21%.
+After including our proposed module, the performance in-
+
+3Implementation details: case (i) without concentrator, support samples
+are still averaged to generate an output of (N, m, d, d) for the projector;
+case (ii) without projector, the improved feature representation for support
+and query are o(S), r(Q), respectively.
+
+6
+
+Method
+
+5-way
+
+20-way
+
+5-way
+
+20-way
+
+1-shot
+
+5-shot
+
+1-shot
+
+5-shot
+
+1-shot
+
+5-shot
+
+1-shot
+
+5-shot
+
+Matching Net [38], paper
+Matching Net [38], our implementation
+
+43.56
+48.89
+Matching Net [38], CTM 52.43
++3.54
+
+Prototypical Net [35], paper
+Prototypical Net [35], our implementation
+
+49.42
+56.11
+Prototypical Net [35], CTM 59.34
++3.23
+
+Relation Net [36], paper
+Relation Net [36], our implementation
+
+50.44
+58.21
+Relation Net [36], CTM 62.05
++3.84
+
+55.31
+66.35
+70.09
++3.74
+
+68.20
+74.16
+77.95
++3.79
+
+65.32
+74.29
+78.63
++4.34
+
+-
+
+23.18
+25.84
++2.66
+
+-
+
+28.53
+32.08
++3.55
+
+-
+
+31.35
+35.11
++3.76
+
+-
+
+36.73
+40.98
++4.25
+
+-
+
+42.36
+47.11
++4.75
+
+-
+
+45.19
+48.72
++3.53
+
+-
+
+54.02
+57.01
++2.99
+
+53.31
+60.27
+63.77
++3.50
+
+54.48
+61.11
+64.78
++3.67
+
+-
+
+70.11
+73.45
++3.34
+
+72.69
+75.80
+79.24
++3.44
+
+71.32
+77.39
+81.05
++3.66
+
+-
+
+23.46
+25.69
++2.23
+
+-
+
+28.56
+31.02
++2.46
+
+-
+
+26.77
+31.53
++4.76
+
+-
+
+41.65
+45.07
++3.42
+
+-
+
+49.34
+51.44
++2.10
+
+-
+
+47.82
+52.18
++4.36
+
+Table 3. Improvement after incorporating CTM into existing methods on miniImageNet (left) and tieredImageNet (right).
+
+creases by 3.84%, to 62.05%. Note that the original paper
+[36] uses mean squared error (MSE); we ﬁnd cross-entropy
+is slightly better (0.68% and 0.09% for 1-shot and 5-shot,
+respectively), as deﬁned in Eqn. (2).
+
+4.3. Comparison with State of the Art
+
+4.3.1 Adapting CTM into Existing Frameworks
+
+To verify the effectiveness of our proposed category traver-
+sal module, we embed it into three metric-based algorithms
+that are closely related to ours. It is worth noticing that the
+comparison should be conducted in a fair setting; however,
+different sources report different results4. Here we describe
+the implementation we use.
+
+Matching Net [38] and Prototypical Net [35]. In these
+cases, the metric module M is the pair-wise feature dis-
+tance. Note that a main source of improvement between
+[38] and [35] is that the query is compared to the average
+feature for each class; this has the effect of including intra-
+class commonality, which we make use of in our concentra-
+tor module. As for the improvement from original paper to
+our baseline, we use the ResNet-18 model with a Euclidean
+distance for the similarity comparison, instead of a shallow
+CNN network with cosine distance originally.
+
+Relation Net [36]. As for the improvement from origi-
+nal paper to our baseline, the backbone structure is switched
+the relation unit M
+from 4-conv to ResNet-18 model;
+adopts the ResNet blocks instead of CNN layers; the su-
+pervision loss is changed to the cross entropy.
+
+Table 3 shows the gains obtained by including CTM into
+each method. We observe that on average, there is an ap-
+proximately 3% increase after adopting CTM. This shows
+the ability of our module to plug-and-play into multiple
+metric based systems. Moreover, the gains remain consis-
+tent for each method, regardless of the starting performance
+
+Model
+
+miniImageNet test accuracy
+
+1-shot
+
+5-shot
+
+Meta-learner LSTM [28]
+MAML [7]
+REPTILE [25]
+Meta-SGD [22]
+SNAIL [24]
+CAML [17]
+LEO [33]
+Incremental [29]
+Dynamic [12]
+Predict Params [27]
+Matching Net [38]
+BANDE [1]
+Prototypical Net [35]
+Relation Net [36]
+Projective Subspace [34]
+Individual Feature [13]
+IDeMe-Net [3]
+TADAM [26]
+CTM (ours)
+CTM (ours), data augment
+
+43.44 ± 0.77
+48.70 ± 1.84
+49.97 ± 0.32
+54.24 ± 0.03
+55.71 ± 0.99
+59.23 ± 0.99
+61.76 ± 0.08
+55.72 ± 0.41
+56.20 ± 0.86
+59.60 ± 0.41
+43.56 ± 0.84
+48.90 ± 0.70
+49.42 ±0.78
+50.44 ± 0.82
+
+——–
+
+56.89 ——–
+57.71 ——–
+58.50 ± 0.30
+62.05 ± 0.55
+64.12 ± 0.82
+
+60.60 ± 0.71
+63.11 ± 0.92
+65.99 ± 0.58
+70.86 ± 0.04
+68.88 ± 0.92
+72.35 ± 0.18
+77.59 ± 0.12
+70.50 ± 0.36
+73.00 ± 0.64
+73.74 ± 0.19
+55.31 ± 0.73
+68.30 ± 0.60
+68.20 ± 0.66
+65.32 ± 0.70
+68.12 ± 0.67
+70.51 ——–
+74.34 ——–
+76.70 ± 0.30
+78.63 ± 0.06
+80.51 ± 0.13
+
+Model
+
+tieredImageNet test accuracy
+
+1-shot
+
+5-shot
+
+MAML [7]
+Meta-SGD [22], reported by [33]
+LEO [33]
+
+51.67 ± 1.81
+62.95 ± 0.03
+66.33 ± 0.05
+
+70.30 ± 0.08
+79.34 ± 0.06
+81.44 ± 0.09
+
+Dynamic [12], reported by [29]
+Incremental [29]
+
+50.90 ± 0.46
+51.12 ± 0.45
+
+66.69 ± 0.36
+66.40 ± 0.36
+
+Soft k-means [30]
+Prototypical Net [35]
+Projective Subspace [34]
+Relation Net [36]
+Transductive Prop. [23]
+CTM (ours)
+CTM (ours), data augment
+
+52.39 ± 0.44
+53.31 ± 0.89
+
+——–
+
+54.48 ± 0.93
+59.91 ——–
+64.78 ± 0.11
+68.41 ± 0.39
+
+69.88 ± 0.20
+72.69 ± 0.74
+71.15 ± 0.67
+71.32 ± 0.78
+73.30 ——–
+81.05 ± 0.52
+84.28 ± 1.73
+
+Table 4. Test accuracies for 5-way tasks, both 1-shot and 5-shot.
+We provide two versions of our model. See Sec. 4.3.2 for details.
+
+4For example, the relation network has a 65.32% accuracy for 5-way
+5-shot setting on miniImageNet. [39] gives a 61.1%; [2] has 66.6%; [21]
+obtains 71.07% with a larger network
+
+level. This supports the hypothesis that our method is able
+to incorporate signals previously unavailable to any of these
+approaches, i.e., the inter-class relations in each task.
+
+7
+
+Figure 4. The t-SNE visualization [37]
+of the improved feature embeddings I(·)
+learned by our CTM approach. (a) cor-
+responds to the 20-way 5-shot setting of
+the relation network without CTM in Ta-
+ble 3 and (b) corresponds to the improved
+version with CTM. Only 10 classes are
+shown for better view. We can see that af-
+ter traversing across categories, the effect
+of projector p onto the features are obvi-
+ous - making clusters more compact and
+discriminative from each other.
+
+(a) Relation net, 47.82% accuracy
+
+(b) Relation Net with CTM, 52.18% accuracy
+
+4.3.2 Comparison beyond Metric-based Approaches
+
+We compare our proposed CTM approach with other state-
+of-the-art methods in Table 4. For each dataset, the ﬁrst
+block of methods are optimization-based, the second are
+base-class-corpus algorithms, and the third are metric-based
+approaches. We use a ResNet-18 backbone for the feature
+extractor to compare with other approaches. The model is
+trained from scratch with standard initialization, and no ad-
+ditional training data (e.g., distractors [30, 23]) are utilized.
+We believe such a design aligns with most of the compared
+algorithms in a fair spirit.
+
+It is observed that our CTM method compares favor-
+ably against most methods by a large margin, not limited
+to the metric-based methods but also compared with the
+optimization-based methods. For example, under the 5-
+way 1-shot setting, the performance is 62.05% vs 59.60%
+[27], and 64.78% vs 59.91% [23] on the two benchmarks
+miniImageNet and tieredImageNet, respectively.
+
+LEO [33] is slightly better than ours (without data
+augmentation) on tieredImageNet.
+It uses wide resid-
+ual networks [40] with 28 layers; they also pretrain the
+model using a supervised task on the entire training set
+and ﬁnetune the network based on these pre-trained fea-
+tures. For practical interest, we also train a version of our
+model with supervised pretraining (using only the mini- or
+tieredImageNet training sets), basic data augmentation (in-
+cluding random crop, color jittering and horizontal ﬂip), and
+a higher weight decay (0.005). The result is shown in the
+last case for each dataset. Note that the network structure is
+still ResNet-18, considering LEO’s wideResNet-28.
+
+4.4. Feature Visualization Learned by CTM
+
+Fig. 4 visualizes the feature distribution using t-SNE
+[37]. The features computed in a 20-way 5-shot setting, but
+only 10 classes are displayed for easier comparison. Model
+(a) achieves an accuracy of 47.32% without CTM and the
+improved version, Model (b), equipped with CTM has a bet-
+ter performance of 52.18%. When sampling features for
+t-SNE for our model, we use I(S), i.e. after the mask p
+is applied. Since this depends on the support sample, fea-
+
+tures will be vastly different depending on the chosen task.
+Therefore, when sampling tasks to create these visualiza-
+tion features, we ﬁrst chose 20 classes, and kept these ﬁxed
+while drawing different random support samples from this
+class set. We draw a total of 50 episodes on the test set.
+
+As can be clearly observed, CTM model has more com-
+pact and separable clusters, indicating that features are more
+discriminative for the task. This descends from the design
+of the category traversal module. Without CTM, some clus-
+ters overlap with each other (e.g., light green with orange),
+making the metric learning difﬁcult to compare.
+
+5. Conclusion
+
+In this paper, we propose a category traversal module
+(CTM) to extract feature dimensions most relevant to each
+task, by looking the context of the entire support set. By
+doing so, it is able to make use of both inter-class unique-
+ness and intra-class commonality properties, both of which
+are fundamental to classiﬁcation. By looking at all support
+classes together, our method is able to identify discrimina-
+tive feature dimensions for each task, while still learning
+effective comparison features entirely from scratch. We de-
+vise a concentrator to ﬁrst extract the feature commonal-
+ity among instances within the class by effectively down-
+sampling the input features and averaging. A projector is
+introduced to traverse feature dimensions across all cate-
+gories in the support set. The projector inter-class relations
+to focus on the on relevant feature dimensions for the task at
+hand. The output of CTM is then combined onto the feature
+embeddings for both support and query; the enhanced fea-
+ture representations are more unique and discriminative for
+the task. We have demonstrated that it improves upon previ-
+ous methods by a large margin, and has highly competitive
+performance compared with state-of-the-art.
+
+Acknowledgment
+
+We thank Nand Dalal, Michael Gormish, Yanan Jian and
+reviewers for helpful discussions and comments. H. Li is
+supported by Hong Kong Ph.D. Fellowship Scheme.
+
+8
+
+References
+
+[1] Kelsey R Allen, Hanul Shin, Evan Shelhamer, and
+Josh B. Tenenbaum. Variadic learning by bayesian
+nonparametric deep embedding.
+In OpenReview,
+2019.
+
+[2] Wei-Yu Chen, Yen-Cheng Liu, Zsolt Kira, Yu-
+Chiang Frank Wang, and Jia-Bin Huang. A closer look
+at few-shot classiﬁcation. In ICLR, 2019.
+
+[3] Zitian Chen, Yanwei Fu, Yu-Xiong Wang, Lin Ma,
+Wei Liu, and Martial Hebert.
+Image deformation
+meta-networks for one-shot learning. In OpenReview,
+2019.
+
+[16] Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian
+Sun. Deep residual learning for image recognition. In
+CVPR, 2016.
+
+[17] Xiang Jiang, Mohammad Havaei, Farshid Varno,
+Gabriel Chartrand, Nicolas Chapados, and Stan
+Matwin. Learning to learn with conditional class de-
+pendencies. In ICLR, 2019.
+
+[18] Diederik P. Kingma and Jimmy Ba. Adam: A method
+
+for stochastic optimization. In ICLR, 2015.
+
+[19] Alex Krizhevsky, Ilya Sutskever, and Geoffrey E. Hin-
+ton. Imagenet classiﬁcation with deep convolutional
+neural networks. In NIPS, 2012.
+
+[4] Sumit Chopra, Raia Hadsell, and Yann Lecun. Learn-
+ing a similarity metric discriminatively, with applica-
+tion to face veriﬁcation. In CVPR, 2005.
+
+[20] Hongyang Li, Xiaoyang Guo, Bo Dai, Wanli Ouyang,
+and Xiaogang Wang. Neural network encapsulation.
+In ECCV, 2018.
+
+[5] J. Deng, W. Dong, R. Socher, L.-J. Li, K. Li, and L.
+Fei-Fei. ImageNet: A Large-Scale Hierarchical Image
+Database. In CVPR, 2009.
+
+[21] Kai Li, Martin Renqiang Min, Bing Bai, Yun Fu, and
+Hans Peter Graf. Network reparameterization for un-
+seen class categorization. In OpenReview, 2019.
+
+[6] Nir Ailon Elad Hoffer. Deep Metric Learning using
+
+Triplet Network. In ICLR, 2015.
+
+[7] Chelsea Finn, Pieter Abbeel, and Sergey Levine.
+Model-agnostic meta-learning for fast adaptation of
+deep networks. In arXiv preprint:1703.03400, 2017.
+
+[8] Ronald A Fisher. The use of multiple measurements
+in taxonomic problems. Annals of eugenics, 7(2):179–
+188, 1936.
+
+[9] Tianyu Gao, Xu Han, Zhiyuan Liu, and Maosong
+Sun. Hybrid Attention-Based Prototypical Networks
+for Noisy Few-Shot Relation Classiﬁcation . In AAAI,
+2019.
+
+[10] Victor Garcia and Joan Bruna.
+
+Few-shot Learning
+
+with Graph Neural Networks. In ICLR, 2018.
+
+[11] Mohammad Ghasemzadeh, Fang Lin, Bita Darvish
+Rouhani, Farinaz Koushanfar, and Ke Huang. Ag-
+ilenet: Lightweight dictionary-based few-shot learn-
+ing. In arXiv preprint:1805.08311, 2018.
+
+[12] Spyros Gidaris and Nikos Komodakis. Dynamic Few-
+In CVPR,
+
+Shot Visual Learning without Forgetting.
+2018.
+
+[13] Jonathan Gordon, John Bronskill, Matthias Bauer, Se-
+bastian Nowozin, and Richard Turner. Meta-learning
+probabilistic inference for prediction. In ICLR, 2019.
+
+[14] Chunrui Han, Shiguang Shan, Meina Kan, Shuzhe
+Wu, and Xilin Chen. Meta-learning with individual-
+ized feature space for few-shot classiﬁcation. 2019.
+
+[15] Bharath Hariharan and Ross Girshick. Low-shot Vi-
+sual Recognition by Shrinking and Hallucinating Fea-
+tures. In ICCV, 2017.
+
+[22] Zhenguo Li, Fengwei Zhou, Fei Chen, and Hang Li.
+Meta-SGD: Learning to Learn Quickly for Few-Shot
+Learning. In arXiv preprint:1707.09835, 2017.
+
+[23] Yanbin Liu, Juho Lee, Minseop Park, Saehoon Kim,
+and Yi Yang. Transductive Propagation Network for
+Few-shot Learning.
+In arXiv preprint:1805.10002,
+2018.
+
+[24] Nikhil Mishra, Mostafa Rohaninejad, Xi Chen, and
+A Simple Neural Attentive Meta-
+
+Pieter Abbeel.
+Learner. In ICLR, 2018.
+
+[25] Alex Nichol, Joshua Achiam, and John Schulman.
+On First-Order Meta-Learning Algorithms. In arXiv
+preprint:1803.02999, 2018.
+
+[26] Boris N. Oreshkin, Pau Rodriguez, and Alexandre La-
+coste. TADAM: Task dependent adaptive metric for
+improved few-shot learning. In NIPS, 2018.
+
+[27] Siyuan Qiao, Chenxi Liu, Wei Shen, and Alan Yuille.
+Few-Shot Image Recognition by Predicting Parame-
+ters from Activations. In CVPR, 2018.
+
+[28] Sachin Ravi and Hugo Larochelle. Optimization as a
+
+model for few-shot learning. In ICLR, 2017.
+
+[29] Mengye Ren, Renjie Liao, Ethan Fetaya,
+
+Richard S. Zemel.
+ing with attention attractor networks.
+preprint:1810.07218, 2018.
+
+Incremental few-shot
+
+and
+learn-
+In arXiv
+
+[30] Mengye Ren, Eleni Triantaﬁllou, Sachin Ravi, Jake
+Snell, Kevin Swersky, Joshua B. Tenenbaum, Hugo
+Larochelle, and Richard S. Zemel. Meta-Learning for
+Semi-supervised Few-Shot Classiﬁcation.
+In ICLR,
+2018.
+
+9
+
+[31] Shaoqing Ren, Kaiming He, Ross Girshick, and Jian
+Sun. Faster R-CNN: Towards Real-Time Object De-
+tection with Region Proposal Networks.
+In NIPS,
+2015.
+
+[32] Olga Russakovsky, Jia Deng, Hao Su, Jonathan
+Krause, Sanjeev Satheesh, Sean Ma, Zhiheng Huang,
+Andrej Karpathy, Aditya Khosla, Michael Bernstein,
+Alexander C. Berg, and Li Fei-Fei. ImageNet Large
+Scale Visual Recognition Challenge.
+International
+Journal of Computer Vision (IJCV), 115(3):211–252,
+2015.
+
+[33] Andrei A. Rusu, Dushyant Rao, Jakub Sygnowski,
+Oriol Vinyals, Razvan Pascanu, Simon Osindero, and
+Raia Hadsell. Meta-learning with latent embedding
+optimization. In ICLR, 2019.
+
+[34] Christian Simon, Piotr Koniusz, and Mehrtash Ha-
+Projective subspace networks for few-shot
+
+randi.
+learning. In OpenReview, 2019.
+
+[35] Jake Snell, Kevin Swersky, and Richard S. Zemel.
+In
+
+Prototypical Networks for Few-shot Learning.
+NIPS, 2017.
+
+[36] Flood Sung, Yongxin Yang, Li Zhang, Tao Xiang,
+Philip H.S. Torr, and Timothy M. Hospedales. Learn-
+ing to compare: Relation network for few-shot learn-
+ing. In CVPR, 2018.
+
+[37] Laurens van der Maaten and Geoffrey Hinton. Visual-
+izing data using t-SNE. Journal of Machine Learning
+Research, 9:2579–2605, 2008.
+
+[38] Oriol Vinyals, Charles Blundell, Timothy Lillicrap,
+Koray Kavukcuoglu, and Daan Wierstra. Matching
+Networks for One Shot Learning. In NIPS, 2016.
+
+[39] Zhirong Wu, Alexei A. Efros,
+
+, and Stella X. Yu.
+Improving Generalization via Scalable Neighborhood
+Component Analysis. In ECCV, 2018.
+
+[40] Sergey Zagoruyko and Nikos Komodakis. Wide resid-
+
+ual networks. In BMVC, 2016.
+
+10
+
+

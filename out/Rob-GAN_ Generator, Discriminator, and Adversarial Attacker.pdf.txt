@@ -1,0 +1,1487 @@
+Rob-GAN: Generator, Discriminator, and Adversarial Attacker
+
+Xuanqing Liu Cho-Jui Hsieh
+
+University of California, Los Angeles
+
+{xqliu, chohsieh}@cs.ucla.edu
+
+Abstract
+
+We study two important concepts in adversarial deep
+learning—adversarial training and generative adversarial
+network (GAN). Adversarial training is the technique used
+to improve the robustness of discriminator by combining ad-
+versarial attacker and discriminator in the training phase.
+GAN is commonly used for image generation by jointly
+optimizing discriminator and generator. We show these
+two concepts are indeed closely related and can be used
+to strengthen each other—adding a generator to the ad-
+versarial training procedure can improve the robustness of
+discriminators, and adding an adversarial attack to GAN
+training can improve the convergence speed and lead to bet-
+ter generators. Combining these two insights, we develop
+a framework called Rob-GAN to jointly optimize generator
+and discriminator in the presence of adversarial attacks—
+the generator generates fake images to fool discriminator;
+the adversarial attacker perturbs real images to fool discrim-
+inator, and the discriminator wants to minimize loss under
+fake and adversarial images. Through this end-to-end train-
+ing procedure, we are able to simultaneously improve the
+convergence speed of GAN training, the quality of synthetic
+images, and the robustness of discriminator under strong
+adversarial attacks. Experimental results demonstrate that
+the obtained classiﬁer is more robust than state-of-the-art
+adversarial training approach [23], and the generator out-
+performs SN-GAN on ImageNet-143.
+
+1. Introduction
+
+Adversarial deep learning has received a signiﬁcant
+In this paper,
+amount of attention in the last few years.
+we study two important but different concepts—adversarial
+attack/defense and generative adversarial network (GAN).
+Adversarial attacks are algorithms that ﬁnd a highly resem-
+bled images to cheat a classiﬁer. Training classiﬁers under
+adversarial attack (also known as adversarial training) has
+become one of the most promising ways to improve the
+robustness of classiﬁers [23]. On the other hand, GAN is
+
+∗Project repository:
+
+Figure 1: Illustration of the training process. This is similar
+to the standard GAN training, i.e. alternatively updating
+the generator G and discriminator D networks. The main
+difference is that whenever feeding the real images to the D
+network, we ﬁrst invoke adversarial attack, so the discrimi-
+nator is trained with adversarial examples.
+
+a generative model where the generator learns to convert
+white noise to images that look authentic to the discrimi-
+nator [11, 28]. We show in this paper that they are indeed
+closely related and can be used to strengthen each other,
+speciﬁcally we have the following key insights:
+
+1. The robustness of adversarial trained classiﬁer can be
+improved if we have a deeper understanding of the
+image distribution. Therefore a generator can improve
+the adversarial training process.
+
+2. GAN training can be very slow to reach the equilibrium
+if the discriminator has a large curvature on the image
+manifold. Therefore an adversarial trained discrimina-
+tor can accelerate GAN training.
+
+Based on these ﬁndings, we managed to accelerate and stabi-
+lize the GAN training cycle, by enforcing the discriminator
+to stay robust on image manifold. At the same time, since
+data augmentation is used in the robust training process,
+the generator provides more information about the data dis-
+tribution. Therefore we get a more robust classiﬁer that
+generalizes better to unseen data. Our contributions can be
+summarized as follows:
+
+1. We give insights why the current adversarial training
+algorithm does not generalize well to unseen data. Par-
+allelly, we explain why the GAN training is slow to
+
+11234
+
+reach an equilibrium.
+
+2. We draw a connection between adversarial training and
+GAN training, showing how they can beneﬁt each other:
+we can use GAN to improve the generalizability of ad-
+versarial training, and use adversarial training to accel-
+erate GAN training and meanwhile make it converge to
+a better generator.
+
+3. We propose a novel framework called Rob-GAN,
+which integrates generator, discriminator and adver-
+sarial attacker as a three-player game. And we also
+show how to train the framework efﬁciently in an end
+to end manner.
+
+4. We formulate a better training loss for conditional GAN
+
+by reformulating the AC-GAN loss.
+
+5. We design a series of experiments to conﬁrm all the hy-
+potheses and innovations made in the text. For example,
+with GAN data augmentation, we can improve the accu-
+racy of state-of-the-art adversarial training method [23]
+from 29.6% to 36.4% on ResNet18(+CIFAR10) under
+a strong adversarial attack. Moreover, we observe a
+3 ∼ 7x speedup in terms of convergence rate, when
+inserting the adversarial attacker into GAN training cy-
+cle. Lastly, our model attains better inception scores
+on both datasets, compared with the strong baseline
+(SN-GAN [26]).
+
+Notations Throughout this paper, we denote the (image,
+label) pair as (xi, yi), i is the index of data point; The clas-
+siﬁer parameterized by weights w is f (x; w), this function
+includes the ﬁnal Softmax layer so the output is probabili-
+ties. Loss function is denoted as ℓ(·, ·). We also deﬁne D(x)
+and G(z) as the discriminator and generator networks respec-
+tively. The adversarial example xadv is crafted by perturbing
+the original input, i.e. xadv = x + δ, where kδk ≤ δmax.
+For convenience, we consider ℓ∞-norm in our experiments.
+The real and fake images are denoted as xreal/fake. Note that
+in this paper “fake” images and “adversarial” images are
+different: fake images are generated by generator, while ad-
+versarial images are made by perturbing the natural images
+with small (carefully designed) noise. The training set is
+denoted as Dtr, with Ntr data points. This is also the em-
+pirical distribution. The unknown data distribution is Pdata.
+Given the training set Dtr, we deﬁne empirical loss function
+Ntr PNtr
+1
+2. Background and Related Work
+2.1. Generative Adaversarial Network
+
+i=1 ℓ(f (xi; w), yi) = E(x,y)∼Dtr ℓ(f (x; w), y).
+
+A GAN has two competing networks with different ob-
+jectives: in the training phase, the generator G(z) and the
+discriminator D(x) are evolved in a minimax game, which
+can be denoted as a uniﬁed loss:
+
+min
+
+G
+
+D n E
+max
+
+x∼Dtr (cid:2) log D(x)(cid:3)+ E
+
+z∼Pz (cid:2) log(1− D(G(z))(cid:3)o,
+
+(1)
+
+where Pz is the distribution of noise. Unlike traditional
+machine learning problems where we typically minimize
+the loss, (1) is harder to optimize and that is the focus of
+recent literature. Among them, a guideline for the architec-
+tures of G and D is summarized in [30]. For high resolution
+and photo-realistic image generation, currently the standard
+way is to ﬁrst learn to generate low resolution images as
+the intermediate products, and then learn to reﬁne them pro-
+gressively [9, 20]. This turns out to be more stable than
+directly generating high resolution images through a gigan-
+tic network. To reach the equilibrium efﬁciently, alternative
+loss functions [1, 2, 5, 13, 37] are applied and proven to
+be effective. Among them, [1] theoretically explains why
+training DCGAN is highly unstable. Following that work,
+[2] proposes to use Wasserstein-1 distance to measure the
+distance between real and fake data distribution. The result-
+ing network, namely “Wasserstein-GAN”, largely improves
+the stability of GAN training. Another noteworthy work in-
+spired by WGAN/WGAN-GP is spectral normalization [26].
+The main idea is to estimate the operator norm σmax(W ) of
+weights W inside layers (convolution, linear, etc.), and then
+normalize these weights to have 1-operator norm. Because
+ReLU non-linearity is 1-Lipschitz, if we stack these layers
+together the whole network will still be 1-Lipschitz, which
+is exactly the prerequisite to apply Kantorovich-Rubinstein
+duality to estimate Wasserstein distance.
+
+2.2. Adversarial attacks and defenses
+
+Another key ingredient of our method is adversarial train-
+ing, originated in [35] and further studied in [12]. They
+found that machine learning models can be easily “fooled”
+by slightly modiﬁed images if we design a tiny perturbation
+according to some “attack” algorithms. In this paper we ap-
+ply a standard algorithm called PGD-attack [23] to generate
+adversarial examples. Given an example x with ground truth
+label y, PGD computes adversarial perturbation δ by solving
+the following optimization with Projected Gradient Descent:
+
+δ := arg max
+kδk≤δmax
+
+ℓ(cid:0)f (x + δ; w), y(cid:1),
+
+(2)
+
+where f (·; w) is the network parameterized by weights w,
+ℓ(·, ·) is the loss function and for convenience we choose
+k · k to be the ℓ∞-norm in accordance with [23, 4], but note
+that other norms are also applicable. Intuitively, the idea
+of (2) is to ﬁnd the point xadv := x + δ within an ℓ∞-ball
+such that the loss value of xadv is maximized, so that point
+is most likely to be an adversarial example. In fact, most
+optimization-based attacking algorithms (e.g. FGSM [12],
+C&W [7]) share the same idea as PGD attack.
+
+Opposite to the adversarial attacks, the adversarial de-
+fenses are techniques that make models resistant to ad-
+versarial examples.
+It is worth noting that defense is a
+much harder task compared with attacks, especially for
+
+11235
+
+high dimensional data combined with complex models.
+Despite that huge amount of defense methods are pro-
+posed [29, 23, 6, 22, 15, 10, 39, 34, 31], which can be iden-
+tiﬁed as either random based, projection based, or de-noiser
+based. In the important overview paper [4, 3], adversarial
+training [23] is acknowledged as one of the most powerful
+defense algorithm, which can be formulated as
+
+min
+
+w
+
+E
+
+(x,y)∼Pdata
+
+h max
+
+kδk≤δmax
+
+ℓ(cid:0)f (x + δ; w), y(cid:1)i,
+
+(3)
+
+where (x, y) ∼ Pdata is the (image, label) joint distribu-
+tion of data, f (x; w) is the network parameterized by w,
+ℓ(cid:0)f (x; w), y(cid:1) is the loss function of network (such as the
+cross-entropy loss). We remark that the ground truth data
+distribution Pdata is not known in practice, which will be
+replaced by the empirical distribution.
+
+It is worth noting that one of our contributions is to use
+GAN to defend the adversarial attacks, which is superﬁcially
+similar to Defense-GAN [32]. However, they are totally
+different underneath: the idea of Defense-GAN is to project
+an adversarial example to the space of fake images by min-
+imizing ℓ2 distance: xout = arg minG(z) kxadv − G(z)k2,
+and then making prediction on the output xout. In contrast,
+our defense mechanism is largely based on adversarial train-
+ing [23]. Another less related work that applies GAN in
+adversarial setting is AdvGAN [38], where GAN is used to
+generate adversarial examples. In comparison, we design a
+collaboration scheme between GAN and adversarial training
+and both parts are trained jointly.
+
+3. Proposed Approach
+
+We propose a framework called Rob-GAN to jointly op-
+timize generator and discriminator in the presence of adver-
+sarial attacks—the generator generates fake images to fool
+discriminator; the adversarial attack perturbs real images to
+fool discriminator, and the discriminator wants to minimize
+loss under fake and adversarial images (see Fig. 1). In fact,
+Rob-GAN is closely related to both adversarial training and
+GAN. If we remove generator, Rob-GAN becomes standard
+adversarial training method. If we remove adversarial attack,
+Rob-GAN becomes standard GAN. But why do we want to
+put these three components together? Before delving into
+details, we ﬁrst present two important motivations: I) Why
+can GAN improve the robustness of adversarial trained dis-
+criminator? II) Why can adversarial attacker improve the
+training of GAN?
+
+We answer I) and II) in Section 3.1 and 3.2, and then give
+
+details of Rob-GAN in Section 3.3.
+
+3.1. Insight I: The generalization gap of adversarial
+
+training — GAN aided adversarial training
+
+effective defense method to date. However, until now this
+method has only been tested on small dataset like MNIST
+and CIFAR10 and it is still an open problem whether adver-
+sarial training can scale to large dataset such as ImageNet.
+Furthermore, although adversarial training leads to certiﬁed
+robustness on training set (due to the design of the objective
+function (3)), the performance usually drops signiﬁcantly on
+the test set. This means that the generalization gap is large
+under adversarial attacks (Fig. 2 (Left)). In other words, de-
+spite that it is hard to ﬁnd an adversarial example near the
+training data, it is much easier to ﬁnd one near the testing
+data. In the following, we investigate the reason behind this
+huge (and enlarging) generalization gap, and later we will
+solve this problem with GAN aided adversarial training.
+
+To make our model robust to adversarial distortion, it is
+desirable to enforce a small local Lipschitz value (LLV) on
+the underlining data distribution Pdata. This idea includes
+many of the defense methods such as [8]. In essence, re-
+stricting the LLV can be formulated as a composite loss
+minimization problem:
+
+min
+
+w
+
+E
+
+(x,y)∼Pdata
+
+hℓ(cid:0)f (x; w), y(cid:1) + λ · (cid:13)(cid:13)
+
+∂
+∂x
+
+ℓ(cid:0)f (x; w), y(cid:1)(cid:13)(cid:13)2i.
+
+(4)
+Note that (4) can be regarded as the “linear expansion” of (3).
+In practice we do not know the ground truth data distribution
+Pdata; instead, we use the empirical distribution to replace
+(4):
+
+min
+
+w
+
+1
+Ntr
+
+Ntr
+
+X
+
+i=1
+
+hℓ(cid:0)f (xi; w), yi(cid:1)+λ·(cid:13)(cid:13)
+
+∂
+∂xi
+
+ℓ(cid:0)f (xi; w), yi(cid:1)(cid:13)(cid:13)2i,
+
+(5)
+where {(xi, yi)}Ntr
+i=1 are feature-label pairs of the training
+set. Ideally, if we have enough data and the hypotheses
+set is moderately large, the objective function in (5) still
+converges to (4). However when considering adversarial
+robustness, we have one more problem to worry about:
+
+Does small LLV in training set automatically gen-
+eralize to test set?
+
+The enlarged accuracy gap shown in Fig. 2 (Left) implies
+a negative answer. To verify this phenomenon in an ex-
+plicit way, we calculate Lipschitz values on samples from
+training and testing set separately (Fig. 2 (Right)). We can
+see that similar to the accuracy gap, the LLV gap between
+training and testing set is equally large. Thus we conclude
+that although adversarial training controls LLV around
+training set effectively, this property does not generalize
+to test set. Notice that our empirical ﬁndings do not con-
+tradict the certiﬁed robustness of adversarial training using
+generalization theory (e.g. [33]), which can be loose when
+dealing with deep neural networks.
+
+In Sec. 2.2 we listed some works on adversarial defense,
+and pointed out that adversarial training is one of the most
+
+The generalization gap can be reduced if we have a direct
+access to the whole distribution Pdata, instead of approxi-
+
+11236
+
+y
+c
+a
+r
+u
+c
+c
+A
+
+1.0
+
+0.9
+
+0.8
+
+0.7
+
+0.6
+
+0.5
+
+0.4
+
+0.3
+
+0.2
+
+Test
+Train
+
+Train
+Test
+Gap
+
+0.35
+
+0.30
+
+0.25
+
+0.20
+
+0.15
+
+0.10
+
+p
+a
+g
+
+y
+c
+a
+r
+u
+c
+c
+A
+
+m
+r
+o
+n
+
+t
+n
+e
+i
+d
+a
+r
+G
+
+0.0030
+
+0.0025
+
+0.0020
+
+0.0015
+
+0.0010
+
+0.0005
+
+0.0000
+
+0.00
+
+0.01
+
+0.02
+
+0.03
+
+0.04
+
+0.05
+
+0.06
+
+0
+
+20
+
+40
+
+60
+
+80
+
+100 120 140 160 180
+
+Attack strength
+
+Epoch
+
+Figure 2: Left: Accuracy under different levels of attack. The model (VGG16) is obtained by adversarial training on CIFAR-10
+with the maximum perturbation in adversarial training set as 8/256. We can observe that: 1) the accuracy gap between training
+and testing is large, 2) the gap is even larger than the attack strength (after attack strength ≈ 0.03, both training and testing
+accuracy go down to zero, so the gap also decreases). Right: The local Lipschitz value (LLV) measured by gradient norm
+k ∂
+ℓ(cid:0)f (xi; w), yi(cid:1)k2. Data pairs (xi, yi) are sampled from the training and testing set respectively. During the training
+∂xi
+process, LLV on the training set stabilizes at a low level, while LLV on the test set keeps growing.
+
+mating it by limited training data. This leads to our ﬁrst
+motivation:
+
+Can we use GAN to learn Pdata and then perform
+the adversarial training process on the learned
+distribution?
+
+If so, then it becomes straightforward to train an even more
+robust classiﬁer. Here we give the loss function for doing
+that, which can be regarded as composite robust optimization
+on both original training data and GAN synthesized data:
+
+min
+
+w
+
+Lreal(w, δmax) + λ · Lfake(w, δmax),
+
+1
+Ntr
+
+Ntr
+
+X
+
+E
+
+i=1
+
+max
+
+max
+
+kδk≤δmax
+
+kδik≤δmax
+
+(x,y)∼Pfake
+
+Lreal(w, δmax) ,
+
+Lfake(w, δmax) ,
+
+ℓ(cid:0)f (xi + δi; w); yi(cid:1),
+ℓ(cid:0)f (x + δ; w); y(cid:1).
+(6)
+Again the coefﬁcient λ is used to balance the two losses.
+To optimize the objective function (6), we adopt the same
+stochastic optimization algorithm as adversarial training.
+That is, at each iteration we draw samples from either train-
+ing or synthesized data, ﬁnd the adversarial examples, and
+then calculate stochastic gradients upon the adversarial ex-
+amples. We will show the experimental results in Sec. 4.
+
+3.2. Insight II: Accelerate GAN training by robust
+
+discriminator
+
+If even a well trained deep classiﬁer can be easily
+“cheated” by adversarial examples, so can the others. Recall
+in conditional GANs, such as AC-GAN [28], the discrim-
+inator should not only classify real/fake images but also
+assign correct labels to input images. Chances are that, if
+the discriminator is not robust enough to the adversarial at-
+tacks, then the generator could make use of its weakness
+and “cheat” the discriminator in a similar way. Furthermore,
+
+even though the discriminator can be trained to recognize
+certain adversarial patterns, the generator will ﬁnd out other
+adversarial patterns easily, so the minimax game never stops.
+Thus we make the following hypothesis:
+
+Fast GAN training relies on robust discriminator.
+
+Before we support this hypothesis with experiments, we
+brieﬂy review the development of GANs: the ﬁrst version
+of GAN objective [11] is unstable to train, WGAN [2, 14]
+adds a gradient regularizer to enforce the discriminator to
+be globally 1-Lipschitz continuous. Later on, SN-GAN [26]
+improves WGAN by replacing gradient regularizer with spec-
+tral normalization, again enforcing 1-Lipschitz continuity
+globally in discriminator. We see both methods implicitly
+make discriminator to be robust against adversarial attacks,
+because a small Lipschitz value (e.g. 1-Lipschitz) enables
+stronger invariance to adversarial perturbations.
+
+Despite the success along this line of research, we wonder
+if a weaker but smarter regularization to the discriminator is
+possible. After all, if the regularization effect is too strong,
+then the model expressiveness will be restricted. Concretely,
+instead of a strict one-Lipschitz function globally, we re-
+quire a small local Lipschitz value on image manifold. As
+we will see, this can be done conveniently through adversar-
+ial training to the discriminator. In this way, we can draw a
+connection between the robustness of discriminator and the
+learning efﬁciency of generator, as illustrated in Fig. 3.
+
+As one can see in Fig. 3, if a discriminator D(x) has small
+LLV (equivalently, small kD′(x)k), then we know D(x +
+δ) ≈ D(x) + D′(x) · δ ≈ D(x) for a “reasonably” small
+δ. In other words, for a robust discriminator, the perturbed
+fake image xadv = x0 + δ is unlikely to be misclassiﬁed as
+real image, unless δ is large. Different from the setting of
+adversarial attacks (2), in GAN training, the “attacker” is
+now a generator network G(z; w) parameterized by w ∈ Rd.
+Suppose at time t, the discriminator can successfully identify
+
+11237
+
+Real	images
+
+Fake	images
+
+𝑥"
+
+𝛿
+
+Robust
+
+𝑥adv = 𝑥" + 𝛿
+
+𝑥adv = 𝑥" + 𝛿
+
+𝛿
+
+𝑥"
+
+Decision boundary
+
+Non-
+
+robust
+
+Figure 3: Comparing robust and non-robust discriminators,
+for simplicity, we put them together into one graph. Concep-
+tually, the non-robust discriminator tends to make all images
+close to the decision boundary, so even a tiny distortion δ can
+move a fake image x0 to across the decision boundary and
+leads to a mis-classiﬁcation: xadv = x0 + δ. In contrast, such
+δ is expected to be much larger for robust discriminators.
+
+fake images, or equivalently D(G(z; wt)) ≈ 0 for all z,
+then at time t + 1 what should the generator do to make
+D(G(z; wt+1)) ≈ 1? We can develop the following bound
+by assuming the Lipschitz continuity of D(x) and G(z; w),
+
+1 ≈D(G(z; wt+1)) − D(G(z; wt))
+/kD′(cid:0)G(z; wt)(cid:1)k · kG(z; wt+1) − G(z; wt)k
+/kD′(cid:0)G(z; wt)(cid:1)k · k
+≤LDLGkwt+1 − wtk,
+
+∂
+∂w
+
+G(z; wt)k · kwt+1 − wtk
+
+(7)
+
+LD LG
+
+where LD,G indicates the Lipschitz constants of discrim-
+inator and generator. As we can see, the update of gen-
+erator weights is inversely proportional to LD and LG:
+kwt+1−wtk ∝ 1
+. If the discriminator is lacking robust-
+ness, meaning LD is large, then the generator only needs to
+make a small movement from the previous weights wt, mak-
+ing the convergence very slow. This validates our hypothesis
+that fast GAN training relies on robust discriminator. In
+the experiment section, we observe the same phenomenon
+in all two experiments, providing a solid support for this
+hypothesis.
+
+3.3. Rob-GAN: Adversarial training on learned im 
+
+age manifold
+
+Motivated by Sec. 3.1 and 3.2, we propose a system that
+combines generator, discriminator, and adversarial attacker
+into a single framework. Within this framework, we conduct
+end-to-end training for both generator and discriminator: the
+generator feeds fake images to the discriminator; meanwhile
+real images sampled from training set are preprocessed by
+PGD attacking algorithm before sending to the discriminator.
+The network structure is illustrated in Fig. 1.
+
+Discriminator and the new loss function: The discrimi-
+nator could have the standard architecture like AC-GAN. At
+each iteration, it discriminates real and fake images. When
+the ground truth labels are available, it also predicts the
+classes.
+In this paper, we only consider the conditional
+GANs proposed in [25, 28, 27], and their architectural dif-
+ferences are illustrated in Fig. 4. Among them we sim-
+ply choose AC-GAN, despite that SN-GAN (a combination
+of spectral normalization [26] and projection discrimina-
+tor [27]) performs much better in their paper. The reason
+we choose AC-GAN is that SN-GAN’s discriminator relies
+on the ground truth labels and their objective function is not
+designed to encourage high classiﬁcation accuracy. But sur-
+prisingly, even though AC-GAN is beaten by SN-GAN by a
+large margin, after inserting the adversarial training module,
+the performance of AC-GAN matches or even surpasses the
+SN-GAN, due to the reason discussed in Sec. 3.2.
+
+We also improved the loss function of AC-GAN. Recall
+that the original loss in [28] deﬁned by discrimination likeli-
+hood LS and classiﬁcation likelihood LC :
+
+LS = E[log P(S = real|Xreal)] + E[log P(S = fake|Xfake)]
+LC = E[log P(C = c|Xreal)] + E[log P(C = c|Xfake)],
+
+(8)
+where Xreal/fake are any real/fake images, S is the discrim-
+inator output, and C is the classiﬁer output. Based on (8),
+the goal of discriminator is to maximize LS + LC while
+generator aims at maximizing LC − LS. According to this
+formula, both G and D are trained to increase LC , which
+is problematic because even if G(z; w) generates bad im-
+ages, D(x) has to struggle to classify them (with high loss),
+and in such case the corresponding gradient term ∇LC can
+contribute uninformative direction to the discriminator. To
+resolve this issue, we split LC to separate the contributions
+of real and fake images,
+
+LC1 = E[log P(C = c|Xreal)]
+LC2 = E[log P(C = c|Xfake)],
+
+(9)
+
+then discriminator maximizes LS + LC1 and generator max-
+imizes LC2 − LS. The new objective function ensures that
+discriminator only focuses on classifying real images and
+discriminating real/fake images, and the classiﬁer branch
+will not be distracted by the fake images.
+
+Generator: Similar to the traditional GAN training, the
+generator is updated on a regular basis to mimic the distribu-
+tion of real data. This is the key ingredient to improve the
+robustness of classiﬁcation task: as shown in Sec. 3.1, model
+from adversarial training performs well on training set but
+is vulnerable on test set. Intuitively, this is because during
+adversarial training, the network only “sees” adversarial ex-
+amples residing in the small region of all training samples,
+whereas the rest images in the data manifold are undefended.
+
+11238
+
+(a) C-GAN
+
+(b) AC-GAN
+
+(c) SN-GAN (projection)
+
+(d) Ours
+
+Adversarial 
+
+Loss
+
+Adversarial
+
+Classification
+
+Adversarial 
+
+Adversarial
+
+Classification
+
+Loss
+
+Loss
+
+Loss
+
+Loss
+
+Loss
+
+𝜙
+
+Concat
+
+𝑥
+
+𝑦
+
+𝜙
+
+𝑥
+
+𝑦
+
+ψ
+
+Inner	
+
+Prod
+
+𝑦
+
+𝜙
+
+𝑥
+
+𝜙
+
+𝑥
+
+Figure 4: Comparing the architectures of discriminators. Our architecture is similar to AC-GAN [28], but they are different in
+loss functions, if one compares (8) with (9). (x, y) is (image, label) pair, φ and ψ denote different network blocks. Recall in
+AC-GAN and our architecture, the discriminator has two branches, one is for discriminating “real/fake” images and the other
+is for classiﬁcation.
+
+Data augmentation is a natural way to resolve this issue, but
+traditional data augmentation methods like image jittering,
+random resizing, rotation, etc. [21, 16, 36, 40, 18] are all
+simple geometric transforms, they are useful but not effec-
+tive enough: even after random transforms, the total number
+of training data is still much fewer than required. Instead,
+our system has unlimited samples from generator to provide
+a continuously supported probability density function for
+the adversarial training. Unlike traditional augmentation
+methods, if the equilibrium in (1) is reached, then we can
+show that the solution of (1) would be Pfake(z) dist.= Preal [11],
+and therefore the classiﬁer can be trained on the ground truth
+distribution Preal.
+
+Figure 5: Illustration of ﬁne-tuning the discriminator. We
+omit the adversarial attack here for brevity.
+
+Fine-tuning the classiﬁer: After end-to-end training, the
+discriminator has learned to minimize both discrimination
+loss and classiﬁcation loss (see Fig. 1). If we want to train
+the discriminator to conduct a pure multi-class classiﬁcation
+task, we will need to ﬁne-tune it by combining fake and real
+images and conducting several steps of SGD only on the
+robustness classiﬁcation loss (illustrated in Fig. 5):
+
+Lcls
+
+D ,
+
+E
+
+(x,y)∼Preal
+
+ℓ(f (xadv; w), y)+
+
+λ ·
+
+E
+
+(x,y)∼Pfake
+
+ℓ(f (xadv; w), y),
+
+(10)
+
+where xadv = arg minkx′−xk≤δmax ℓ(f (x′; w), y). Here the
+function f (x; w) is just the classiﬁer branch of discriminator
+D(x), recalling that we are dealing with conditional GAN.
+As we can see, throughout the ﬁne-tuning stage, we force the
+discriminator to focus on the classiﬁcation task rather than
+the discrimination task. The experiments will show that the
+ﬁne-tuning step improves the accuracy by a large margin.
+
+4. Experimental Results
+
+We experiment on both CIFAR10 and a subset of Im-
+ageNet data. Speciﬁcally, we extract classes yi such that
+yi ∈ np.arange(151, 294, 1) from the original Im-
+ageNet data: recall in total there are 1000 classes in Im-
+ageNet data and we sampled 294 − 151 = 143 classes
+from them. We choose these datasets because 1) the cur-
+rent state-of-the-art GAN, SN-GAN [27], also worked on
+these datasets, and 2) the current state-of-the-art adversarial
+training method [23] cannot scale to ImageNet-1k data. In
+order to have a fair comparison, we copy all the network ar-
+chitectures of generators and discriminators from SN-GAN.
+Other important factors, such as learning rate, optimization
+algorithms, and number of discriminator updates in each
+cycle are also kept the same. The only modiﬁcation is that
+we discarded the feature projection layer and applied the
+auxiliary classiﬁer (see Fig. 4).
+
+4.1. Quality of Discriminator
+
+We show that Rob-GAN leads to more robust discrimina-
+
+tor than state-of-the-art adversarial trained models.
+
+Effect of ﬁne-tuning. We ﬁrst compare Rob-GAN
+with/without ﬁne-tuning to verify our claim in Sec. 3.3 that
+ﬁne-tuning improves classiﬁcation accuracy. To this end, we
+compare two sets of models: in the ﬁrst set, we directly ex-
+tract the auxiliary classiﬁers from discriminators to classify
+images; in the second set, we apply ﬁne-tuning strategy to
+the pretrained model as Fig. 5 illustrated. The results are in
+Fig. 6 (left), which suggests that ﬁne-tuning is useful.
+
+11239
+
+y
+c
+a
+r
+u
+c
+c
+A
+
+0.9
+
+0.8
+
+0.7
+
+0.6
+
+0.5
+
+0.4
+
+0.3
+
+0.2
+
+0.1
+
+0.0
+
+w/o ﬁne-tune
+
+w/ ﬁne-tune
+
+y
+c
+a
+r
+u
+c
+c
+A
+
+0.35
+
+0.30
+
+0.25
+
+0.20
+
+0.15
+
+0.10
+
+0.05
+
+w/o ﬁne-tune
+
+w/ ﬁne-tune
+
+p
+a
+g
+
+t
+s
+e
+T
+/
+n
+i
+a
+r
+T
+
+0.30
+
+0.25
+
+0.20
+
+0.15
+
+0.10
+
+w/ augmentation
+
+w/o augmentation
+
+0.0
+
+0.2
+
+0.4
+
+0.6
+
+0.8
+
+1.0
+
+1.2
+
+0.0 0.5 1.0 1.5 2.0 2.5 3.0 3.5 4.0 4.5
+
+Attack strength
+
+×10−1
+
+Attack strength
+
+×10−2
+
+0.00
+
+0.01
+
+0.02
+
+0.03
+
+0.04
+
+0.05
+
+Distortion
+
+Figure 6: Left two panels: The effect of ﬁne-tuning on prediction accuracy (left: CIFAR10, middle: ImageNet-64px). Right
+panel: Comparing the accuracy gap between adversarial training model and GAN data augmentation model.
+
+Accuracy gap comparison: with or without data aug-
+mentation. We check whether adversarial training with
+fake data augmentation (6) really shrinks the generalization
+gap. To this end, we draw the same ﬁgure as Fig. 2, except
+that now the classiﬁcation model is the discriminator of Rob-
+GAN with ﬁne tuning. We compare the accuracy gap in
+Fig. 6 (Right). Clearly the model trained with the adversar-
+ial real+fake augmentation strategy works extremely well:
+it improves the testing accuracy under PGD-attack and so
+the generalization gap between training/testing set does not
+increase that much.
+
+Dataset
+
+Defense
+
+δmax of ℓ∞ attacks
+
+0
+
+0.02
+
+0.04
+
+0.08
+
+CIFAR10
+
+Adv. training
+
+81.45% 69.15% 53.74% 23.58%
+Rob-GAN (w/ FT) 81.1% 70.41% 57.43% 30.25%
+
+0
+
+0.01
+
+0.02
+
+0.03
+
+ImageNet†
+
+(64px)
+
+Adv. Training
+
+20.05% 18.3% 12.52% 8.32%
+Rob-GAN (w/ FT) 32.4% 25.2% 19.1% 13.7%
+
+†Denotes the 143-class subset of ImageNet.
+
+Table 1: Accuracy of our model under ℓ∞ PGD-attack. “FT”
+means ﬁne-tuning.
+
+comparing robustness
+Robustness of discriminator:
+with/ without data augmentation.
+In this experiment, we
+compare the robustness of discriminators trained by Rob-
+GAN with the state-of-the-art adversarial training algorithm
+by [23]. As shown in a recent comparison [4], adversarial
+training [23] achieve state-of-the-art performance in terms
+of robustness under adversarial attacks. Since adversarial
+training is equivalent to Rob-GAN without the GAN compo-
+nent, for fair comparison we keep all the other components
+(network structures) the same.
+
+To test the robustness of different models, we choose the
+widely used ℓ∞ PGD attack [23], but other gradient based
+attacks are expected to yield the same results. We set the ℓ∞
+perturbation to δmax ∈ np.arange(0, 0.1, 0.01)
+as deﬁned in (2). Another minor detail is that we scale the
+images to [−1, 1] rather than usual [0, 1]. This is because
+generators always have a tanh() output layer, so we need to
+
+do some adaptations accordingly. We present the results in
+Tab. 1, which clearly shows that our method (Rob-GAN w/
+FT) performs better than state-of-the-art defense algorithm.
+
+4.2. Quality of Generator
+
+Next we show that by introducing adversarial attack in
+GAN training, Rob-GAN improves the convergence of the
+generator.
+
+Effect of split classiﬁcation loss. Here we show the ef-
+fect of split classiﬁcation loss described in (9). Recall that
+if we apply the loss in (8) then the resulting model is AC-
+GAN. It is known that AC-GAN can easily lose modes in
+practice, i.e. the generator simply ignores the noise input
+z and produces ﬁxed images according to the label y. This
+defect is observed in many previous works [17, 24, 19]. In
+this ablation experiment, we compare the generated images
+trained by two loss functions in Fig. 7. Clearly the proposed
+new loss outperforms the AC-GAN loss.
+
+Quality of generator and convergence speed. Finally,
+we evaluate the quality of generators trained on two datasets:
+ImageNet subset - 64px and ImageNet subset - 128px. We
+compare with the generator obtained by SN-GAN, which
+has been recognized as a state-of-the-art conditional-GAN
+model for learning hundreds of classes. Note that SN-GAN
+can also learn the conditional distribution of the entire Ima-
+geNet data (1000 classes), unfortunately, we are not able to
+match this experiment due to time and hardware limit. To
+show the performance with/without adversarial training and
+with/without new loss, we report the performance of all the
+four combinations in Figure 8. Note that “original loss” is
+equivalent to AC-GAN. Based on Figure 8 we can make the
+following three observations. First, adversarial training can
+improve the convergence speed of GAN training and make it
+converge to a better solution. Second, the new loss leads to
+better solutions on both datasets. Finally, the proposed Rob-
+GAN outperforms SN-GAN (in terms of inception score) on
+these two datasets.
+
+11240
+
+Figure 7: Comparing the generated images trained by our modiﬁed loss(left) with the original AC-GAN loss(right). For fair
+comparison, both networks are trained by inserting adversarial attacker (Sec. 3.2). We can see images from AC-GAN loss are
+more distorted and harder to distinguish.
+
+New loss+Adversarial
+
+New loss
+
+Original loss+Adversarial
+
+Original loss
+
+25
+
+20
+
+15
+
+10
+
+5
+
+e
+r
+o
+c
+s
+
+n
+o
+i
+t
+p
+e
+c
+n
+I
+
+SNGAN=28.2
+
+35
+
+30
+
+25
+
+20
+
+15
+
+10
+
+5
+
+e
+r
+o
+c
+s
+
+n
+o
+i
+t
+p
+e
+c
+n
+I
+
+SNGAN=11.5
+
+0
+
+50
+
+100
+
+150
+
+200
+
+250
+
+300
+
+350
+
+0
+
+20
+
+40
+
+60
+
+80
+
+100
+
+Epoch
+
+Epoch
+
+Figure 8: Results on subset of ImageNet, left: 64px, right: 128px. Here we tried four combinations in total: with or without
+adversarial training, new loss or original loss. We have three ﬁndings: 1) Compared with SN-GAN, our model (new loss +
+adversarial) learns a high quality generator efﬁciently: in both datasets, our model surpasses SN-GAN in just 25 epochs (64px)
+or 50 epochs (128px). 2) When comparing the new loss with the original loss, we see the new loss performs better. 3) Using
+the new loss, the adversarial training algorithm has a great acceleration effect.
+
+5. Conclusions
+
+References
+
+We show the generator can improve adversarial train-
+ing, and the adversarial attacker can improve GAN training.
+Based on these two insights, we proposed to combine gen-
+erator, discriminator and adversarial attacker in the same
+system and conduct end-to-end training. The proposed sys-
+tem simultaneously leads to a better generator and a more
+robust discriminator compared with state-of-the-art models.
+
+Acknowledgments
+
+We acknowledge the support by NSF IIS1719097, Intel,
+
+Google Cloud and AITRICS.
+
+[1] M. Arjovsky and L. Bottou. Towards principled methods
+for training generative adversarial networks. arXiv preprint
+arXiv:1701.04862, 2017. 2
+
+[2] M. Arjovsky, S. Chintala, and L. Bottou. Wasserstein gan.
+
+arXiv preprint arXiv:1701.07875, 2017. 2, 4
+
+[3] A. Athalye and N. Carlini. On the robustness of the cvpr
+2018 white-box adversarial example defenses. arXiv preprint
+arXiv:1804.03286, 2018. 3
+
+[4] A. Athalye, N. Carlini, and D. Wagner. Obfuscated gradients
+give a false sense of security: Circumventing defenses to
+adversarial examples. arXiv preprint arXiv:1802.00420, 2018.
+2, 3, 7
+
+11241
+
+[5] D. Berthelot, T. Schumm, and L. Metz. Began: Boundary
+equilibrium generative adversarial networks. arXiv preprint
+arXiv:1703.10717, 2017. 2
+
+[6] J. Buckman, A. Roy, C. Raffel, and I. Goodfellow. Thermome-
+ter encoding: One hot way to resist adversarial examples. In
+International Conference on Learning Representations, 2018.
+3
+
+[7] N. Carlini and D. Wagner. Towards evaluating the robustness
+of neural networks. In Security and Privacy (SP), 2017 IEEE
+Symposium on, pages 39–57. IEEE, 2017. 2
+
+[8] M. Cisse, P. Bojanowski, E. Grave, Y. Dauphin, and
+N. Usunier. Parseval networks: Improving robustness to ad-
+versarial examples. In International Conference on Machine
+Learning, pages 854–863, 2017. 3
+
+[9] E. L. Denton, S. Chintala, R. Fergus, et al. Deep generative
+image models using a laplacian pyramid of adversarial net-
+works. In Advances in neural information processing systems,
+pages 1486–1494, 2015. 2
+
+[10] G. S. Dhillon, K. Azizzadenesheli, J. D. Bernstein, J. Kossaiﬁ,
+A. Khanna, Z. C. Lipton, and A. Anandkumar. Stochastic acti-
+vation pruning for robust adversarial defense. In International
+Conference on Learning Representations, 2018. 3
+
+[11] I. Goodfellow, J. Pouget-Abadie, M. Mirza, B. Xu, D. Warde-
+Farley, S. Ozair, A. Courville, and Y. Bengio. Generative
+adversarial nets. In Advances in neural information process-
+ing systems, pages 2672–2680, 2014. 1, 4, 6
+
+[12] I. J. Goodfellow, J. Shlens, and C. Szegedy. Explain-
+ing and harnessing adversarial examples. arXiv preprint
+arXiv:1412.6572, 2014. 2
+
+[13] I. Gulrajani, F. Ahmed, M. Arjovsky, V. Dumoulin, and A. C.
+Courville. Improved training of wasserstein gans. In Advances
+in Neural Information Processing Systems, pages 5769–5779,
+2017. 2
+
+[14] I. Gulrajani, F. Ahmed, M. Arjovsky, V. Dumoulin, and A. C.
+Courville. Improved training of wasserstein gans. In Advances
+in Neural Information Processing Systems, pages 5769–5779,
+2017. 4
+
+[15] C. Guo, M. Rana, M. Cisse, and L. van der Maaten. Coun-
+tering adversarial images using input transformations.
+In
+International Conference on Learning Representations, 2018.
+3
+
+[16] A. Halevy, P. Norvig, and F. Pereira. The unreasonable effec-
+tiveness of data. IEEE Intelligent Systems, 24(2):8–12, 2009.
+6
+
+[17] X. Huang, Y. Li, O. Poursaeed, J. Hopcroft, and S. Belongie.
+Stacked generative adversarial networks. In IEEE Confer-
+ence on Computer Vision and Pattern Recognition (CVPR),
+volume 2, page 4, 2017. 7
+
+[18] H. Inoue. Data augmentation by pairing samples for images
+
+classiﬁcation. arXiv preprint arXiv:1801.02929, 2018. 6
+
+[19] P. Isola, J.-Y. Zhu, T. Zhou, and A. A. Efros. Image-to-image
+translation with conditional adversarial networks. arXiv
+preprint, 2017. 7
+
+[20] T. Karras, T. Aila, S. Laine, and J. Lehtinen. Progressive
+growing of gans for improved quality, stability, and variation.
+arXiv preprint arXiv:1710.10196, 2017. 2
+
+[21] A. Krizhevsky, I. Sutskever, and G. E. Hinton.
+
+Imagenet
+classiﬁcation with deep convolutional neural networks. In
+Advances in neural information processing systems, pages
+1097–1105, 2012. 6
+
+[22] X. Ma, B. Li, Y. Wang, S. M. Erfani, S. Wijewickrema,
+G. Schoenebeck, M. E. Houle, D. Song, and J. Bailey. Char-
+acterizing adversarial subspaces using local intrinsic dimen-
+sionality. In International Conference on Learning Represen-
+tations, 2018. 3
+
+[23] A. Madry, A. Makelov, L. Schmidt, D. Tsipras, and A. Vladu.
+Towards deep learning models resistant to adversarial attacks.
+arXiv preprint arXiv:1706.06083, 2017. 1, 2, 3, 6, 7
+
+[24] M. Mathieu, C. Couprie, and Y. LeCun. Deep multi-scale
+video prediction beyond mean square error. arXiv preprint
+arXiv:1511.05440, 2015. 7
+
+[25] M. Mirza and S. Osindero. Conditional generative adversarial
+
+nets. arXiv preprint arXiv:1411.1784, 2014. 5
+
+[26] T. Miyato, T. Kataoka, M. Koyama, and Y. Yoshida. Spectral
+normalization for generative adversarial networks. In Inter-
+national Conference on Learning Representations, 2018. 2,
+4, 5
+
+[27] T. Miyato and M. Koyama. cGANs with projection discrimi-
+nator. In International Conference on Learning Representa-
+tions, 2018. 5, 6
+
+[28] A. Odena, C. Olah, and J. Shlens. Conditional image synthesis
+with auxiliary classiﬁer gans. In International Conference on
+Machine Learning, pages 2642–2651, 2017. 1, 4, 5, 6
+
+[29] N. Papernot, P. McDaniel, X. Wu, S. Jha, and A. Swami.
+Distillation as a defense to adversarial perturbations against
+deep neural networks. In Security and Privacy (SP), 2016
+IEEE Symposium on, pages 582–597. IEEE, 2016. 3
+
+[30] A. Radford, L. Metz, and S. Chintala. Unsupervised represen-
+tation learning with deep convolutional generative adversarial
+networks. arXiv preprint arXiv:1511.06434, 2015. 2
+
+[31] P. Samangouei, M. Kabkab, and R. Chellappa. Defense-
+GAN: Protecting classiﬁers against adversarial attacks using
+generative models. In International Conference on Learning
+Representations, 2018. 3
+
+[32] P. Samangouei, M. Kabkab, and R. Chellappa. Defense-
+gan: Protecting classiﬁers against adversarial attacks using
+generative models. arXiv preprint arXiv:1805.06605, 2018. 3
+[33] A. Sinha, H. Namkoong, and J. Duchi. Certiﬁable distribu-
+tional robustness with principled adversarial training. arXiv
+preprint arXiv:1710.10571, 2017. 3
+
+[34] Y. Song, T. Kim, S. Nowozin, S. Ermon, and N. Kushman.
+Pixeldefend: Leveraging generative models to understand
+and defend against adversarial examples. In International
+Conference on Learning Representations, 2018. 3
+
+[35] C. Szegedy, W. Zaremba, I. Sutskever, J. Bruna, D. Erhan,
+I. Goodfellow, and R. Fergus. Intriguing properties of neural
+networks. arXiv preprint arXiv:1312.6199, 2013. 2
+
+[36] Y. Tokozume, Y. Ushiku, and T. Harada. Learning from
+between-class examples for deep sound recognition. arXiv
+preprint arXiv:1711.10282, 2017. 6
+
+[37] T. Unterthiner, B. Nessler, G. Klambauer, M. Heusel, H. Ram-
+sauer, and S. Hochreiter. Coulomb gans: Provably op-
+timal nash equilibria via potential ﬁelds. arXiv preprint
+arXiv:1708.08819, 2017. 2
+
+11242
+
+[38] C. Xiao, B. Li, J.-Y. Zhu, W. He, M. Liu, and D. Song. Gener-
+ating adversarial examples with adversarial networks. arXiv
+preprint arXiv:1801.02610, 2018. 3
+
+[39] C. Xie, J. Wang, Z. Zhang, Z. Ren, and A. Yuille. Mitigating
+adversarial effects through randomization. In International
+Conference on Learning Representations, 2018. 3
+
+[40] H. Zhang, M. Cisse, Y. N. Dauphin, and D. Lopez-Paz.
+mixup: Beyond empirical risk minimization. arXiv preprint
+arXiv:1710.09412, 2017. 6
+
+11243
+
+

@@ -1,0 +1,1547 @@
+Learning Independent Object Motion from Unlabelled Stereoscopic Videos
+
+Zhe Cao
+
+UC Berkeley
+
+Abhishek Kar
+Fyusion Inc.
+
+Christian H¨ane
+
+Google
+
+Jitendra Malik
+UC Berkeley
+
+zhecao@berkeley.edu
+
+akar@fyusion.com
+
+chaene@google.com
+
+malik@eecs.berkeley.edu
+
+Abstract
+
+We present a system for learning motion maps of inde-
+pendently moving objects from stereo videos. The only an-
+notations used in our system are 2D object bounding boxes
+which introduce the notion of objects in our system. Un-
+like prior learning based approaches which have focused
+on predicting dense optical ﬂow ﬁelds and/or depth maps
+for images, we propose to predict instance speciﬁc 3D scene
+ﬂow maps and instance masks from which we derive a fac-
+tored 3D motion map for each object instance. Our network
+takes the 3D geometry of the problem into account which al-
+lows it to correlate the input images and distinguish moving
+objects from static ones. We present experiments evaluating
+the accuracy of our 3D ﬂow vectors, as well as depth maps
+and projected 2D optical ﬂow where our jointly learned sys-
+tem outperforms earlier approaches trained for each task
+independently.
+
+1. Introduction
+
+Consider the crowded road scene in Figure 1, what in-
+formation do we as humans use to navigate effectively in
+this environment? We need to have an understanding of the
+structure of the environment, i.e. how far other elements
+in the scene (cars, bikes, people, trees) are from us. More-
+over, we also require knowledge of the speed and direction
+in which other agents in the environment are moving rela-
+tive to us. Such a representation, in conjunction with our
+ego-motion, enables us to produce a hypothesis of the envi-
+ronment state in the near future and ultimately allows us to
+plan our next actions.
+
+In order to gather this information, humans use stereo-
+motion, i.e. a stream of images captured with our two eyes
+as we move through the environment. In this work, we de-
+velop a computational system that aims to produce such a
+factored scene representation of 3D structure and motion
+from a binocular video stream. Speciﬁcally, we propose to
+predict the 3D object motion of each moving object (repre-
+sented by 3D scene ﬂow) in addition to a detailed depth map
+of the scene from a stereo image sequence. This task and
+
+Figure 1. Object motion predicted by our system. Trained with raw
+stereo motion sequences in a self-supervised manner, our model
+learns to predict object motion together with the scene depth us-
+ing sequence of stereo images and object proposals as input. The
+speed and moving direction of each moving object is derived from
+our scene ﬂow prediction.
+
+its variants have been tackled in supervised settings which
+require labels such as dense depth maps and motion anno-
+tations that are prohibitively expensive to collect or alter-
+natively obtained from synthetic datasets [4, 5, 17, 21, 27].
+We present a system that learns to predict these quantities
+using only unlabelled stereo videos, thus making it applica-
+ble at scale. In addition to producing pixel-wise depth and
+scene ﬂow maps, our network is aware of the notion of inde-
+pendent objects. This allows us to produce a rich factored
+3D representation of the environment where we can mea-
+sure velocities of independent objects in addition to their
+3D positions and extents in the scene. The only labels used
+by our system are those introduced by off-the-shelf object
+detectors which are very cheap to acquire at scale.
+
+Prior work in this domain has focused on certain sub-
+problems such as learning depth or optical ﬂow prediction
+without explicit labels [49, 12, 8]. In Section 5, we demon-
+strate that by jointly learning the full problem of depth and
+scene ﬂow prediction, we outperform these methods for
+each of these sub-problems as well. The key contributions
+of our work are as follows: (1) formulating a learning ob-
+jective which works with the limited amount of supervi-
+sion that can be gathered in a real world scenario (object
+bounding box annotations), (2) factoring the scene repre-
+
+15594
+
+sentation into independently moving objects for predicting
+dense depth and 3D scene ﬂow and (3) designing a network
+architecture that encodes the underlying 3D structure of the
+problem by operating on plane sweep volumes.
+
+The sections in this paper are organized as follows. Sec-
+tion 2 discusses prior work on inferring scene structure and
+motion. Section 3 presents our technical approach for infer-
+ring scene ﬂow from stereo motion - loss functions, object-
+centric prediction and priors. In Section 4, we describe our
+network architecture designed for geometric matching and
+3D reasoning in plane sweep volumes. Section 5 details our
+experiments on the KITTI dataset [29] with extensive eval-
+uation of our depth and scene ﬂow prediction.
+
+2. Related work
+
+In our work we recover scene geometry and object mo-
+tion jointly while traditionally these problems have been
+solved independently. The geometry of a scene is recon-
+structed by ﬁrst recovering the relative camera pose be-
+tween two or more images taken from different viewpoints
+using Structure-from-Motion (SfM) techniques [25, 14].
+Subsequently, with dense matching and triangulation a
+dense 3D model of the scene is recovered [31]. The under-
+lying assumption within the aforementioned methods is that
+the scene is static, i.e. does not contain moving objects. The
+case for independently moving objects has been studied in a
+purely geometric setting [3]. The key difﬁculties are degen-
+erate conﬁgurations and outliers in point correspondences
+[30]. Therefore additional priors are used - a common ex-
+ample is objects moving on a ground plane [50]. Simi-
+larly, estimating the shape of non-rigid objects is ambiguous
+and hence using additional constraints such as maximizing
+the rigidity of the shape [41] or representing the non rigid
+shape as linear combination of base shapes [2] have been
+proposed. When reconstructing videos captured in uncon-
+strained environments additional difﬁculties such as incom-
+plete feature tracks and bleeding into the background have
+to be handled [6]. Our proposed approach is trained on real
+world data which makes it robust to appearance variations
+and suitable priors are directly learned from data.
+
+Vedula et al. [42] introduced the problem of 3D scene
+ﬂow estimation, where for each point a 3D motion vector
+between time t and t + 1 is computed. Different variants are
+considered depending on the amount of 3D structure that is
+given as input. A common variant is to consider a stream of
+binocular image pairs of a moving camera as input [16, 46,
+44, 29, 38], and give a depth and 3D scene ﬂow as output.
+This is often referred to as the stereo scene ﬂow estimation
+problem. Similarly RGBD scene ﬂow considers a stream of
+RGBD (color and depth) images as input [18].
+
+Recently learning-based approaches, especially convo-
+lutional neural networks have been applied for single view
+depth prediction [23, 4], optical ﬂow [5], stereo matching
+
+and scene ﬂow [27]. These learning systems are trained us-
+ing ground truth geometry and/or ﬂow data. In practice such
+data is only available for synthetic data in a large scale. A
+natural way to complement the limited amount of ground
+truth data is using weaker supervision. For the aforemen-
+tioned problems, loss functions which are purely based on
+images and rely on photometric consistency as learning ob-
+jective have been proposed [8, 51, 12, 39, 43]. They essen-
+tially utilize a classical non-learned system [7] within the
+loss function. A few recent works [49, 52, 47, 26, 33] use
+such a self-supervised approach to predict optical ﬂow and
+depth. To our knowledge our work is the ﬁrst network that
+learns to directly predict object speciﬁc 3D scene ﬂow with-
+out relying on pixel-wise ﬂow or depth annotations.
+
+Another key difference of our work from prior works
+that predict depth and optical ﬂow is that they predict depth
+based on a single image. This limits their performance as
+demonstrated in our results. Geometric reasoning can be
+included into the network architecture as demonstrated in
+[21, 20, 19, 48]. We extend these ideas to full 3D scene
+ﬂow estimation while also operating at the level of object
+instances allowing us to produce rich factored geometry and
+motion representation of the scene.
+
+3. Scene Flow from Stereo Motion
+
+1, I r
+
+n, I r
+
+1 , . . . I l
+
+Figure 2 illustrates our system. A stream of calibrated
+binocular stereo image pairs I = {I l
+n} cap-
+tured from times 1 to n is given as input. The most common
+case we are investigating is n = 2, i.e. two binocular frames
+at time t and t + 1. The intrinsic camera calibration K is
+assumed to be known. The camera poses of the left camera
+at each time instant are denoted by T = {T1, . . . , Tn} and
+are precomputed using visual SLAM [10]. For any time
+instant t, we also have a set of j 2D bounding box detec-
+tions B = {B1, . . . , Bj} on the left image I l
+t predicted by
+an off-the-shelf object detector. The task is to compute the
+following quantities for the reference frame - a dense depth
+map D, a set of dense 3D ﬂow ﬁelds F = {F 1, . . . , F j}
+that describe the motion between t and t + 1 and a set of in-
+stance masks M = {M 1, . . . , M j} for each moving object.
+From these instance-level predictions, we can compose the
+full scene ﬂow map F by assigning a 3D scene ﬂow vector
+to each image pixel in the full image.
+
+We design our system as a convolutional neural network
+(CNN) which learns to predict all quantities jointly and train
+the network in a self-supervised manner. The supervision
+comes from the consistency between synthesized images
+and input images at different time instants and from dif-
+ferent camera viewpoints. The basic principle is that given
+the predictions of the scene ﬂow F and depth D in a frame
+Iref , we can use the precomputed ego-motion to warp an-
+other image I into the reference view. This process gener-
+ates a synthesized image which we call ˆI. We then deﬁne
+
+5595
+
+RoI Conv
+
+RoI Pool
+
+Conv
+
+F
+e
+a
+t
+.
+
+E
+x
+t
+r
+a
+c
+t
+o
+r
+
+Feature extraction
+
+Depth and motion prediction
+
+Patch and image consistency
+
+Figure 2. Our pipeline for learning depth and object motion. Using a stereo motion sequence as input, our system predicts a depth map (c),
+instance mask (d) and 3D scene ﬂow (e) for each independent moving object in a single forward pass. Using the instance mask and scene
+ﬂow, we compose a full scene ﬂow map (g). For each region of interest (RoI), we synthesize a patch (h) based on the RoI camera intrinsics,
+RoI depth (f), 3D scene ﬂow (e) and instance mask (d) as explained in Section 3.2. We use the synthesized patch (h) and original patch
+(i) from the input image to enforce consistency losses to supervise the RoI prediction. We use stereo reprojection to supervise the depth
+prediction. Finally, we use the full map scene ﬂow and depth to synthesize a image (j) for computing the consistency loss.
+
+our learning objective as the similarity between the captured
+images Iref and the synthesized images ˆI. The above princi-
+ple is then applied to each region of interest (RoI) indepen-
+dently followed by an assembly procedure for full image
+scene ﬂow. This allows us to produce a factored representa-
+tion of the environment into static and dynamic objects with
+high-quality estimates of instance masks, depth and motion.
+
+3.1. Disentangling Camera and Object Motion
+
+The motion in a dynamic scene captured by a moving
+camera can be decomposed into two elements - the motion
+of static background resulting from the camera motion and
+the motion of independently moving objects in the scene.
+A common way to represent the scene motion is 2D optical
+ﬂow. However, this representation confounds the camera
+and object motion. We model the motion of the static back-
+ground using the 3D structure represented as a depth map
+and the camera motion. Dynamic objects are modelled with
+full 3D scene ﬂow. To this end, we utilize 2D object detec-
+tions in the form of bounding boxes and reason about the
+3D motion of each object independently.
+
+3.2. Supervising Scene Flow by View Synthesis
+
+The key supervision for the scene ﬂow prediction comes
+from the photometric consistency of multiple views of the
+same scene. The process is illustrated in Figure 3. Our
+
+network predicts a depth map D and a scene ﬂow map F
+for the reference view Iref . Using a different image I we
+can use the predictions to warp I into the reference view
+and generate a synthesized image ˆI. We then minimize the
+photometric difference between Iref and ˆI given as
+
+Lphoto = α
+
+1 − SSIM(Iref , ˆI)
+
+2
+
++ (1−α)kIref − ˆIk1
+
+(1)
+
+where SSIM denotes the structural similarity index [45] and
+α denotes a weighting parameter.
+
+We denote the homogeneous coordinates of pixel p as
+h(p). A pixel p from the reference frame is transformed to
+a pixel ˆp within a frame I
+
+h(ˆp) = KTrel(D(p)K −1h(p) + F (p))
+
+(2)
+
+with Trel the relative transformation from reference frame
+to I. This allows us to do a reverse warp using bilinear
+interpolation, keeping the formulation differentiable.
+
+Using the photometric consistency alone is insufﬁcient
+for supervising the 3D ﬂow prediction. The reason is that
+along a viewing ray multiple photo consistent solutions are
+possible, as shown in Figure 3. Therefore we use an ad-
+ditional geometric loss leveraging depth consistency which
+further constrains the ﬂow. The idea is that the ﬂow in z-
+direction, sometimes also called disparity difference has to
+
+5596
+
+Bilinear Sample  
+
+Depth + RGB
+
+Figure 3. Illustration of our image reprojection process. A pixel p
+from image It is unprojected using its predicted depth and subse-
+quently transformed to the frame of It+1 using the predicted ﬂow
+F and the camera transform Trel. The photometric consistency
+loss is derived from the photometric difference between It and
+ˆIt+1→t where ˆIt+1→t is created by warping It+1 into It. The ge-
+ometric consistency loss is computed by comparing the difference
+between depth maps warped in the above manner and having them
+consistent with the z-dimension of the predicted ﬂow F . Note that
+using only photometric consistency would not resolve the ambigu-
+ity in the z direction of the ﬂow.
+
+agree with the depth maps predicted for the two time in-
+stants t and t + 1. In order to utilize this loss function a
+depth map for both time instants needs to be predicted and
+the warping is applied to the depth map.
+
+Analogous to the photometric consistency, the geomet-
+ric consistency is deﬁned by comparing the predicted depth
+values of the warped image and reference image,
+
+(3)
+
+Lgeo = (cid:13)(cid:13)(cid:13)
+
+Dref − ˆD + Fz(cid:13)(cid:13)(cid:13)1
+
+where Dref refers to the predicted depth at time t and ˆD is
+the predicted depth at time t + 1 warped back to time t, Fz
+is the z-dimension of the predicted sceneﬂow.
+
+3.3. Object centric Scene Flow Prediction
+
+Image based consistency losses are typically applied by
+warping the whole image and then computing the consis-
+tency over the whole image - examples for optical ﬂow pre-
+diction can be found in [49, 52]. For 3D scene ﬂow this is
+not an ideal choice due to the sparsity of non-zero ﬂow vec-
+tors. Compared to the static background, moving objects
+constitute only a small fraction of the image pixels. This
+unbalanced moving/static pixel distribution makes naively
+learning full image ﬂow hard and ends up in zero ﬂow pre-
+dictions even on moving objects. To make the network fo-
+cus on predicting the correct ﬂow on moving objects and
+provide a more balanced supervision, we therefore use ob-
+ject bounding box detections obtained from a state-of-the-
+art 2D object detection system [24]. It is important to note
+that the object detection does not actually tell us if the ob-
+ject is moving or not. This information is learned by our
+network using our view synthesis based loss functions.
+
+Full-image Camera
+
+RoI Camera
+
+Figure 4. Illustration of image rescale and crop process and the
+change in the camera intrinsics.
+
+Formally each ﬂow prediction happens in a region of in-
+terest (RoI) within the original image, with size and loca-
+
+tion B = (cid:2)x, y, w, h(cid:3). In our system the per-object ﬂow
+
+map is predicted at a ﬁxed size wr × hr using a RCNN
+based architecture as detailed in Section 4. For our view
+synthesis based loss functions we need to transform the im-
+
+age intrinsics K = (cid:20) fx 0 cx
+
+0 0 1 (cid:21) into RoI speciﬁc versions.
+
+0 fy cy
+
+The change only affects the intrinsic camera parameters and
+hence we need to compute a new intrinsic matrix K j for
+each RoI j. The transformation ends up to be a displace-
+ment of the principal point and scaling of the focal length -
+
+K j = (cid:20) fxwr/w
+
+0
+0
+
+0
+
+(cx
+fyhr/h (cy
+
+−x)wr/w
+−y)hr/h
+
+0
+
+1
+
+(cid:21).
+
+Note that we do not need bounding box associations be-
+tween different viewpoints or time instants. We only com-
+pute detections for frame I l
+t and use a slightly expanded area
+as our RoI in frames that we warp to our reference frame for
+computing consistency losses in Eq. 1 and 3.
+
+3.4. RoI Assembly for Full Frame Scene Flow
+
+We assemble a complete scene ﬂow from the object spe-
+ciﬁc maps F j . However, overlapping RoIs and certain RoIs
+may even contain multiple moving objects. Therefore we
+predict an object mask M j for each RoI j in addition to F j .
+The full 3D scene ﬂow map F is computed as:
+
+F = Pj M j ⊙ F j
+
+(4)
+
+We then use the full image ﬂow map F with Eq. 1 and Eq. 3
+for full image photometric and geometric losses. Note that
+the assembly procedure is fully differentiable and we are
+able to train instance masks M = {M 1, . . . , M j} without
+any explicit mask supervision. We later use these instance
+masks (with ﬂow) to identify moving objects (cf.Figure 6).
+
+3.5. Full Learning Objective
+
+We ﬁrst state our full image synthesis based loss and then
+explain further priors we impose in our training loss. Our
+image synthesis loss function is based on four images I l
+t,
+t , I l
+I r
+
+t+1 and can be split into three parts
+
+t+1 and I r
+
+Ltot = Llr + LRoI + Lt
+
+(5)
+
+5597
+
+3D View Frustum
+
+Depth Map
+
+3D Flow
+
+Mask
+
+Feature Unprojection
+
+3D Grid Reasoning
+
+Final Prediction
+
+Figure 5. Network architecture. Our system predicts depth and
+instance-level 3D scene ﬂow in a single forward pass. With ex-
+tracted image features, we unproject features into a discretized
+view frustum grid, and then use a 3D CNN Φ3D and ﬁnally per-
+form prediction using depth ΦD and scene ﬂow ΦSF decoders.
+
+Where Llr is the loss for left-right consistency, LRoI is the
+RoI based loss function and Lt is the full image based loss
+function on ﬂow and depth over time. To state how the three
+parts are deﬁned we introduce the notation s → t to indicate
+the warping from source s to target t.
+
+sweep volume in classical (multi-view) stereo. In learning
+based stereo it has recently been used in [48]. The grid is
+discretized in image space plus an additional inverse depth
+(”nearness”) coordinate, as shown in above image.
+
+4.2. Network Components
+
+Image Encoder.
+In the ﬁrst stage the images are pro-
+cessed using a 2D CNN ΦI , which outputs for each image
+a 2D feature map with c feature channels. The weights for
+this CNN are shared for all input frames - typically stereo
+frames at two time instants {I l
+
+t } and {I l
+
+t+1, I r
+
+t+1}.
+
+t, I r
+
+Unprojection. Using the 3D grid deﬁned in Section 4.1,
+we lift the 2D information into the 3D space. We use the two
+left camera images as references images {I l
+t+1} and gen-
+erate these 3D grids in both their camera coordinates. Each
+grid is populated with image features from all 4 images by
+projecting the grid cell centers into the respective images
+using the corresponding projection matrices [20]. We use
+the left images as reference frames as we predict disparity
+maps and scene ﬂow from I l
+
+t, I l
+
+t to I l
+
+t+1.
+
+t, ˆI r→l
+t
+Lphoto(I l,j
+
+Llr = Lphoto(I l
+LRoI =Xj
+Lt = Lphoto(I l
+
+t, ˆI l
+
+) + Lphoto(I l
+t+1→t)+Lgeo(Dl,j
+
+t+1, ˆI r→l
+t+1 )
+t , ˆDl,j
+
+t , ˆI l,j
+
+t+1→t, F lj
+t )
+
+(6)
+
+t+1→t) + Lgeo(Dl
+
+t, ˆDl
+
+t+1→t, F l
+t )
+
+Beside the loss detailed above, we use additional priors
+such as smoothness for depth and ﬂow while respecting dis-
+continuties at boundaries [12]. Optionally, we use the clas-
+sical stereo system ELAS [9] to compute an incomplete dis-
+parity map and use it for weak supervision with an L1 loss.
+
+4. Network Architecture
+
+Figure 5 illustrates our network for scene ﬂow, mask and
+depth prediction. We ﬁrst talk about the 3D grid represen-
+tation used to integrate the information from all images and
+then describe each component of the network.
+
+4.1. 3D Grid Representation
+
+interest
+
+In order to enable the network to reason about the
+scene geometry in 3D, we unproject the 2D features into
+a 3D grid [20]. A common discretization is to split a 3D
+cuboid volume of
+into
+equally sized voxels. This represen-
+tation is used for 3D object shape re-
+construction [40, 20]. However, it is
+not suitable for outdoor scenes with
+a large depth range, where we want
+to be more certain about foreground objects’ geometry and
+motion, and allow increasing uncertainty with increasing
+depth in the 3D world. This lends to using the well known
+frustum shaped grid called matching cost volume or plane
+
+ 
+
+ 
+
+ 
+
+Grid Pooling. The grids from the previous stage contain
+image features from all 4 frames.
+In order to combine
+the information from multiple frames we use two strate-
+gies. We use element-wise max pooling for features from
+left and right pairs and concatenate the features for differ-
+ent time instants in each grid cell. The motivation is that
+for stereo frames, there is no object motion and hence the
+feature should align well after unprojection. Thus a simple
+strategy of max pooling works well. Whereas for frames at
+different time instants, we expect motion in the scene and
+thus there would be misalignment where objects move. The
+output from this stage are two grids Gl
+
+t and Gl
+
+t+1.
+
+3D Grid Reasoning. The next module Φ3D processes the
+above two grids independently and generates output grids
+of the same resolution ˜Gl
+t+1. This module is im-
+plemented as a 3D encoder-decoder CNN module with skip
+connections following the U-Net architecture [35].
+
+t and ˜Gl
+
+i (a 4D tensor) into a 3D tensor C l
+
+Output Modules. The ﬁnal output is based on two CNN
+modules - one producing full frame depth for each reference
+image and one producing scene ﬂow for each RoI in frame
+It. For each image I l
+i , with i ∈ {t, t + 1} we ﬁrst collapse
+˜Gl
+i by concatenating fea-
+tures in the depth dimension. As the grid is aligned with the
+reference image’s camera, this corresponds to accumulat-
+ing the features from various disparity planes at every pixel
+into a single feature. This tensor is further processed using
+φD to produce the full frame disparity map. The 3D ﬂow
+prediction follows an RCNN [11] based architecture where
+given RoIs, we crop out corresponding regions C l
+t using an
+RoI align layer [15] and pass them to φSF which predict
+the scene ﬂow and instance mask for each RoI. We also use
+skip connections from the image encoder in φD and φSF to
+
+5598
+
+5.1. Moving Object Speed and Direction Evaluation
+
+Our method predicts 3D sceneﬂow for each indepen-
+dently moving object. For each test image pair, ground-
+truth annotation of the disparity image at time t, the dispar-
+ity image at time t + 1 warped into the ﬁrst image’s coordi-
+nate frame and the 2D optical ﬂow from time t to time t + 1
+are provided. Using these GT annotations together with the
+estimated camera egomotion obtained from Libviso2 [10],
+we compute the 3D scene ﬂow in the format of (x, y, z) for
+each image. To provide an instance-level analysis, we use
+the bbox detections [24], and ﬁnd the dominant 3d ﬂow for
+each object. As a result, we represent the motion direction
+and speed for each instance using a single 3d ﬂow vector in
+the ground truth and all algorithms. We evaluate with the
+following metrics: the mean average error of the euclidean
+length of the 3d ﬂow (speed), the mean average error of the
+angle of the 3d ﬂow (motion direction) from the moving
+object pixels. For robustness to outliers we report the per-
+centage of the mean average error below different thresh-
+olds. For comparison with other self-supervised ﬂow and
+depth learning methods we need to reconstruct scene ﬂow
+from depth and optical ﬂow prediction. Geonet provides
+depthmaps with unknown scale factor and unﬂow does not
+estimate depth, we therefore use the depth results from Go-
+dard et al. [12]. As shown in Table 1, the average instance-
+level motion direction error of our method is less than 23◦,
+about 15% smaller than the result obtained from the best
+self-supervised optical ﬂow combined with the best self-
+supervised depth algorithm. In our prediction, about 75%
+of moving instances have an angular error below 15◦.
+
+5.2. Moving Object Instance Mask Evaluation
+
+Our method can produce instance-level moving ob-
+ject segmentation from object bounding boxes and stereo
+videos. This is achieved without any instance mask ground
+truth supervision. We evaluate our predictions on the KITTI
+sceneﬂow 2015 training split. The dataset provides an “Ob-
+ject map” which contains the foreground moving cars in
+each image. We use this motion mask as ground truth in
+our segmentation evaluation. Figure 6 shows some qualita-
+tive result of our moving object mask prediction. As shown
+in Table 2, we evaluate our mask prediction using the In-
+tersection Over Union (IoU) metric. Speciﬁcally, We com-
+pute the mean image-level IoU which considers both mov-
+ing object and static background and the mean instance-
+level IoU for only moving objects. Our method achieves
+highest IoU for mask prediction. As a baseline comparison,
+we use mask generated from SSD [24] 2D bounding box
+detections. Those masks contain both moving and static
+cars, thus it can only achieve an mean IoU of 0.34 for the
+full image mask. Even with the GT object movement in-
+formation, it does not have tight object boundary and thus
+can only achieve a mean IoU of 0.655. This illustrates how
+
+5599
+
+(a) Ground-truth
+
+(b) Prediction
+
+Figure 6. Qualitative results on our instance-level moving object
+mask prediction. Instances are color-encoded.
+
+produce sharper predictions. The full frame scene ﬂow map
+is created from the RoIs by pasting back as described in
+Section 3.4. The ﬁnal outputs from our system are disparity
+maps Dl
+
+t+1 and a forward scene ﬂow map F l
+t .
+
+t and Dl
+
+5. Experiments
+
+We evaluate our instance-level 3d object motion and
+mask prediction on the KITTI 2015 sceneﬂow dataset [29].
+This is the only available dataset that contains real images
+together with ground-truth scene ﬂow annotations. Follow-
+ing existing work [28, 49, 52, 12], we adopt the ofﬁcial 200
+training images as test set. The ofﬁcial testing set is adopted
+for the ﬁnal ﬁnetuning process. This is possible as we do not
+require the ground truth for training. All the related images
+in the 28 scenes covered by test data are excluded for train-
+ing. Figure 6 and Figure 7 show some qualitative results.
+
+Training details Our system is implemented using Ten-
+sorFlow [1]. All models are optimized end-to-end using
+Adam [22] with a learning rate of 1 × 10−4, decay rate of
+0.5 and decay steps of 100000. During training, we ran-
+domly crop the input images in the horizontal direction to
+obtain patches with the size of 384 × 640 as input to the net-
+work. We set the output size of each RoI as 128 × 128, we
+set the number of channels in the 3D grid to 64. The batch
+size is set as 1 to deal with ﬂexible RoI number for training
+patch. For the image encoder, we ﬁnetune the ﬁrst 4 con-
+volutional layers from Inception ResNet V2 [37] pretrained
+on ImageNet. The rest of network is trained from scratch.
+We ﬁrst train the depth prediction for 80K iterations on the
+KITTI raw dataset and then jointly train the depth and scene
+ﬂow prediction for another 100k iterations. We ﬁnetune the
+model on the ofﬁcial testing set for another 120k iterations
+and use ofﬁcial 200 training images for comparison with
+other methods. The whole training process takes about 30
+hours using a single NVIDIA Titan-X GPU.
+
+Method
+
+AMAD↓
+
+AMAE↓
+
+AE≤15◦↑
+
+AE≤30◦↑
+
+SMAD↓
+
+SMAE↓
+
+SE≤0.15↑
+
+SE≤0.3↑
+
+GeoNet [49] + Godard [12]
+
+UnﬂowC [28] + Godard [12]
+
+Ours (no RoI consistency loss)
+
+Our 3D scene ﬂow
+
+6.98◦
+5.96◦
+6.03◦
+5.19◦
+
+28.82◦
+26.94◦
+29.34◦
+22.92◦
+
+62.93
+
+64.87
+
+67.59
+
+74.78
+
+77.16
+
+77.58
+
+75.94
+
+78.87
+
+0.256
+
+0.240
+
+0.207
+
+0.193
+
+0.503
+
+0.471
+
+0.358
+
+0.334
+
+0.351
+
+36.21
+
+37.46
+
+40.95
+
+0.554
+
+58.62
+
+58.93
+
+62.72
+
+Table 1. Comparison of instance-level object motion in terms of motion direction(A) and speed (S). MAE denotes the mean average error,
+MAD denotes the median absolute deviation. The lower the better. We also report the percentage of the angle/speed error below different
+thresholds, where AE denotes the absolute angular error, SE denotes the absolute speed error. The higher the better.
+
+Figure 7. Qualitative results of our method. From left to right, reference image, depth, optical ﬂow and instance-level moving object mask.
+
+Method
+
+Image IoU Instance IoU
+
+Zhou et al. [51]
+
+Bounding box detections [24]
+
+Our mask prediction
+
+0.380
+
+0.365
+
+0.624
+
+-
+
+0.655
+
+0.842
+
+Table 2. Moving object mask evaluation. We report IoU number
+in both the full image and the moving instance bounding box.
+
+our method effectively learns to determine which object is
+moving and identify an accurate instance segmentation for
+moving cars. We improve the result on both image-level and
+instance-level IoU. We also compare with Zhou et al. [51]
+which generates the foreground mask for all moving objects
+and occlusion region in the image. Their methods do not
+
+provide instance-level information, hence we cannot obtain
+the instance-level IoU numbers.
+
+5.3. Optical Flow Evaluation
+
+An additional evaluation is to project our 3D ﬂow pre-
+dictions back to 2D to obtain the optical ﬂow. As shown
+in Table 5, our method achieves the lowest EPE in both
+non-occluded regions and overall regions compared to other
+self-supervised methods. As a baseline comparison, we
+train a model without RoI consistency loss, which shows
+a decrease in performance. Optionally, we add an optical
+ﬂow reﬁnement sub-network, to further improve our opti-
+cal ﬂow result. The subnetwork is a unet which takes the
+warped image and the raw optical ﬂow, together with orig-
+
+5600
+
+Method
+
+EPC [47]
+
+EPC++ [26] (mono)
+
+EPC++ [26] (stereo)
+
+Godard et al. [12]
+
+GeoNet [49]
+
+Godard [12] + GeoNet ﬂow
+
+Ours
+
+D1
+
+fg
+
+27.38
+
+34.38
+
+26.63
+
+18.74
+
+-
+
+18.74
+
+15.95
+
+bg
+
+23.62
+
+30.67
+
+22.76
+
+9.43
+
+-
+
+9.43
+
+6.27
+
+bg+fg
+
+bg
+
+bg+fg
+
+bg
+
+D2
+
+fg
+
+70.89
+
+84.64
+
+70.39
+
+-
+
+-
+
+FL
+
+fg
+
+28.00
+
+27.30
+
+26.89
+
+-
+
+48.24
+
+48.24
+
+51.25
+
+ALL
+
+fg
+
+bg+fg
+
+bg+fg
+
+bg
+
+25.74
+
+19.78 >30.67 >84.64 >65.63
+
+19.64 >22.76 >70.39 >60.32
+
+-
+
+44.26
+
+44.26
+
+20.16
+
+-
+
+-
+
+-
+
+-
+
+-
+
+-
+
+48.22
+
+16.58
+
+55.75
+
+53.20
+
+49.38
+
+22.64
+
+60.97
+
+65.63
+
+60.32
+
+-
+
+-
+
+25.34
+
+17.57
+
+17.58
+
+-
+
+43.54
+
+43.54
+
+14.36
+
+9.10
+
+8.46
+
+25.95
+
+23.60
+
+25.42
+
+10.92
+
+18.75
+
+18.36
+
+16.37
+
+-
+
+-
+
+26.81
+
+32.73
+
+23.84
+
+10.86
+
+-
+
+10.86
+
+7.76
+
+Table 3. Results on KITTI 2015 scene ﬂow training split. All number shows the percentage of correctly predicted pixels. D1 denotes the
+disparity image at time t, D2 denotes the disparity image at time t + 1 warped into the ﬁrst frame, FL denotes the 2D optical ﬂow between
+the two time instances, fg denotes the foreground, and bg denotes the background.
+
+Method
+
+Binocular
+
+Abs Rel
+
+Sq Rel
+
+RMSE
+
+Godard et al. [12]
+
+LIBELAS [9]
+
+Godard et al. [12]
+
+Ours
+
+no
+
+yes
+
+yes
+
+yes
+
+0.124
+
+1.388
+
+6.125
+
+0.186
+
+0.068
+
+0.065
+
+2.192
+
+0.835
+
+0.699
+
+6.307
+
+4.392
+
+3.896
+
+Table 4. Results on the KITTI 2015 stereo training set of 200 dis-
+parity images. All learning-based methods are trained on KITTI
+raw dataset excluding the testing image sequences. The top half
+shows method which uses monocular image as input, the bottom
+half shows methods which use binocular images as input.
+
+Method
+
+Dataset
+
+Non-occluded
+
+All Regions
+
+EpicFlow [34]
+
+FlowNetS [5]
+
+FlowNet2 [17]
+
+GeoNet [49]
+
+DF-Net [52]
+
+UnFlowC [28]
+
+Ranjan et al. [33]
+
+Ours
+
+Ours (reﬁned)
+
+-
+
+C+ST
+
+C+T
+
+K
+
+K+SY
+
+K+SY
+
+K
+
+K
+
+K
+
+4.45
+
+8.12
+
+4.93
+
+8.05
+
+-
+
+-
+
+-
+
+4.97
+
+4.19
+
+9.57
+
+14.19
+
+10.06
+
+10.81
+
+8.98
+
+8.80
+
+7.76
+
+5.39
+
+5.13
+
+Table 5. Results on KITTI 2015 ﬂow training set over non-
+occluded regions and overall regions. We use the average end-
+point error (EPE) metric to do the comparison. The classical
+method EpicFlow takes 16s per frame at runtime; The FlowNetS
+and FlowNet2 are learned with GT ﬂow supervision. SY denotes
+SYNTHIA dataset [36], ST denotes Sintel dataset, C denotes Fly-
+ingChairs dataset, T denotes FlyingThings3D dataset. Numbers
+from other methods are directly taken from the paper.
+
+inal image frames as input. This enables the network to
+further improve the optical ﬂow prediction in a similar way
+as the architecture proposed in [32].
+
+gorithms in Table. 4. We compare to algorithms that take
+binocular stereo as input at test time. Our method achieves
+a higher accuracy as we input two consecutive binocular
+frames and our network also manages to match over time.
+
+5.5. Scene Flow Evaluation
+
+We compare other unsupervised method in the sceneﬂow
+subset by directly using their released results or running
+their released code. For this benchmark, a pixel is consid-
+ered to be correctly estimated if the disparity or ﬂow end-
+point error is ≤ 3 pixels or ≤ 5%. For scene ﬂow this
+criterion needs to be fulﬁlled for two disparity maps and the
+ﬂow map. As shown in Table 3, our method has an overall
+better accuracy than earlier self-supervised methods. Com-
+pared to classical approaches which optimize at test time
+our accuracy is still lower. However, test time optimization
+is in general prohibitively slow for real-time systems.
+
+6. Conclusion
+
+We presented a system to predict depth and object scene
+ﬂow. Our network is trained using raw stereo sequences
+with off-the-shelf object detectors using image consistency
+as key learning objective. Our formulation is general and
+can be applied in any setting where a dynamic scene is
+imaged by multiple cameras - e.g. a multi-view capture
+system [13]. In future work, we would like to extend our
+system to integrate longer range temporal information. An
+emergent notion of objects to remove the dependence on
+pretrained object detectors is a further research direction.
+We also intend to explore general scenarios such as ca-
+sual video captures using dual camera consumer devices
+and leverage large scale training for a truly general purpose
+depth and scene ﬂow prediction system.
+
+5.4. Depth Evaluation
+
+References
+
+To evaluate our depth prediction we use the KITTI 2015
+stereo training set of 200 disparity images as test data and
+compare to other self-supervised learning and classical al-
+
+[1] Mart´ın Abadi, Paul Barham, Jianmin Chen, Zhifeng Chen,
+Andy Davis, Jeffrey Dean, Matthieu Devin, Sanjay Ghe-
+mawat, Geoffrey Irving, Michael Isard, et al. Tensorﬂow:
+
+5601
+
+A system for large-scale machine learning. In OSDI, 2016.
+6
+
+[20] Abhishek Kar, Christian H¨ane, and Jitendra Malik. Learning
+
+a multi-view stereo machine. In NIPS, 2017. 2, 5
+
+[2] Christoph Bregler, Aaron Hertzmann, and Henning Bier-
+mann. Recovering non-rigid 3d shape from image streams.
+In CVPR, 2000. 2
+
+[3] Jo˜ao Paulo Costeira and Takeo Kanade. A multibody fac-
+torization method for independently moving objects. IJCV,
+1998. 2
+
+[4] David Eigen, Christian Puhrsch, and Rob Fergus. Depth map
+prediction from a single image using a multi-scale deep net-
+work. In NIPS, 2014. 1, 2
+
+[5] P. Fischer, A. Dosovitskiy, E. Ilg, P. H¨ausser, C. Hazirbas, V.
+Golkov, P. v.d. Smagt, D. Cremers, and T. Brox”. Flownet:
+Learning optical ﬂow with convolutional networks. In ICCV,
+2015. 1, 2, 8
+
+[6] Katerina Fragkiadaki, Marta Salas, Pablo Arbelaez, and Ji-
+tendra Malik. Grouping-based low-rank trajectory comple-
+tion and 3d reconstruction. In NIPS, 2014. 2
+
+[7] Yasutaka Furukawa and Jean Ponce. Accurate, dense, and
+
+robust multiview stereopsis. TPAMI, 2010. 2
+
+[8] Ravi Garg, Vijay Kumar BG, Gustavo Carneiro, and Ian
+Reid. Unsupervised cnn for single view depth estimation:
+Geometry to the rescue. In ECCV, 2016. 1, 2
+
+[9] Andreas Geiger, Martin Roser, and Raquel Urtasun. Efﬁcient
+
+large-scale stereo matching. In ACCV, 2010. 5, 8
+
+[10] Andreas Geiger, Julius Ziegler, and Christoph Stiller. Stere-
+oscan: Dense 3d reconstruction in real-time. In Intelligent
+Vehicles Symposium (IV), 2011. 2, 6
+
+[11] Ross Girshick, Jeff Donahue, Trevor Darrell, and Jitendra
+Malik. Rich feature hierarchies for accurate object detection
+and semantic segmentation. In CVPR, 2014. 5
+
+[12] C Godard, O Mac Aodha, and GJ Brostow. Unsupervised
+In
+
+monocular depth estimation with left-right consistency.
+CVPR, 2017. 1, 2, 5, 6, 7, 8
+
+[13] Lei Tan Lin Gui Bart Nabbe Iain Matthews Takeo Kanade
+Shohei Nobuhara Hanbyul Joo, Hao Liu and Yaser Sheikh.
+Panoptic studio: A massively multiview system for social
+motion capture. In ICCV, 2015. 8
+
+[14] Richard Hartley and Andrew Zisserman. Multiple view ge-
+ometry in computer vision. Cambridge university press,
+2003. 2
+
+[15] Kaiming He, Georgia Gkioxari, Piotr Doll´ar, and Ross Gir-
+
+shick. Mask r-cnn. In ICCV, 2017. 5
+
+[16] Fr´ed´eric Huguet and Fr´ed´eric Devernay. A variational
+method for scene ﬂow estimation from stereo sequences. In
+ICCV, 2007. 2
+
+[17] Eddy Ilg, Nikolaus Mayer, Tonmoy Saikia, Margret Keuper,
+Alexey Dosovitskiy, and Thomas Brox. Flownet 2.0: Evolu-
+tion of optical ﬂow estimation with deep networks. In CVPR,
+2017. 1, 8
+
+[18] Mariano Jaimez, Mohamed Souiai,
+
+Javier Gonzalez-
+Jimenez, and Daniel Cremers. A primal-dual framework for
+real-time dense rgb-d scene ﬂow. In ICRA, 2015. 2
+
+[19] Mengqi Ji, Juergen Gall, Haitian Zheng, Yebin Liu, and Lu
+Fang. Surfacenet: An end-to-end 3d neural network for mul-
+tiview stereopsis. In ICCV, 2017. 2
+
+[21] Alex Kendall, Hayk Martirosyan, Saumitro Dasgupta, Peter
+Henry, Ryan Kennedy, Abraham Bachrach, and Adam Bry.
+End-to-end learning of geometry and context for deep stereo
+regression. In ICCV, 2017. 1, 2
+
+[22] Diederik P Kingma and Jimmy Ba. Adam: A method for
+arXiv preprint arXiv:1412.6980,
+
+stochastic optimization.
+2014. 6
+
+[23] Lubor Ladicky, Jianbo Shi, and Marc Pollefeys. Pulling
+
+things out of perspective. In CVPR, 2014. 2
+
+[24] Wei Liu, Dragomir Anguelov, Dumitru Erhan, Christian
+Szegedy, Scott Reed, Cheng-Yang Fu, and Alexander C
+Berg. Ssd: Single shot multibox detector. In ECCV, 2016.
+4, 6, 7
+
+[25] H Christopher Longuet-Higgins. A computer algorithm for
+reconstructing a scene from two projections. Nature, 1981.
+2
+
+[26] Chenxu Luo, Zhenheng Yang, Peng Wang, Yang Wang, Wei
+Xu, Ram Nevatia, and Alan Yuille. Every pixel counts++:
+Joint learning of geometry and motion with 3d holistic un-
+derstanding. arXiv preprint arXiv:1810.06125, 2018. 2, 8
+
+[27] Nikolaus Mayer, Eddy Ilg, Philip Hausser, Philipp Fischer,
+Daniel Cremers, Alexey Dosovitskiy, and Thomas Brox. A
+large dataset to train convolutional networks for disparity,
+optical ﬂow, and scene ﬂow estimation. In CVPR, 2016. 1, 2
+[28] Simon Meister, Junhwa Hur, and Stefan Roth. Unﬂow: Un-
+supervised learning of optical ﬂow with a bidirectional cen-
+sus loss. AAAI, 2018. 6, 7, 8
+
+[29] Moritz Menze and Andreas Geiger. Object scene ﬂow for
+
+autonomous vehicles. In CVPR, 2015. 2, 6
+
+[30] Kemal Egemen Ozden, Kurt Cornelis, Luc Van Eycken, and
+Luc Van Gool. Reconstructing 3d trajectories of indepen-
+dently moving objects using generic constraints. CVIU,
+2004. 2
+
+[31] Marc Pollefeys, Luc Van Gool, Maarten Vergauwen, Frank
+Verbiest, Kurt Cornelis, Jan Tops, and Reinhard Koch. Visual
+modeling with a hand-held camera. IJCV, 2004. 2
+
+[32] Anurag Ranjan and Michael J. Black. Optical ﬂow estima-
+
+tion using a spatial pyramid network. In CVPR, 2017. 8
+
+[33] Anurag Ranjan, Varun Jampani, Kihwan Kim, Deqing Sun,
+Jonas Wulff, and Michael J Black. Adversarial collabo-
+ration: Joint unsupervised learning of depth, camera mo-
+tion, optical ﬂow and motion segmentation. arXiv preprint
+arXiv:1805.09806, 2018. 2, 8
+
+[34] Jerome Revaud, Philippe Weinzaepfel, Zaid Harchaoui, and
+Cordelia Schmid. Epicﬂow: Edge-preserving interpolation
+of correspondences for optical ﬂow. In CVPR, 2015. 8
+
+[35] Olaf Ronneberger, Philipp Fischer, and Thomas Brox. U-net:
+Convolutional networks for biomedical image segmentation.
+In MICCAI, 2015. 5
+
+[36] German Ros, Laura Sellart, Joanna Materzynska, David
+Vazquez, and Antonio M. Lopez. The synthia dataset: A
+large collection of synthetic images for semantic segmenta-
+tion of urban scenes. In CVPR, 2016. 8
+
+[37] Christian Szegedy, Sergey Ioffe, Vincent Vanhoucke, and
+Alexander A Alemi. Inception-v4, inception-resnet and the
+
+5602
+
+impact of residual connections on learning.
+ume 4, page 12, 2017. 6
+
+In AAAI, vol-
+
+[38] Tatsunori Taniai, Sudipta N Sinha, and Yoichi Sato. Fast
+multi-frame stereo scene ﬂow with motion segmentation. In
+CVPR, 2017. 2
+
+[39] Shubham Tulsiani, Tinghui Zhou, Alexei A Efros, and Ji-
+tendra Malik. Multi-view supervision for single-view recon-
+struction via differentiable ray consistency. In CVPR, 2017.
+2
+
+[40] Shubham Tulsiani, Tinghui Zhou, Alexei A. Efros, and Ji-
+tendra Malik. Multi-view supervision for single-view recon-
+struction via differentiable ray consistency. In CVPR, 2017.
+5
+
+[41] Shimon Ullman. Maximizing rigidity: The incremental re-
+covery of 3-d structure from rigid and nonrigid motion. Per-
+ception, 1984. 2
+
+[42] Sundar Vedula, Simon Baker, Peter Rander, Robert Collins,
+and Takeo Kanade. Three-dimensional scene ﬂow. In ICCV.
+IEEE, 1999. 2
+
+[43] Sudheendra Vijayanarasimhan, Susanna Ricco, Cordelia
+Schmid, Rahul Sukthankar, and Katerina Fragkiadaki. Sfm-
+net: Learning of structure and motion from video. Technical
+report, arXiv:1704.07804, 2017. 2
+
+[44] Christoph Vogel, Konrad Schindler, and Stefan Roth. Piece-
+
+wise rigid scene ﬂow. In ICCV, 2013. 2
+
+[45] Zhou Wang, Alan C Bovik, Hamid R Sheikh, Eero P Simon-
+celli, et al. Image quality assessment: from error visibility to
+structural similarity. TIP, 2004. 3
+
+[46] Andreas Wedel, Clemens Rabe, Tobi Vaudrey, Thomas Brox,
+Uwe Franke, and Daniel Cremers. Efﬁcient dense scene ﬂow
+from sparse or dense stereo data. In ECCV, 2008. 2
+
+[47] Zhenheng Yang, Peng Wang, Yang Wang, Wei Xu, and Ram
+Nevatia. Every pixel counts: Unsupervised geometry learn-
+ing with holistic 3d motion understanding. arXiv preprint
+arXiv:1806.10556, 2018. 2, 8
+
+[48] Yao Yao, Zixin Luo, Shiwei Li, Tian Fang, and Long Quan.
+Mvsnet: Depth inference for unstructured multi-view stereo.
+In ECCV, 2018. 2, 5
+
+[49] Zhichao Yin and Jianping Shi. Geonet: Unsupervised learn-
+ing of dense depth, optical ﬂow and camera pose. In CVPR,
+2018. 1, 2, 4, 6, 7, 8
+
+[50] Chang Yuan and Gerard Medioni. 3d reconstruction of back-
+ground and objects moving on ground plane viewed from a
+moving camera. In CVPR, 2006. 2
+
+[51] Tinghui Zhou, Matthew Brown, Noah Snavely, and David G
+Lowe. Unsupervised learning of depth and ego-motion from
+video. In CVPR, 2017. 2, 7
+
+[52] Yuliang Zou, Zelun Luo, and Jia-Bin Huang. Df-net: Un-
+supervised joint learning of depth and ﬂow using cross-task
+consistency. In ECCV, 2018. 2, 4, 6, 8
+
+5603
+
+

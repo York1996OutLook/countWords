@@ -1,0 +1,1621 @@
+Towards Accurate One-Stage Object Detection with AP-Loss
+
+Kean Chen1, Jianguo Li2, Weiyao Lin1∗, John See3, Ji Wang4, Lingyu Duan5, Zhibo Chen4, Changwei He4, Junni Zou1
+
+1Shanghai Jiao Tong University, China, 2 Intel Labs, China,
+
+3 Multimedia University, Malaysia, 4 Tencent YouTu Lab, China, 5 Peking University, China
+
+Abstract
+
+One-stage object detectors are trained by optimiz-
+ing classiﬁcation-loss and localization-loss simultaneously,
+with the former suffering much from extreme foreground-
+background class imbalance issue due to the large num-
+ber of anchors. This paper alleviates this issue by propos-
+ing a novel framework to replace the classiﬁcation task in
+one-stage detectors with a ranking task, and adopting the
+Average-Precision loss (AP-loss) for the ranking problem.
+Due to its non-differentiability and non-convexity, the AP-
+loss cannot be optimized directly. For this purpose, we
+develop a novel optimization algorithm, which seamlessly
+combines the error-driven update scheme in perceptron
+learning and backpropagation algorithm in deep networks.
+We verify good convergence property of the proposed algo-
+rithm theoretically and empirically. Experimental results
+demonstrate notable performance improvement in state-of-
+the-art one-stage detectors based on AP-loss over different
+kinds of classiﬁcation-losses on various benchmarks, with-
+out changing the network architectures.
+
+1. Introduction
+
+Object detection needs to localize and recognize the ob-
+jects simultaneously from the large backgrounds, which re-
+mains challenging due to the imbalance between foreground
+and background. Deep learning based detection solutions
+usually adopt a multi-task architecture, which handles clas-
+siﬁcation task and localization task with different loss func-
+tions. The classiﬁcation task aims to recognize the object
+in a given box, while the localization task aims to predict
+the precise bounding box of the object. Two-stage detec-
+tors [24, 7, 2, 14] ﬁrst generates a limited number of ob-
+ject box proposals, so that the detection problem can be
+solved by adopting classiﬁcation task on those proposals.
+However, the circumstance is different for one-stage detec-
+tors, which need to predict the object class directly from the
+densely pre-designed candidate boxes. The large number
+
+∗Corresponding Author, Email: wylin@sjtu.edu.cn
+
+0.12
+
+0.13
+
+0.09
+
+0.15
+
+Detector
+
+0.05
+
+0.86
+
+0.07
+
+0.04
+
+0.02
+
+0.81
+
+0.14
+
+0.03
+
+0.08
+
+0.01
+
+0.06
+
+0.10
+
+Classification
+
+Cross Entropy 
+
+Loss
+
+N
+
+N
+
+N
+
+N
+
+N
+
+P
+
+P
+
+N
+
+N
+
+N
+
+N
+
+N
+
+N
+
+N
+
+N
+
+N
+
+(a) Acc = 0.88
+
+0.12
+
+0.13
+
+0.09
+
+0.15
+
+Detector
+
+0.05
+
+0.86
+
+0.07
+
+0.04
+
+0.02
+
+0.81
+
+0.14
+
+0.03
+
+0.08
+
+0.01
+
+0.06
+
+0.10
+
+Ranking
+
+AP-Loss
+
+6th
+
+5th
+
+8th
+
+3rd
+
+12th 1st 10th 13th
+
+15th 2nd 4th 14th
+
+9th 16th 11th 7th
+
+(b) AP = 0.33
+
+Figure 1: Dashed red boxes are the ground truth object boxes. The
+orange ﬁlled boxes and other blank boxes are anchors with posi-
+tive and negative ground truth labels, repectively. (a) shows that
+the detection performance is poor but the classiﬁcation accuracy
+is still high due to large number of true negatives. (b) shows the
+ranking metric AP can better reﬂect the actual condition as it does
+not suffer from the large number of true negatives.
+
+of boxes yield the imbalance between foreground and back-
+ground which makes the optimization of classiﬁcation task
+easily biased and thus impacts the detection performance.
+It is observed that the classiﬁcation metric could be very
+high for a trivial solution which predicts negative label for
+almost all candidate boxes, while the detection performance
+is poor. Figure 1a illustrates one such example.
+
+To tackle this issue in one-stage object detectors, some
+works introduce new classiﬁcation losses such as balanced
+loss [22], Focal Loss [15], as well as tailored training
+method such as Online Hard Example Mining (OHEM) [18,
+29]. These losses model each sample (anchor box) in-
+dependently, and attempt to re-weight the foreground and
+background samples in classiﬁcation losses to cater for the
+imbalance condition; this is done without considering the
+relationship among different samples. The designed bal-
+ance weights are hand-crafted hyper-parameters, which do
+not generalize well across datasets. We argue that the gap
+between classiﬁcation task and detection task hinder the
+performance of one-stage detectors. In this paper, instead
+of modifying the classiﬁcation loss, we propose to replace
+
+5119
+
+Detector
+
+Label 
+
+Assignment
+
+
+ijx
+
+
+Difference 
+
+Transformation
+
+Back 
+
+Propagation
+
+Optimization
+
+Ranking Label 
+Transformation
+
+Ranking Procedure
+
+Activation
+Function
+
+Error-Driven 
+
+Update
+
+
+ijL
+
+ʘ AP-Loss
+ijy
+
+
+Figure 2: Overall framework of the proposed approach. We replace the classiﬁcation-task in one-stage detectors with a ranking task, where
+the ranking procedure produces the primary terms of AP-loss and the corresponding label vector. The optimization algorithm is based on
+an error-driven learning scheme combined with backpropagation. The localization-task branch is not shown here due to no modiﬁcation.
+
+classiﬁcation task with ranking task in one-stage detectors,
+where the associated ranking loss explicitly models sample
+relationship, and is invariant to the ratio of positive and neg-
+ative samples. As shown in Figure 1b, we adopt Average
+Precision (AP) as our target loss which is inherently more
+consistent with the evaluation metric for object detection.
+
+However, it is non-trivial to directly optimize the AP-loss
+due to the non-differentiability and non-decomposability, so
+that standard gradient descent methods are not amenable
+for this case. There are three aspects of studies for this is-
+sue. First, AP based loss is studied within structured SVM
+models [34, 19], which restricts in linear SVM model so
+that the performance is limited. Second, a structured hinge
+loss [20] is proposed to optimize the upper bound of AP-
+loss instead of the loss itself. Third, approximate gradient
+methods [31, 9] are proposed for optimizing the AP-loss,
+which are less efﬁcient and easy to fall into local optimum
+even for the case of linear models due to the non-convexity
+and non-quasiconvexity of the AP-loss. Therefore, it is still
+an open problem for the optimization of the AP-loss.
+
+In this paper, we address this challenge by replacing the
+classiﬁcation task in one-stage detectors with a ranking task,
+so that we handle the class imbalance problem with a rank-
+ing based loss named AP-loss. Furthermore, we propose
+a novel error-driven learning algorithm to effectively op-
+timize the non-differentiable AP based objective function.
+More speciﬁcally, some extra transformations are added to
+the score output of one-stage detector to obtain the AP-loss,
+which includes a linear transformation that transforms the
+scores to pairwise differences, and a non-linear and non-
+differentiable “activation function” that transform the pair-
+wise differences to the primary terms of the AP-loss. Then
+the AP-loss can be obtained by the dot product between
+the primary terms and the label vector. It is worth noting
+that the difﬁculty for using gradient method on the AP-loss
+lies in passing gradients through the non-differentiable ac-
+tivation function. Inspired by the perceptron learning algo-
+rithm [25], we adopt an error-driven learning scheme to di-
+
+rectly pass the update signal through the non-differentiable
+activation function. Different from gradient method, our
+learning scheme gives each variable an update signal pro-
+portional to the error it makes. Then, we adopt the back-
+propagation algorithm to transfer the update signal to the
+weights of neural network. We theoretically and experimen-
+tally prove that the proposed optimization algorithm does
+not suffer from the non-differentiability and non-convexity
+of the objective function. The main contributions of this
+paper are summarized as below:
+
+• We propose a novel framework in one-stage object de-
+tectors which adopts the ranking loss to handle the
+class imbalance issue.
+
+• We propose an error-driven learning algorithm that can
+efﬁciently optimize the non-differentiable and non-
+convex AP-based objective function with both theoret-
+ical and experimental veriﬁcations.
+
+• We show notable performance improvement with the
+proposed method on state-of-the-art one-stage detec-
+tors over different kinds of classiﬁcation-losses with-
+out changing the model architecture.
+
+2. Related Work
+
+One-stage detectors: In object detection, the one-stage ap-
+proaches have relatively simpler architecture and higher ef-
+ﬁciency than two-stage approaches. OverFeat [27] is one
+of the ﬁrst CNN-based one-stage detectors. Thereafter, dif-
+ferent designs of one-stage detectors are proposed, includ-
+ing SSD [18], YOLO [22], DSSD [6] and DSOD [28, 13].
+These methods demonstrate good processing efﬁciency as
+one-stage detectors, but generally yield lower accuracy than
+two-stage detectors. Recently, RetinaNet [15] and Re-
+ﬁneDet [35] narrow down the performance gap (especially
+on the challenging COCO benchmark [16]) between one-
+stage approaches and two-stage approaches with some in-
+novative designs. As commonly known, the performance
+
+5120
+
+of one-stage detectors beneﬁts much from densely designed
+anchors, which introduce extreme imbalance between fore-
+ground and background samples. To address this challenge,
+methods like OHEM [18, 29] and Focal Loss [15] have been
+proposed to reduce the loss weight for easy samples. How-
+ever, there are two hurdles that are still open to discussion.
+Firstly, hand-crafted hyper-parameters for weight balance
+do not generalize well across datasets. Secondly, the rela-
+tionship among sample anchors is far from well modeled.
+AP as a loss for Object Detection: Average Precision
+(AP) is widely used as the evaluation metric in many
+tasks such as object detection [5] and information re-
+trieval [26]. However, AP is far from a good and com-
+mon choice as an optimization goal in object detection due
+to its non-differentiability and non-convexity. Some meth-
+ods have been proposed to optimize the AP-loss in object
+detection, such as AP-loss in the linear structured SVM
+model [34, 19], structured hinge loss as upper bound of the
+AP-loss [20], approximate gradient methods [31, 9], rein-
+forcement learning to ﬁne-tune a pre-trained object detec-
+tor with AP based metric [21]. Although these methods
+give valuable results in optimizing the AP-loss, their per-
+formances are still limited due to the intrinsic limitations.
+In details, the proposed approach differs from them in 4
+aspects.
+(1) Our approach can be used for any differen-
+tiable linear or non-linear models such as neural networks,
+while [34, 19] only work for linear SVM model. (2) Our
+approach directly optimizes the AP-loss, while [20] intro-
+duces notable loss gap after relaxation. (3) Our approach
+dose not approximate the gradient and dose not suffer from
+the non-convexity of objective function as in [31, 9]. (4)
+Our approach can train the detectors in an end-to-end way,
+while [21] cannot.
+Perceptron Learning Algorithm: The core of our opti-
+mization algorithm is the “error-driven update” which is
+generalized from the perceptron learning algorithm [25],
+and helps overcome the difﬁculty of the non-differentiable
+objective functions. The perceptron is a simple artiﬁcial
+neuron using the Heaviside step function as the activa-
+tion function. The learning algorithm was ﬁrst invented
+by Frank Rosenblatt [25]. As the Heaviside step function
+in perceptron is non-differentiable, it is not amenable for
+gradient method.
+Instead of using a surrogate loss like
+cross-entropy, the perceptron learning algorithm employs
+an error-driven update scheme directly on the weights of
+neurons. This algorithm is guaranteed to converge in ﬁnite
+steps if the training data is linearly separable. Further works
+like [11, 1, 32] have studied and improved the stability and
+robustness of the perceptron learning algorithm.
+
+3. Method
+
+We aim to replace the classiﬁcation task with AP-loss
+based ranking task in one-stage detectors such as Reti-
+
+k
+
+(a)
+
+(b)
+
+Figure 3: Comparison of label assignments. The dashed red box is
+the ground truth box with class k. (a) In traditional classiﬁcation
+task of one-stage detectors, the anchor is assigned a foreground
+label k. (b) In our ranking task framework, the anchor replicates
+K times, and we assign the k-th anchor to label 1, others 0.
+
+naNet [15]. Figure 2 shows the two key components of our
+approach, i.e., the ranking procedure and the error-driven
+optimization algorithm. Below, we will ﬁrst present how
+AP-loss is derived from traditional score output. Then, we
+will introduce the error-driven optimization algorithm. Fi-
+nally, we also present the theoretical analyses of the pro-
+posed optimization algorithm and outline the training de-
+tails. Note that all changes are made on the loss part of the
+classiﬁcation branch without changing the backbone model
+and localization branch.
+
+3.1. Ranking Task and AP Loss
+
+3.1.1 Ranking Task
+
+In traditional one-stage detectors, given input image I,
+suppose the pre-deﬁned boxes (also called anchors) set
+is B, each box bi ∈ B will be assigned a label ti ∈
+{−1, 0, 1, . . . , K} based on ground truth and the IoU strat-
+egy [7, 24], where label 1 ∼ K means the object class ID,
+label “0” means background and label “−1” means ignored
+boxes. During training and testing phase, the detector out-
+puts a score-vector (s0
+
+i ) for each box bi.
+
+i , · · · , sK
+
+In our framework, instead of one box with K + 1 di-
+mensional score predictions, we replicate each box bi for K
+times to obtain bik where k = 1, · · · , K, and the k-th box is
+responsible for the k-th class. Each box bik will be assigned
+a label tik ∈ {−1, 0, 1} through the same IoU strategy (la-
+bel −1 for not counted into the ranking loss). Therefore, in
+the training and testing phase, the detector will predict only
+one scalar score sik for each box bik. Figure 3 illustrates
+our label formulation and the difference to traditional case.
+The ranking task dictates that every positive boxes
+should be ranked higher than all the negative boxes w.r.t
+their scores. Note that AP of our ranking result is com-
+puted over the scores from all classes. This is slightly differ-
+ent from the evaluation metric meanAP for object detection
+systems, which computes AP for each class and obtains the
+average value. We compute AP this way because the score
+distribution should be uniﬁed for all classes while ranking
+each class separately cannot achieve this goal.
+
+5121
+
+3.1.2 AP-Loss
+
+For simplicity, we still use B to denote the anchor box set
+after replication, and bi to denote the i-th anchor box with-
+out the replication subscript. Each box bi thus corresponds
+to one scalar score si and one binary label ti. Some trans-
+formations are required to formulate a ranking loss as il-
+lustrated in Figure 2. First, the difference transformation
+transfers the score si to the difference form
+
+∀i, j, xij = −(s(bi; θ) − s(bj; θ)) = −(si − sj)
+
+(1)
+
+where s(bi; θ) is a CNN based score function with weights
+θ for box bi. The ranking label transformation transfers
+labels ti to the corresponding pairwise ordering form
+
+∀i, j, yij = 1ti=1,tj =0
+
+(2)
+
+where 1 is a indicator function which equals to 1 only if the
+subscript condition holds (i.e., ti = 1, tj = 0), otherwise 0.
+Then, we deﬁne an vector-valued activation function L(·)
+to produce the primary terms of the AP-loss as
+
+where H(·) is the Heaviside step function:
+
+Lij(x) =
+
+H(xij)
+
+1 +Pk∈P∪N ,k6=i H(xik)
+H(x) =( 0 x < 0
+
+1 x ≥ 0
+
+= Lij
+
+(3)
+
+(4)
+
+A ranking is denoted as proper ranking when there are no
+two samples scored equally (i.e., ∀i 6= j, si 6= sj ). With-
+out loss of generality, we will treat all rankings as a proper
+ranking by breaking ties arbitrarily. Now, we can formulate
+the AP-loss LAP as
+
+LAP = 1 − AP = 1 −
+
+1
+
+rank+(i)
+rank(i)
+
+|P| Xi∈P
+1 +Pj∈P,j6=i H(xij)
+|P| Xi,j
+
+Lij · yij =
+
+1
+|P|
+
+1 +Pj∈P,j6=i H(xij) +Pj∈N H(xij)
+
+1
+
+hL(x), yi
+
+Lij =
+
+(5)
+
+= 1 −
+
+1
+
+|P| Xi∈P
+|P| Xi∈P Xj∈N
+
+1
+
+=
+
+where rank(i) and rank+(i) denote the ranking position
+of score si among all valid samples and positive samples
+respectively, P = {i|ti = 1}, N = {i|ti = 0}, |P| is the
+size of set P, L and y are vector form for all Lij and yij
+respectively, h, i means dot-product of two input vectors.
+Note that x, y, L ∈ Rd, where d = (|P| + |N |)2.
+
+Finally, the optimization problem can be written as:
+
+min
+
+θ
+
+LAP (θ) = 1 − AP(θ) =
+
+1
+|P|
+
+hL(x(θ)), yi
+
+(6)
+
+where θ denotes the weights of detector model. As the acti-
+vation function L(·) is non-differentiable, a novel optimiza-
+tion/learning scheme is required instead of the standard gra-
+dient descent method.
+
+Besides the AP metric, other ranking based metric can
+also be used to design the ranking loss for our framework.
+One example is the AUC-loss [12] which measures the area
+under ROC curve for ranking purpose, and has a slightly
+different “activation function” as
+
+L′
+
+ij(x) =
+
+H(xij)
+
+|N |
+
+(7)
+
+As AP is consistent with the evaluation metric of the ob-
+ject detection task, we argue that AP-loss is intuitively more
+suitable than AUC-loss for this task, and will provide em-
+pirical study in our experiments.
+
+3.2. Optimization Algorithm
+
+3.2.1 Error-Driven Update
+
+Recalling the perceptron learning algorithm, the update for
+input variable is “error-driven”, which means the update is
+directly derived from the difference between desired output
+and current output. We adopt this idea and further general-
+ize it to accommodate the case of activation function with
+vector-valued input and output. Suppose xij is the input and
+Lij is the current output, the update for xij is thus
+
+∆xij = L∗
+
+ij − Lij
+
+(8)
+
+where L∗
+ij is the desired output. Note that the AP-loss
+achieves its minimum possible value 0 when each term
+Lij · yij = 0. There are two cases. If yij = 1, we should
+set the desired output L∗
+ij = 0. If yij = 0, we do not care
+the update and set it to 0, since it does not contribute to the
+AP-loss. Consequently, the update can be simpliﬁed as
+
+∆xij = −Lij · yij
+
+(9)
+
+3.2.2 Backpropagation
+
+We now have the desired vector-form update ∆x, and then
+will ﬁnd an update for model weights ∆θ which will pro-
+duce most appropriate movement for x. We use dot-product
+to measure the similarity of successive movements, and reg-
+ularize the change of weights (i.e. ∆θ) with L2-norm based
+penalty term. The optimization problem can be written as:
+
+arg min
+∆θ
+
+{−h∆x, x(θ(n) + ∆θ) − x(θ(n))i + λk∆θk2
+
+2} (10)
+
+where θ(n) denotes the model weights at the n-th step. With
+that, the ﬁrst-order expansion of x(θ) is given by:
+
+x(θ) = x(θ(n)) +
+
+∂x(θ(n))
+
+∂θ
+
+· (θ − θ(n)) + o(kθ − θ(n)k) (11)
+
+where ∂x(θ(n))/∂θ is the Jacobian matrix of vector-valued
+function x(θ) at θ(n). Ignoring the high-order inﬁnitesimal,
+we obtain the step-wise minimization process:
+
+θ(n+1) − θ(n) = arg min
+∆θ
+
+{−h∆x,
+
+∂x(θ(n))
+
+∂θ
+
+∆θi + λk∆θk2
+2}
+(12)
+
+5122
+
+The optimal solution can be obtained by ﬁnding the station-
+ary point. Then, the form of optimal ∆θ is consistent with
+the chain rule of derivative, which means, it can be directly
+implemented by setting the gradient of xij to −∆xij (c.f.
+Equation 9) and proceeding with backpropagation. Hence
+the gradient for score si can be obtained by backward prop-
+agating the gradient through the difference transformation:
+
+gi = −Xj,k
+
+∆xjk ·
+
+=Xj
+
+3.3. Analyses
+
+∂xjk
+∂si
+
+=Xj
+Lji · yji −Xj
+
+∆xij −Xj
+
+Lij · yij
+
+∆xji
+
+(13)
+
+Convergence: To better understand the characteristics of
+the AP-loss, we ﬁrst provide a theoretical analysis on the
+convergence of the optimization algorithm, which is gener-
+alized from the convergence property of the original percep-
+tron learning algorithm.
+
+Proposition 1 The AP-loss optimizing algorithm is guar-
+anteed to converge in ﬁnite steps if below conditions hold:
+(1) the learning model is linear;
+(2) the training data is linearly separable.
+
+The proof of this proposition is provided in Appendix-1 of
+supplementary. Although convergence is somewhat weak
+due to the need of strong conditions, it is non-trivial since
+the AP-loss function is not convex or quasiconvex even for
+the case of linear model and linearly separable data, so that
+gradient descent based algorithm may still fail to converge
+on a smoothed AP-loss function even under such strong
+conditions. One such example is presented in Appendix-2
+of supplementary. It means that, under such conditions, our
+algorithm still optimizes better than the approximate gradi-
+ent descent algorithm for AP-loss. Furthermore, with some
+mild modiﬁcations, even though the training data is not sep-
+arable, the accumulated AP-loss can also be bounded pro-
+portionally by the best performance of the learning model.
+More details are presented in Appendix-3 of supplementary.
+Consistency: Besides convergence, We observed that the
+proposed optimization algorithm is inherently consistent
+with widely used classiﬁcation-loss functions.
+
+Observation 1 When the activation function L(·) takes the
+form of softmax function and loss-augmented step function,
+our optimization algorithm can be expressed as the gradi-
+ent descent algorithm on cross-entropy loss and hinge loss
+respectively.
+
+The detailed analysis of this observation is presented in
+Appendix-4 of supplementary. We argue that the observed
+consistency is on the basis of the “error-driven” property.
+As is known, the gradients of those widely used loss func-
+tions are proportional to their prediction errors, where the
+
+Algorithm 1 Minibatch training for Interpolated AP
+
+Input: All scores {si} and corresponding labels {ti} in a minibatch
+Output: Gradient of input {gi}
+1: ∀i, gi ← 0
+2: MaxPrec ← 0
+3: P ← {i | ti = 1}, N ← {i | ti = 0}
+4: O ← argsort({si | i ∈ P})
+
+⊲ Indexes of scores sorted in
+
+ascending order
+
+5: for i ∈ O do
+6:
+
+Compute xij = sj − si for all j ∈ P ∪ N and Lij for all j ∈ N
+
+⊲ According to Equation 3 and Equation 14
+
+Prec ← 1 − Pj∈N Lij
+if Prec ≥ MaxPrec then
+
+MaxPrec ← Prec
+
+else
+
+7:
+8:
+9:
+10:
+11:
+12:
+13:
+14:
+15: end for
+16: ∀i, gi ← gi/|P|
+
+end if
+gi ← − Pj∈N Lij
+∀j ∈ N , gj ← gj + Lij
+
+∀j ∈ N , Lij ← Lij · (1 − MaxPrec)/(1 − Prec)
+
+⊲ Interpolation
+
+⊲ According to Equation 13
+⊲ According to Equation 13
+
+⊲ Normalization
+
+prediction here refers to the output of activation function.
+In other words, their activation functions have a nice prop-
+erty:
+the vector ﬁeld of prediction errors is conservative,
+allowing it being the gradient of some surrogate loss func-
+tion. However, our activation function does not have this
+property, which makes our optimization not able to express
+as gradient descent with any surrogate loss function.
+
+3.4. Details of Training Algorithm
+
+Minibatch Training The minibatch training strategy is
+widely used in deep learning frameworks [8, 18, 15] as it ac-
+counts for more stability than the case with batch size equal
+to 1. The mini-batch training helps our optimization algo-
+rithm quite a lot for escaping the so-called “score-shift” sce-
+nario. The AP-loss can be computed both from a batch of
+images and from a single image with multiple anchor boxes.
+Consider an extreme case: our detector can predict perfect
+ranking in both image I1 and image I2, but the lowest score
+in image I1 is even greater than the highest score in im-
+age I2. There are “score-shift” between two images so that
+the detection performance is poor when computing AP-loss
+per-image. Aggregating scores over images in a mini-batch
+can avoid such problem, so that the minibatch training is
+crucial for good convergence and good performance.
+Piecewise Step function During early stage of training,
+scores si are very close to each other (i.e. almost all in-
+puts to Heaviside step function H(x) are near zero), so that
+a small change of input will cause a big output difference,
+which destabilizes the updating process. To tackle this is-
+sue, we replace H(x) with a piecewise step function:
+
+x < −δ
+
++ 0.5 , −δ ≤ x ≤ δ
+
+(14)
+
+δ < x
+
+0 ,
+x
+2δ
+1 ,
+
+f (x) =
+
+
+5123
+
+Batch Size
+
+AP
+
+AP50 AP75
+
+1
+2
+4
+8
+
+52.4
+53.0
+52.8
+53.1
+
+80.2
+81.7
+82.2
+82.3
+
+56.7
+57.8
+58.0
+58.1
+
+δ
+
+0.25
+0.5
+1
+2
+
+AP
+
+50.2
+51.3
+53.1
+52.8
+
+AP50 AP75
+
+80.7
+81.6
+82.3
+82.6
+
+53.6
+55.4
+58.1
+57.2
+
+Interpolated
+
+AP
+
+AP50 AP75
+
+No
+Yes
+
+52.6
+53.1
+
+82.2
+82.3
+
+57.1
+58.1
+
+(a) Varying batch size
+
+(b) Varying δ for piecewise step function
+
+(c) Interpolated vs. not interpolated
+
+Table 1: Ablation experiments. Models are tested on VOC2007 test set.
+
+Figure 4: Heaviside step function and piecewise step function.
+(Best viewed in color)
+
+The piecewise step functions with different δ are shown in
+Figure 4. When δ approaches +0, the piecewise step func-
+tion approaches the original step function. Note that f (·)
+is only different from H(·) near zero point. We argue that
+the precise form of the piecewise step function is not cru-
+cial. Other monotonic and symmetric smooth functions that
+only differs from H(·) near zero point could be equally ef-
+fective. The choice of δ relates closely to the weight decay
+hyper-parameter in CNN optimization. Intuitively, parame-
+ter δ controls the width of decision boundary between pos-
+itive and negative samples. Smaller δ enforces a narrower
+decision boundary, which causes the weights to shrink cor-
+respondingly (similar effect to that caused by the weight
+decay). Further details are presented in the experiments.
+Interpolated AP The interpolated AP [26] is widely
+adopted by many object detection benchmarks like PAS-
+CAL VOC [5] and MS COCO [16]. The common justiﬁ-
+cation for interpolating the precision-recall curve [5] is “to
+reduce the impact of ’wiggles’ in the precision-recall curve,
+caused by small variations in the ranking of examples”. Un-
+der the same consideration, we adopt the interpolated AP in-
+stead of the original version. Speciﬁcally, the interpolation
+is applied on Lij to make the precision at the k-th smallest
+positive sample monotonically increasing with k where the
+precision is (1 − Pj∈N Lij) in which i is the index of the
+k-th smallest positive sample. It is worth noting that the in-
+terpolated AP is a smooth approximation of the actual AP
+so that it is a practical choice to help to stabilize the gra-
+dient and to reduce the impact of ’wiggles’ in the update
+signals. The details of the interpolated AP based algorithm
+is summarized in Algorithm 1.
+
+4. Experiments
+
+4.1. Experimental Settings
+
+We evaluate the proposed method on the state-of-the-art
+one-stage detector RetinaNet [15]. The implementation de-
+
+tails are the same as in [15] unless explicitly stated. Our ex-
+periments are performed on two benchmark datasets: PAS-
+CAL VOC [5] and MS COCO [16]. The PASCAL VOC
+dataset has 20 classes, with VOC2007 containing 9,963 im-
+ages for train/val/test and VOC2012 containing 11,530 for
+train/val. The MS COCO dataset has 80 classes, contain-
+ing 123,287 images for train/val. We implement our codes
+with the MXNET framework, and conduct experiments on
+a workstation with two NVidia TitanX GPUs.
+PASCAL VOC: When evaluated on the VOC2007 test
+set, models are trained on the VOC2007 and VOC2012
+trainval sets. When evaluated on the VOC2012 test
+set, models are trained on the VOC2007 and VOC2012
+trainval sets plus the VOC2007 test set. Similar to
+the evaluation metrics used in the MS COCO benchmark,
+we also report the AP averaged over multiple IoU thresh-
+olds of 0.50 : 0.05 : 0.95. We set δ = 1 in Equation 14. We
+use ResNet [8] as the backbone model which is pre-trained
+on the ImageNet-1k classiﬁcation dataset [4]. At each level
+of FPN [14], the anchors have 2 sub-octave scales (2k/2, for
+k ≤ 1) and 3 aspect ratios [0.5, 1, 2]. We ﬁx the batch nor-
+malization layers to be frozen in training phase. We adopt
+the minibatch training on 2 GPUs with 8 images per GPU.
+All evaluated models are trained for 160 epochs with an ini-
+tial learning rate of 0.001 which is then divided by 10 at 110
+epochs and again at 140 epochs. Weight decay of 0.0001
+and momentum of 0.9 are used. We adopt the same data
+augmentation strategies as [18], while do not use any data
+augmentation during testing phase. In training phase, the
+input image is ﬁxed to 512×512, while in testing phase, we
+maintain the original aspect ratio and resize the image to
+ensure the shorter side with 600 pixels. We apply the non-
+maximum suppression with IoU of 0.5 for each class.
+MS COCO: All models are trained on the widely used
+trainval35k set (80k train images and 35k subset of val
+images), and tested on minival set (5k subset of val im-
+ages) or test-dev set. We train the networks for 100
+epochs with an initial learning rate of 0.001 which is then
+divided by 10 at 60 epochs and again at 80 epochs. Other
+details are similar to that for PASCAL VOC.
+
+4.2. Ablation Study
+
+We ﬁrst investigate the impact of our design settings of
+the proposed framework. We ﬁx the ResNet-50 as back-
+bone and conduct several controlled experiments on PAS-
+
+5124
+
+32101230.00.51.0Heaviside Step Function=0.25=0.5=1=2Training Loss
+
+PASCAL VOC
+
+COCO
+
+AP AP50 AP75 AP AP50 AP75
+
+CE-Loss + OHEM 49.1
+51.3
+49.3
+53.1
+
+Focal Loss
+AUC-Loss
+AP-Loss
+
+81.5
+80.9
+79.7
+82.3
+
+51.5
+55.3
+51.8
+58.1
+
+30.8
+33.9
+25.5
+35.0
+
+50.9
+55.0
+44.9
+57.2
+
+32.6
+35.7
+26.0
+36.6
+
+Table 2: Comparison through different training losses. Models are
+tested on VOC2007 test and COCO minival sets. The metric
+AP is averaged over multiple IoU thresholds of 0.50 : 0.05 : 0.95.
+
+CAL VOC2007 test set (and COCO minival if stated)
+for this ablation study.
+
+4.2.1 Comparison on Different Parameter Settings
+
+Here we study the impact of the practical modiﬁcations in-
+troduced in Section 3.4. All results are shown in Table 1.
+Minibatch Training: First, we study the mini-batch train-
+ing, and report detector results at different batch-size in Ta-
+ble 1a. It shows that larger batch-size (i.e. 8) outperforms
+all the other smaller batch-size. This veriﬁes our previous
+hypothesis that large minibatch training helps to eliminate
+the “score-shift” from different images, and thus stabilizes
+the AP-loss through robust gradient calculation. Hence,
+batch-size = 8 is used in our further studies.
+Piecewise Step Function: Second, we study the piecewise
+step function, and report detector performance on the piece-
+wise step function with different δ in Table 1b. As men-
+tioned before, we argue that the choice of δ is trivial and
+is dependent on other network hyper-parameters such as
+weight decay. Smaller δ makes the function sharper, which
+yields unstable training at initial phase. Larger δ makes the
+function deviate from the properties of the original AP-loss,
+which also worsens the performance. δ = 1 is a good choice
+we used in our further studies.
+Interpolated AP: Third, we study the impact of interpo-
+lated AP in our optimization algorithm, and list the results
+in Table 1c. Marginal beneﬁts are observed for interpolated
+AP over standard AP, so we use interpolated AP in all the
+following studies.
+
+4.2.2 Comparison on Different Losses
+
+We evaluate with different losses on RetinaNet [15]. Re-
+sults are shown in Table 2. We compare traditional classi-
+ﬁcation based losses like focal loss [15] and cross entropy
+loss (CE-loss) with OHEM [18] to the ranking based losses
+like AUC-loss and AP-loss. Although focal loss is signif-
+icantly better than CE-loss with OHEM on COCO dataset,
+it is interesting that focal-loss does not perform better than
+CE-loss at AP50 on PASCAL VOC. This is likely because
+the hyper-parameters of focal loss are designed to suit the
+imbalance condition on COCO dataset which is not suitable
+for PASCAL VOC, so that focal loss cannot generalize well
+
+(a)
+
+(b)
+
+Figure 5:
+(a) Detection accuracy (mAP) on VOC2007 test
+set. (b) Convergence curves of different AP-loss optimizations on
+VOC2007 trainval set. (Best viewed in color)
+
+to PASCAL VOC without tuning its hyper-parameters. The
+proposed AP-loss performs much better than all the other
+losses on both two datasets, which demonstrates its effec-
+tiveness and stronger generalization ability on handling the
+imbalance issue. It is worth noting that AUC-loss performs
+much worse than AP-loss, which may be due to the fact that
+AUC has equal penalty for each misordered pair while AP
+imposes greater penalty for the misordering at higher po-
+sitions in the predicted ranking.
+It is obvious that object
+detection evaluation concerns more on objects with higher
+conﬁdence, which is why AP provides a better loss measure.
+Furthermore, an assessment of the detection performance at
+different training iterations, as shown in Figure 5a, outlines
+the superiority of the AP-loss for snapshot time points.
+
+4.2.3 Comparison on Different Optimization Methods
+
+We also compare our optimization method with the approx-
+imate gradient method [31, 9] and structured hinge loss
+method [20]. Both [31, 9] approximate the AP-loss with
+a smooth expectation and envelope function, respectively.
+Following their guidance, we replace the step function in
+AP-loss with a sigmoid function to constrain the gradient to
+neither zero nor undeﬁned, while still keep the shape similar
+to the original function. Same as [9], we adopt the log space
+objective function, i.e. log(AP + ǫ), to allow the model to
+quickly escape from the initial state. We train the detector
+on VOC2007 trainval set and turn off the bounding box
+regression task. The convergence curves shown in Figure 5b
+reveal some essential observations. It can be seen that AP-
+loss optimized by approximate gradient method does not
+even converge, likely because its non-convexity and non-
+quasiconvexity fail on a direct gradient descent method.
+Meanwhile, AP-loss optimized by the structured hinge loss
+method [20] converges slowly and stabilizes near 0.8, which
+is signiﬁcantly worse than the asymptotic limit of AP-loss
+optimized by our error-driven update scheme. We believe
+that this method does not optimize the AP-loss directly but
+rather an upper bound of it, which is controlled by a dis-
+criminant function [20]. In ranking task, this discriminant
+function is hand-picked and has an AUC-like form, which
+may cause variability in optimization.
+
+5125
+
+0246810121416Iter.(104)0.00.10.20.30.40.50.6mAPCE-Loss + OHEMFocal LossAUC-LossAP-Loss024681012Iter.(104)0.00.20.40.60.81.0AP-LossApproximate GradientStructured Hinge LossError-driven UpdateFigure 6: Some detection examples. Top: Baseline results by RetinaNet with focal loss. Bottom: Our results with AP-loss.
+
+Method
+
+Backbone
+
+Multi-Scale
+
+YOLOv2 [23]
+DSOD300 [28]
+SSD512 [18]
+SSD513 [6]
+DSSD513 [6]
+DES512 [36]
+
+RFBNet512 [17]
+PFPNet-R512 [10]
+ReﬁneDet512 [35]
+ReﬁneDet512 [35]
+RetinaNet500 [15]
+
+RetinaNet500+AP-Loss (ours)
+
+PFPNet-R512 [10]
+ReﬁneDet512 [35]
+ReﬁneDet512 [35]
+
+RetinaNet500+AP-Loss (ours)
+
+DarkNet-19
+
+DS/64-192-48-1
+
+VGG-16
+
+ResNet-101
+ResNet-101
+
+VGG-16
+VGG-16
+VGG-16
+VGG-16
+
+ResNet-101
+ResNet-101
+ResNet-101
+
+VGG-16
+VGG-16
+
+ResNet-101
+ResNet-101
+
+✗
+
+✗
+
+✗
+
+✗
+
+✗
+
+✗
+
+✗
+
+✗
+
+✗
+
+✗
+
+✗
+
+✗
+
+✓
+
+✓
+
+✓
+
+✓
+
+VOC07
+AP50
+78.6
+77.7
+79.8
+80.6
+81.5
+81.7
+82.2
+82.3
+81.8
+
+-
+-
+
+83.9
+84.1
+83.8
+
+-
+
+84.9
+
+VOC12
+AP50
+73.4
+76.3
+78.5
+79.4
+80.0
+80.3
+
+-
+
+80.3
+80.1
+
+-
+-
+
+83.1
+83.7
+83.5
+
+-
+
+84.5
+
+COCO
+
+AP
+
+21.6
+29.3
+28.8
+31.2
+33.2
+32.8
+33.8
+35.2
+33.0
+36.4
+34.4
+37.4
+39.4
+37.6
+41.8
+42.1
+
+AP50
+44.0
+47.3
+48.5
+50.4
+53.3
+53.2
+54.2
+57.6
+54.5
+57.5
+53.1
+58.6
+61.5
+58.7
+62.9
+63.5
+
+AP75
+19.2
+30.6
+30.3
+33.3
+35.2
+34.6
+35.9
+37.9
+35.5
+39.5
+36.8
+40.5
+42.6
+40.8
+45.7
+46.4
+
+APS
+5.0
+9.4
+
+-
+
+10.2
+13.0
+13.9
+16.2
+18.7
+16.3
+16.6
+14.7
+17.3
+25.3
+22.7
+25.6
+25.6
+
+APM
+22.4
+31.5
+
+-
+
+34.5
+35.4
+36.0
+37.1
+38.6
+36.3
+39.9
+38.5
+40.8
+42.3
+40.3
+45.1
+45.0
+
+APL
+35.5
+47.0
+
+-
+
+49.8
+51.1
+47.6
+47.4
+45.9
+44.3
+51.4
+49.1
+51.9
+48.8
+48.3
+54.1
+53.9
+
+Table 3: Detection results on VOC2007 test, VOC 2012 test and COCO test-dev sets.
+
+4.3. Benchmark Results
+
+With the settings selected in ablation study, we con-
+duct experiments to compare the proposed detector to state-
+of-the-art one-stage detectors on three widely used bench-
+mark, i.e. VOC2007 test, VOC2012 test and COCO
+test-dev sets. We use ResNet-101 as backbone net-
+works instead of ResNet-50 in ablation study. We use an
+image scale of 500 pixels for testing. Table 3 lists the
+benchmark results comparing to recent state-of-the-art one-
+stage detectors such as SSD [18], YOLOv2 [23], DSSD [6],
+DSOD [28], DES [36], RetinaNet [15], ReﬁneDet [35], PF-
+PNet [10], RFBNet [17]. Compared to the baseline model
+RetinaNet500 [15], our detector achieves a 3.0% improve-
+ment (37.4% vs. 34.4%) on COCO dataset. Figure 6 il-
+lustrates some detection results by the RetinaNet with focal
+loss and our AP-loss. Besides, our detector outperforms all
+the other methods for both single-scale and multi-scale tests
+in all the three benchmarks. We should emphasize that this
+veriﬁes the great effectiveness of our AP-loss since our de-
+tector achieves such a great performance gain just by replac-
+ing the focal-loss with our AP-loss in RetinaNet without
+whistle and bells, without using advanced techniques like
+deformable convolution [3], SNIP [30], group normaliza-
+tion [33], etc. The performance could be further improved
+
+with these kinds of techniques and other possible tricks.
+Our detector has the same detection speed (i.e., ∼11 f ps
+on one NVidia TitanX GPU) as RetinaNet500 [15] since it
+does not change the network architecture for inference.
+
+5. Conclusion
+
+In this paper, we address the class imbalance issue in
+one-stage object detectors by replacing the classiﬁcation
+sub-task with a ranking sub-task, and proposing to solve
+the ranking task with AP-Loss. Due to non-differentiability
+and non-convexity of the AP-loss, we propose a novel al-
+gorithm to optimize it based on error-driven update scheme
+from perceptron learning. We provide a grounded theoret-
+ical analysis of the proposed optimization algorithm. Ex-
+perimental results show that our approach can signiﬁcantly
+improve the state-of-the-art one-stage detectors.
+Acknowledgements. This paper is supported in part by:
+National Natural Science Foundation of China (61471235),
+Shanghai ’The Belt and Road’ Young Scholar Exchange
+Grant (17510740100), CREST Malaysia (No. T03C1-17),
+and the PKU-NTU Joint Research Institute (JRI) sponsored
+by a donation from the Ng Teng Fong Charitable Founda-
+tion. We gratefully acknowledge the support from Tencent
+YouTu Lab.
+
+5126
+
+spoon 0.31fork 0.31bowl 0.31spoon 0.31knife 0.32spoon 0.32diningtable 0.33spoon 0.35knife 0.38bowl 0.39diningtable 0.40wine glass 0.42person 0.45spoon 0.47spoon 0.60pizza 0.61wine glass 0.67bottle 0.74bowl 0.80wine glass 0.85bottle 0.86diningtable 0.89book 0.31sofa 0.34book 0.34sofa 0.36diningtable 0.36sofa 0.37book 0.37vase 0.42chair 0.42book 0.46sofa 0.46book 0.51remote 0.61sofa 0.68cup 0.75laptop 0.85cat 0.87bowl 0.31bowl 0.31chair 0.31bowl 0.31remote 0.32bowl 0.32bowl 0.33bowl 0.33cup 0.33cup 0.34cup 0.34bowl 0.36bowl 0.36person 0.37person 0.37cup 0.37person 0.37cup 0.38cup 0.44cup 0.45bottle 0.50bowl 0.51bowl 0.53bottle 0.57person 0.58diningtable 0.62cup 0.67bowl 0.67clock 0.73person 0.79person 0.81person 0.82person 0.86car 0.30person 0.33person 0.44person 0.49person 0.58person 0.72teddy bear 0.36teddy bear 0.43tie 0.51teddy bear 0.54teddy bear 0.56teddy bear 0.66teddy bear 0.73teddy bear 0.83person 0.34spoon 0.38spoon 0.52wine glass 0.67pizza 0.68diningtable 0.80bottle 0.85bowl 0.87wine glass 0.93bottle 0.93sofa 0.30book 0.36diningtable 0.36vase 0.42keyboard 0.46book 0.49sofa 0.74cup 0.77cat 0.89laptop 0.92remote 0.92remote 0.31cup 0.31bottle 0.36bowl 0.36cup 0.37cup 0.38cup 0.43bowl 0.54bottle 0.60person 0.62diningtable 0.63cup 0.64clock 0.66bowl 0.68person 0.85person 0.86person 0.86person 0.87boat 0.31car 0.33person 0.36person 0.37person 0.37person 0.39person 0.41person 0.43person 0.46person 0.49person 0.55person 0.79tie 0.42teddy bear 0.54teddy bear 0.69teddy bear 0.70teddy bear 0.70References
+
+[1] JK Anlauf and M Biehl. The adatron: an adaptive perceptron
+
+algorithm. EPL (Europhysics Letters), 10(7):687, 1989.
+
+[2] Jifeng Dai, Yi Li, Kaiming He, and Jian Sun. R-fcn: Object
+detection via region-based fully convolutional networks. In
+NIPS, pages 379–387, 2016.
+
+[3] Jifeng Dai, Haozhi Qi, Yuwen Xiong, et al. Deformable con-
+
+volutional networks. In ICCV, pages 764–773, 2017.
+
+[4] Jia Deng, Wei Dong, Richard Socher, Li-Jia Li, Kai Li,
+and Li Fei-Fei. Imagenet: A large-scale hierarchical image
+database. In CVPR, pages 248–255, 2009.
+
+[5] Mark Everingham, SM Ali Eslami, Luc Van Gool, Christo-
+pher KI Williams, John Winn, and Andrew Zisserman. The
+pascal visual object classes challenge: A retrospective. IJCV,
+111(1):98–136, 2015.
+
+[6] Cheng-Yang Fu, Wei Liu, Ananth Ranga, Ambrish Tyagi,
+and Alexander C Berg. Dssd: Deconvolutional single shot
+detector. arXiv preprint arXiv:1701.06659, 2017.
+
+[7] Ross Girshick. Fast r-cnn. In ICCV, pages 1440–1448, 2015.
+[8] Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun.
+In CVPR,
+
+Deep residual learning for image recognition.
+pages 770–778, 2016.
+
+[9] Paul Henderson and Vittorio Ferrari. End-to-end training of
+object class detectors for mean average precision. In ACCV,
+pages 198–213, 2016.
+
+[10] Seung-Wook Kim, Hyong-Keun Kook, Jee-Young Sun,
+Mun-Cheon Kang, and Sung-Jea Ko. Parallel feature pyra-
+mid network for object detection. In ECCV, pages 234–250,
+2018.
+
+[11] Werner Krauth and Marc M´ezard. Learning algorithms with
+optimal stability in neural networks. Journal of Physics A:
+Mathematical and General, 20(11):L745, 1987.
+
+[12] Jianguo Li and Y Zhang. Learning surf cascade for fast and
+
+accurate object detection. In CVPR, 2013.
+
+[13] Yuxi Li, Jiuwei Li, Weiyao Lin, and Jianguo Li. Tiny-DSOD:
+Lightweight object detection for resource-restricted usages.
+In BMVC, 2018.
+
+[14] Tsung-Yi Lin, Piotr Doll´ar, Ross B Girshick, Kaiming He,
+Bharath Hariharan, and Serge J Belongie. Feature pyramid
+networks for object detection. In CVPR, volume 1, page 3,
+2017.
+
+[15] Tsung-Yi Lin, Priyal Goyal, Ross Girshick, Kaiming He, and
+IEEE
+
+Piotr Doll´ar. Focal loss for dense object detection.
+Trans on PAMI, 2018.
+
+[16] Tsung-Yi Lin, Michael Maire, Serge Belongie, James Hays,
+Pietro Perona, Deva Ramanan, Piotr Doll´ar, and C Lawrence
+Zitnick. Microsoft coco: Common objects in context.
+In
+ECCV, pages 740–755, 2014.
+
+[17] Songtao Liu, Di Huang, and andYunhong Wang. Receptive
+ﬁeld block net for accurate and fast object detection. In The
+European Conference on Computer Vision (ECCV), Septem-
+ber 2018.
+
+[18] Wei Liu, Dragomir Anguelov, Dumitru Erhan, Christian
+Szegedy, Scott Reed, Cheng-Yang Fu, and Alexander C
+Berg. Ssd: Single shot multibox detector. In ECCV, pages
+21–37, 2016.
+
+[19] Pritish Mohapatra, CV Jawahar, and M Pawan Kumar. Efﬁ-
+cient optimization for average precision svm. In NIPS, pages
+2312–2320, 2014.
+
+[20] Pritish Mohapatra, Michal Rolinek, C.V. Jawahar, Vladimir
+Kolmogorov, and M. Pawan Kumar. Efﬁcient optimization
+for rank-based loss functions. In CVPR, 2018.
+
+[21] Yongming Rao, Dahua Lin, Jiwen Lu, and Jie Zhou. Learn-
+ing globally optimized object detector via policy gradient. In
+CVPR, pages 6190–6198, 2018.
+
+[22] Joseph Redmon, Santosh Divvala, Ross Girshick, and Ali
+Farhadi. You only look once: Uniﬁed, real-time object de-
+tection. In CVPR, pages 779–788, 2016.
+
+[23] Joseph Redmon and Ali Farhadi. Yolo9000: better, faster,
+
+stronger. arXiv preprint, 2017.
+
+[24] Shaoqing Ren, Kaiming He, Ross Girshick, and Jian Sun.
+Faster r-cnn: Towards real-time object detection with region
+proposal networks. In NIPS, pages 91–99, 2015.
+
+[25] Frank Rosenblatt. The perceptron, a perceiving and recog-
+nizing automaton Project Para. Cornell Aeronautical Labo-
+ratory, 1957.
+
+[26] Gerard Salton and Michael J McGill. Introduction to modern
+
+information retrieval. 1986.
+
+[27] Pierre Sermanet, David Eigen, Xiang Zhang, Micha¨el Math-
+ieu, Rob Fergus, and Yann LeCun. Overfeat: Integrated
+recognition, localization and detection using convolutional
+networks. arXiv preprint arXiv:1312.6229, 2013.
+
+[28] Zhiqiang Shen, Zhuang Liu, Jianguo Li, Yu-Gang Jiang,
+Yurong Chen, and Xiangyang Xue. Dsod: Learning deeply
+supervised object detectors from scratch. In ICCV, 2017.
+
+[29] Abhinav Shrivastava, Abhinav Gupta, and Ross Girshick.
+Training region-based object detectors with online hard ex-
+ample mining. In CVPR, 2016.
+
+[30] Bharat Singh and Larry S Davis. An analysis of scale invari-
+
+ance in object detection–snip. In CVPR, 2018.
+
+[31] Yang Song, Alexander Schwing, Raquel Urtasun, et al.
+Training deep neural networks via direct loss minimization.
+In ICML, pages 2169–2177, 2016.
+
+[32] A Wendemuth. Learning the unlearnable. Journal of Physics
+
+A: Mathematical and General, 28(18):5423, 1995.
+
+[33] Yuxin Wu and Kaiming He. Group normalization. In ECCV,
+
+2018.
+
+[34] Yisong Yue, Thomas Finley, Filip Radlinski, and Thorsten
+Joachims. A support vector method for optimizing average
+precision. In SIGIR, pages 271–278. ACM, 2007.
+
+[35] Shifeng Zhang, Longyin Wen, Xiao Bian, Zhen Lei, and
+Stan Z Li. Single-shot reﬁnement neural network for object
+detection. In CVPR, 2018.
+
+[36] Zhishuai Zhang, Siyuan Qiao, Cihang Xie, Wei Shen, Bo
+Wang, and Alan L. Yuille. Single-shot object detection with
+enriched semantics. In CVPR, 2018.
+
+5127
+
+

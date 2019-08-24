@@ -1,0 +1,1332 @@
+Multiview 2D/3D Rigid Registration via
+
+a Point-Of-Interest Network for Tracking and Triangulation
+
+Haofu Liao1*, Wei-An Lin2*, Jiarui Zhang3, Jingdan Zhang4, Jiebo Luo1, S. Kevin Zhou5,6
+
+1University of Rochester
+4Z2W Corporation
+
+2University of Maryland, College Park
+
+3Rutgers University
+6Peng Cheng Laboratory, Shenzhen
+
+5Chinese Academy of Sciences
+
+Abstract
+
+We propose to tackle the multiview 2D/3D rigid regis-
+tration problem via a Point-Of-Interest Network for Track-
+ing and Triangulation (POINT2). POINT2 learns to estab-
+lish 2D point-to-point correspondences between the pre-
+and intra-intervention images by tracking a set of point-
+of-interests (POIs). The 3D pose of the pre-intervention
+volume is then estimated through a triangulation layer. In
+POINT2, the uniﬁed framework of the POI tracker and the
+triangulation layer enables learning informative 2D fea-
+tures and estimating 3D pose jointly. In contrast to existing
+approaches, POINT2 only requires a single forward-pass to
+achieve a reliable 2D/3D registration. As the POI tracker
+is shift-invariant, POINT2 is more robust to the initial pose
+of the 3D pre-intervention image. Extensive experiments
+on a large-scale clinical cone-beam computed tomography
+dataset show that the proposed POINT2 method outper-
+forms the existing learning-based method in terms of accu-
+racy, robustness and running time. Furthermore, when used
+as an initial pose estimator, our method also improves the
+robustness and speed of the state-of-the-art optimization-
+based approaches by ten folds.
+
+1. Introduction
+
+In 2D/3D rigid registration for intervention, the goal is
+to ﬁnd a rigid pose of a pre-intervention 3D data, e.g.,
+computed tomography (CT), such that it aligns with a 2D
+intra-intervention image of a patient, e.g., ﬂuoroscopy. In
+practice, CT is usually a preferred 3D pre-intervention data
+as digitally reconstructed radiographs (DRRs) can be pro-
+duced from CT using ray casting [21]. The generation of
+DRRs simulates how an X-ray is captured, which makes
+them visually similar to the X-rays. Therefore, they are
+leveraged to facilitate the 2D/3D registration as we can ob-
+serve the misalignment between the CT and patient by di-
+rectly comparing the intra-intervention X-ray and the gen-
+
+* indicates equal contributions.
+
+(a) before registration
+
+(b) after registration
+
+Figure 1: Overlay of the DRRs and X-rays before and after
+the 2D/3D registration. For visualization purpose, only the
+bone region of the DRRs are projected and recolored with
+red to distinguish from the X-rays.
+
+erated DRR (See Figure 1 and Section 3.1 for details).
+
+One of the most commonly used 2D/3D registration
+strategies [12] is through an optimization-based approach,
+where a similarity metric is ﬁrst designed to measure the
+closeness between the DRRs and the 2D data, and then
+the 3D pose is iteratively searched and optimized for the
+best similarity score. However, the iterative pose search-
+ing scheme usually suffers from two problems. First, the
+generation of DRRs incurs high computation, and the itera-
+tive pose searching requires a signiﬁcant number of DRRs
+for the similarity measure, making it computationally slow.
+Second, iterative pose searching relies on a good initializa-
+tion. When the initial position is not close enough to the
+correct one, the method may converge to local extrema, and
+the registration fails. Although many studies have been pro-
+posed to address these two problems [4, 16, 15, 8, 5, 7, 19],
+trade-offs still have to be made between sampling good
+starting points and less costly registration.
+
+In recent years, the development of deep neural networks
+(DNNs) has enabled a learning-based strategy for medical
+image registration [13, 22, 11, 14] that aims to estimate the
+pose of the 3D data without searching and sampling the
+pose space at a large scale. Despite the efﬁciency, there are
+still two limitations of the existing learning-based methods.
+First, the learning-based methods usually require generat-
+
+12638
+
+ing a huge number of DRRs for training. The corresponding
+poses for the DRRs have to be dense in the entire searching
+space to avoid overﬁtting. Considering that the number of
+required DRRs is exponential with respect to the dimension
+of the pose space (which is usually six), this is computa-
+tionally prohibitive, thus making the learning-based meth-
+ods less reliable during testing. Second, the current state-
+of-the-art learning-based methods [13, 22, 11] require an
+iterative reﬁnement of the estimated pose and use DNNs to
+predict the most plausible update direction for faster con-
+vergence. However, the iterative approach still introduces a
+non-negligible computational cost, and the DNNs may di-
+rect the searching to an unseen state, which fails the regis-
+tration quickly.
+
+In this paper, we introduce a novel learning-based ap-
+proach, which is referred to as a Point-Of-Interest Network
+for Tracking and Triangulation (POINT2). POINT2 directly
+aligns the 3D data with the patient by using DNNs to es-
+tablish a point-to-point correspondence between multiple
+views1 of DRRs and X-ray images. The 3D pose is then es-
+timated by aligning the matched points. Speciﬁcally, these
+are achieved by tracking a set of points of interest (POIs).
+For 2D correspondence, we use the POI tracking network to
+map the 2D POIs from the DRRs to the X-ray images. For
+3D correspondence, we develop a triangulation layer that
+projects the tracked POIs in the X-ray images of multiple
+views back into 3D. We highlight that since the point-to-
+point correspondence is established in a shift-invariant man-
+ner, the requirement of dense sampling in the entire pose
+space is avoided.
+
+The contributions of this paper are as follows:
+• A novel learning-based multiview 2D/3D rigid regis-
+tration method that directly measures the 3D misalign-
+ment by exploiting the point-to-point correspondence
+between the X-rays and DRRs, which avoids the costly
+and unreliable iterative pose searching, and thus deliv-
+ers faster and more robust registration.
+
+• A novel POI tracking network constructed using a
+Siamese U-Net with POI convolution to enable a ﬁne-
+grained feature extraction and effective POI similar-
+ity measure, and more importantly, to offer a shift-
+invariant 2D misalignment measure that is robust to
+in-plane offsets2.
+
+• A uniﬁed framework of the POI tracker and the trian-
+gulation layer, which enables (i) end-to-end learning of
+informative 2D features and (ii) 3D pose estimation.
+
+• An extensive evaluation on a large-scale and chal-
+lenging clinical cone-beam CT (CBCT) dataset, which
+shows that
+the proposed method performs signiﬁ-
+
+1A different view indicates the DRR or X-ray is captured at a different
+
+projection angle.
+
+2In-plane/out-plane offset refers to the translation and rotation offset
+
+within/outside the DRR or X-ray images.
+
+cantly better than the state-of-the-art learning-based
+approaches, and, when used as an initial pose estima-
+tor, it also greatly improves the robustness and speed
+of the state-of-the-art optimization-based approaches.
+
+2. Related Work
+
+Optimization-Based Approaches. Optimization-based ap-
+proaches usually suffer from high computational cost and
+is sensitive to the initial estimate. To reduce the compu-
+tational cost, many works have been proposed to improve
+the efﬁciency in hardware-level [10, 8, 15] or software-
+level [19, 27, 9]. Although these works have successfully
+reduced the DRR generation time to a reasonable range, the
+overall registration time is still non-negligible [19, 15] and
+the registration accuracy might be compromised for faster
+speed [27, 19]. For better initial pose estimation, many
+attempts have been made by either sampling better initial
+position [7, 5], using multistart strategies [26, 16], or a
+carefully designed objective function that is less sensitive
+to the initial position selection [15]. However, these meth-
+ods usually achieve a more robust registration at the cost of
+longer running time as more locations, and the correspond-
+ing DRRs need to be sampled and generated, respectively,
+to avoid being trapped in the local extrema.
+
+Learning-Based Approaches. Early learning-based ap-
+proach [14] aims to train the DNNs to directly predict the
+3D pose given a pair of DRR and X-ray images. However,
+this approach is generally too ambitious and hence relies
+on the existence of opaque objects, such as medical im-
+plants, that provide strong features for robustness. Alterna-
+tively, it has been shown that formulating the registration as
+a Markov decision process (MDP) is viable [11]. Instead of
+directly regressing the 3D pose, MDP-based methods pro-
+pose ﬁrst to train an agent that predicts the most possible
+search direction and then the registration is iteratively re-
+peated until a ﬁxed number of steps is reached. However,
+the MDP-based approach requires the agent to be trained on
+a large number of samples such that the registration can fol-
+low the expected trajectory. Though mitigated with a multi-
+agent design [13], it is still inevitable that the neighborhood
+search may reach an unseen pose and the registration fails.
+Moreover, the MDP-based approach cannot guarantee con-
+vergence and hence limits its registration accuracy. There-
+fore, the MDP-based approach [13] is usually used to ﬁnd
+a good initial pose for the registration, and a combination
+with an optimization-based method is applied for better per-
+formance. Another possible approach is by directly tracking
+landmarks from multiple views of X-ray images [2]. How-
+ever, the landmark-based tracking approach does not make
+use of the information from the CT volume and requires the
+landmarks to be present in the X-ray images, making it less
+robust and applicable to clinical applications.
+
+12639
+
+Figure 2: The X-ray imaging model of the canonical-
+view (bottom-left to upper-right) and a non-canonical view
+(bottom-right to upper-left).
+
+3. Methodology
+
+3.1. Problem Formulation
+
+Following the convention in the literature [12], we as-
+sume a 2D/3D rigid registration problem and also assume
+that the 3D data is a CT or CBCT volume, which is the
+most accessible and allows the generation of DRR. For the
+2D data, we use X-rays. As single-view 2D/3D registration
+is an ill-posed problem (due to the ambiguity introduced by
+the out-plane offset), X-rays from multiple views are usu-
+ally captured during the intervention. Therefore, we also
+follow the literature [12] and tackle a multiview 2D/3D reg-
+istration problem. Without loss of generality, most of the
+studies in this work are conducted under two views, and it
+is easy to extend our work to the cases with more views.
+
+2D/3D Rigid Registration with DRRs.
+In 2D/3D rigid
+registration, the misalignment between the patient and the
+CT volume V is formulated through a transformation ma-
+trix T that brings V from its initial location to the pa-
+tient’s location under the same coordinate. As illustrated
+in Figure 2, T is usually parameterized by three transla-
+tions t = (tx, ty, tz)T and three rotations θ = (θx, θy, θz)T
+about the axes, and can be written as a 4 × 4 matrix under
+the homogeneous coordinate
+
+T = (cid:20)R(θ)
+
+0
+
+t
+
+1(cid:21) ,
+
+(1)
+
+where R is the rotation matrix that controls the rotation of
+V around the origin.
+
+As demonstrated in Figure 1, casting simulated X-rays
+through the CT volume creates a DRR on the detector. Sim-
+ilarly, passing a real x-ray beam through the patient’s body
+gives an X-ray image. Hence, the misalignment between
+the CT volume and the patient can be observed from the de-
+tector by comparing the DRR and the X-ray image. Given a
+
+(a) Forward projection
+
+(b) POI tracking
+
+from CT to DRR
+
+from DRR to X-ray
+
+(c) Backward projection
+
+from X-ray to patient
+
+(d) Shape alignment
+
+between
+
+CT and patient POIs
+
+Figure 3: Overview of the proposed POINT2 method. For
+better visualization, we apply different colormaps to DRR
+and X-ray images and adjust their contrast.
+
+transformation matrix T and a CT volume V, the DRR ID
+can be computed by
+
+ID(x) = Zp∈l(x)
+
+V(T−1p)dp,
+
+(2)
+
+where l(x), whose parameters are determined by the imag-
+ing model, is a line segment connecting the X-ray source
+and a point x on the detector. Therefore, let IX denote the
+X-ray image, the 2D/3D registration can be seen as ﬁnding
+the optimal T∗ such that IX and ID are aligned.
+
+X-Ray Imaging Model. An X-ray imaging system is usu-
+ally modeled as a pinhole camera [3, 6], as illustrated in
+Figure 2, where the X-ray source serves as the camera cen-
+ter and the X-ray detector serves as the image plane. Fol-
+lowing the convention in X-ray imaging [3], we assume an
+isocenter coordinate system whose origin lies at the isocen-
+ter. Without loss of generality, we also assume the imaging
+model is calibrated, and there is no X-ray source offset and
+detector offset. Thus, the X-ray source, the isocenter, and
+the detector’s origin are collinear, and the line from the X-
+ray source to the isocenter (referred to as the principal axis)
+is perpendicular to the detector. Let d denote the distance
+between the X-ray source and the detector origin, and c de-
+note the distance between the X-ray source and the isocen-
+ter, then for a point X = (X, Y, Z)T in the isocenter coor-
+
+12640
+
+Figure 4: The architecture of the POINT network.
+
+dinate, its projection x on the detector is given by
+
+where
+
+x′ = K(cid:2)I h(cid:3)(cid:18)X
+1(cid:19) ,
+
+ , h = 
+
+
+−d
+0
+0 −d 0
+0
+1
+
+0
+
+0
+
+0
+0
+−c
+
+
+ .
+
+K = 
+
+
+Here x′ = (x′, y′, z′) is deﬁned under the homogeneous
+coordinate and its counterpart under the detector coordinate
+can be written as x = (x, y) = (x′/z′, y′/z′).
+
+In general, an X-ray is usually not captured at the canon-
+ical view as discussed above. Let Tview be a transformation
+matrix that converts a canonical view to a non-canonical
+view (Figure 2), then the projection of X for the non-
+canonical view can be written as
+
+x′ = K(cid:2)Rview
+
+tview + h(cid:3)(cid:18)X
+1(cid:19) ,
+
+(4)
+
+where Rview and tview perform the rotation and translation,
+respectively, as in Equation (1). Similarly, we can rewrite
+Equation (2) at a non-canonical view as
+
+ID
+
+view(x) = Zp∈l(x)
+
+V(T−1T−1
+
+viewp)dp.
+
+(5)
+
+3.2. The Proposed POINT2 Approach
+
+An overview of the proposed method with two views is
+shown in Figure 3. Given a set of DRR and X-ray pairs of
+different views, our approach ﬁrst selects a set of POIs in 3D
+from the CT volume and projects them to each DRR using
+Equation (4) as shown in Figure 3(a). Then, the approach
+measures the misalignment between each pair of DRR and
+X-ray by tracking the projected DRR POIs from the X-ray
+(Figure 3(b)). Using the tracked POIs on the X-rays, we can
+estimate their corresponding 3D POIs on the patient through
+
+triangulation (Figure 3(c)). Finally, by aligning CT POIs
+with patient POIs, the pose misalignment T∗ between the
+CT and the patient can be calculated (Figure 3(d)).
+
+(3)
+
+1 , xD
+
+2 , . . . , xD
+
+POINT. One of the key components of the proposed
+method is a Point-Of-Interest Network for Tracking
+(POINT) that ﬁnds the point-to-point correspondence be-
+tween two images, that is, we use this network to track the
+POIs from DRR to X-ray. Speciﬁcally, the network takes
+a DRR and X-ray pair (ID, IX) and a set of projected DRR
+POIs {xD
+m} as the input and outputs the tracked
+X-ray POIs in the form of heatmaps { ˆMX
+m}.
+The structure of the network is illustrated in Figure 4. We
+construct this network under a Siamese architecture [1, 23]
+with each branch φ having an U-Net like structure [18]. The
+weights of the two branches are shared. Each branch takes
+an image as the input and performs ﬁne-grained feature ex-
+traction at pixel-level. Thus, the output is a feature map
+with the same resolution as the input image, and for an im-
+age with size M×N, the size of the feature map is M×N×C
+where C is the number of channels. We denote the ex-
+tracted feature maps of DRR and X-ray as FD = φ(ID)
+and FX = φ(IX), respectively.
+
+2 , . . . , ˆMX
+
+1 , ˆMX
+
+With feature map FD, the feature vector of a DRR POI
+xD
+i can be extracted by interpolating FD at xD
+i . The fea-
+ture extraction layer (FE layer) in Figure 4 performs this
+operation and we denote its output as a feature kernel
+FD(xD
+i ). For a richer feature representation, the neighbor
+feature vectors around xD
+i may also be used. A neigh-
+bor of size K gives in total (2K+1)×(2K+1) feature vec-
+tors and the feature kernel FD(xD
+i ) in this case has a size
+(2K+1)×(2K+1)×C.
+
+Similarly, a feature kernel at x of the X-ray feature map
+can be extracted and denoted as FX(x). Then, we may ap-
+i ) and FX(x) to give a
+ply a similarity operation to FD(xD
+similarity score of the two locations xD
+i and x. When the
+similarity check is operated exhaustively over all locations
+
+12641
+
+from the i-th view, and we obtain the 2D X-ray POI by
+
+1
+ˆMX
+
+ij(x) Xx
+
+ˆMX
+
+ij(x)x.
+
+(7)
+
+ˆxX
+
+ij =
+
+Px
+
+Next, we rewrite Equation (4) as
+
+D(x)RviewX = cx − D(x)tview,
+
+(8)
+
+where
+
+D(x) = (cid:20)d 0
+
+0 d
+
+x(cid:21) .
+
+Thus, by applying Equation (8) for each view, we can get
+
+D(ˆxX
+D(ˆxX
+
+1j)R1 ˆXX
+2j)R2 ˆXX
+
+j = cˆxX
+j = cˆxX
+
+1j − D(ˆxX
+2j − D(ˆxX
+
+1j)t1,
+2j)t2,
+
+...
+
+(9)
+
+D(ˆxX
+
+nj)Rn ˆXX
+
+j = cˆxX
+
+nj − D(ˆxX
+
+nj)tn.
+
+D(ˆxX
+1j)R1
+D(ˆxX
+2j)R2
+...
+D(ˆxX
+nj)Rn
+
+, b =
+
+
+
+
+
+
+
+cˆxX
+cˆxX
+
+1j − D(ˆxX
+2j − D(ˆxX
+
+1j)t1
+2j)t2
+
+...
+
+cˆxX
+
+nj − D(ˆxX
+
+nj)tn
+
+,
+
+(10)
+
+
+
+
+
+
+
+
+
+Figure 5: The overall framework of POINT2.
+
+on the X-ray, the location x∗ with the highest similarity
+score is regarded as the corresponding POI of xD
+i on the
+X-ray. Such an exhaustive search on FX can be performed
+effectively with convolution and is denoted as a POI convo-
+lution layer in Figure 4. The output of the layer is a heatmap
+ˆMX
+
+i and is computed by
+
+Let
+
+A =
+
+ˆMX
+
+i = FX ∗ (W ⊙ FD(xD
+
+i )),
+
+(6)
+
+then ˆXX
+
+j is given by
+
+where W is a learned weight that selects the features for
+better similarity. Each element ˆMX
+i (x) denotes a similar-
+ity score of the corresponding location x on the X-ray.
+
+ˆXX
+
+j = A+b.
+
+(11)
+
+The triangulation can be plugged into a loss function that
+regulates the training of POINT networks of different views.
+
+POINT2. With the tracked POIs from different views of
+X-rays, we can obtain their 3D locations on the patient us-
+ing triangulation as shown in Figure 3(c). However, this
+work seeks a uniform solution that formulates the POINT
+network and the triangulation under the same framework so
+that the two tasks can be trained jointly in an end-to-end
+fashion which could potentially beneﬁt the learning of the
+tracking network. An illustration of this end-to-end design
+for two views is shown in Figure 5. For an n-view 2D/3D
+registration problem, the proposed design will include n
+POINT networks as discussed above. Each of the networks
+will track POIs for the designated view and, therefore, the
+weights are not shared among the networks. Given a set of
+DRR and X-ray pairs {(ID
+n)} of
+the n views, these networks output the tracked X-ray POIs
+of each view in the form of heatmaps.
+
+2 ), . . . , (ID
+
+1 ), (ID
+
+1 , IX
+
+2 , IX
+
+n, IX
+
+After obtaining the heatmaps, we introduce a triangula-
+tion layer that localizes a 3D point by forming triangles to it
+from the 2D tracked POIs from the heatmaps. Formally, we
+denote Mj = { ˆMX
+nj} the set of heatmaps
+from different views but all corresponding to the same 3D
+POI ˆXX
+ij is the heatmap of the j-th X-ray POI
+
+j . Here, ˆMX
+
+2j, . . . , ˆMX
+
+1j, ˆMX
+
+L =
+
+1
+
+mn Xi Xj
+
+BCE(σ( ˆMX
+
+ij), σ(MX
+
+ij))
+
++
+
+w
+
+n Xj
+
+|| ˆXX
+
+j − XX
+
+j ||2,
+
+(12)
+
+ij is the ground truth heatmap, XX
+
+where MX
+j is the ground
+truth 3D POI, BCE is the pixel-wise binary cross entropy
+function, σ is the sigmoid function, and w is a weight bal-
+ancing the losses between tracking and triangulation errors.
+
+Shape Alignment. Let PD = [XD
+m] be the
+ˆXX
+selected CT POIs and PX = [ ˆXX
+m] be the esti-
+1
+mated 3D POIs 3. The shape alignment ﬁnds a transforma-
+tion matrix T∗ such that the transformed PD aligns closely
+with PX, i.e.,
+
+1 XD
+2 . . . ˆXX
+
+2 . . . XD
+
+T∗ = arg min
+T
+
+||TPD − PX||F , s.t., RRT = I
+
+(13)
+
+This problem is solved analytically through Procrustes anal-
+ysis [20].
+
+3The shape alignment assumes the points are under the homogeneous
+
+coordinate.
+
+12642
+
+Figure 6: Sample raw X-ray images of our dataset.
+
+4. Experiments
+
+4.1. Dataset
+
+The dataset we use in the experiments is a cone-beam CT
+(CBCT) dataset captured for radiation therapy. The dataset
+contains 340 raw CBCT scans with each has 780 X-ray im-
+ages. Each X-ray image comes with a geometry ﬁle that
+provides the registration ground truth as well as the infor-
+mation to reconstruct the CBCT volume. Each CBCT vol-
+ume is reconstructed from the 780 X-ray images, and in
+total, we have 340 CBCT volumes (one for each CBCT
+scan). We use 300 scans for training and validation, and
+40 scans for testing. The size of the CBCT volumes is
+448 × 448 × 768 with 0.5 mm voxel spacing, and the size of
+the X-ray images is 512×512 with 0.388 mm pixel spacing.
+During the experiments, the CBCT volumes are treated as
+the 3D pre-intervention data, and the corresponding X-ray
+images are treated as the 2D intra-intervention data. Sam-
+ple X-ray images from our dataset are shown in Figure.
+Note that unlike many existing approaches [15, 17, 25] that
+evaluate their methods on small datasets (typically about
+10 scans) which are captured under relatively ideal sce-
+narios, we use a signiﬁcantly larger dataset with complex
+clinical settings, e.g., diverse ﬁeld-of-views, surgical instru-
+ments/implants, various image contrast and quality, etc.
+
+We consider two common views during the experiment:
+the anterior-posterior view and the lateral view. Hence, only
+X-rays that are close to (±5◦) these views are used for train-
+ing and testing. Note that this selection does not tightly
+constrain the diversity of the X-rays as the patient may be
+subject to movements with regard to the operating bed. To
+train the proposed method, X-ray and DRR pairs are se-
+lected and generated with a maximum of 10◦ rotation offset
+and 20 mm translation offset. We ﬁrst invert all the raw X-
+ray images and then apply histogram equalization to both
+the inverted X-ray images and DRRs to facilitate the simi-
+larity measurement. For each of the scan, we also annotate
+their landmarks on the reconstructed CBCT volume for fur-
+ther evaluation.
+
+4.2. Implementation and Training Details
+
+We implement the proposed approach under the Pytorch4
+framework with GPU acceleration. For the POINT network,
+
+4https://pytorch.org
+
+(a) landmark
+
+(b) Harris corner
+
+(c) random
+
+Figure 7: Training and validation losses of different POI
+selection methods.
+
+each of the Siamese branch φ has ﬁve encoding blocks
+(BatchNorm, Conv, and LeakyReLU) followed by ﬁve de-
+coding blocks (BatchNorm, Deconv, and ReLU), thus form-
+ing a symmetric structure, and we use skip-connections
+to shuttle the lower-level features from an encoding block
+to its symmetric decoding counterpart (see details in the
+supplementary material). The triangulation layer is imple-
+mented according to Equation (11) with the backpropaga-
+tion automatically supported by Pytorch. We train the pro-
+posed approach in a two-stage fashion. In the ﬁrst stage, we
+train the POINT network of each view independently for
+30 epochs. Then, we ﬁne-tune POINT2 for 20 epochs. We
+ﬁnd this mechanism converges faster than training POINT2
+from scratch. For the optimization, we use the mini-batch
+stochastic gradient descent with 0.01 learning rate for the
+ﬁrst stage and 0.001 for the second. We set the loss weight
+as w = 0.01, which we empirically ﬁnd it works well during
+training. For the X-ray imaging model, we use d = 1, 500
+mm and c = 1, 000 mm.
+
+4.3. Ablation Study
+
+This section discusses an ablation study of the proposed
+POINT network. As the network tracks POIs in 2D, we use
+mean projected distance (mPD) [24] to evaluate different
+models with speciﬁc design choices. The evaluation results
+are given in Table 1.
+
+POI Selection. The ﬁrst step of the proposed approach re-
+quires selecting a set of POIs to set up a point-to-point cor-
+respondence.
+In this experiment, we investigate different
+POI selection strategies. First, we investigate directly us-
+ing landmarks as the POIs since they usually have strong
+semantic meaning and can be annotated before the inter-
+vention. Second, we also investigate an automatic solution
+that uses the Harris corners as the POIs to avoid the labor
+work of annotation. Finally, we try random POI selection.
+
+As shown in Figure 7 (a), we ﬁnd our approach is prone
+to overﬁtting when trained with landmark POIs. This is ac-
+tually reasonable as each CBCT volume only contains about
+a dozen of landmarks, which in total is about 3, 000 POIs.
+Considering the variety of the ﬁeld of views of our dataset,
+this is far from enough and leads to the overﬁtting. For the
+
+12643
+
+Harris corners, a few hundreds of POIs are selected from
+each CBCT volume, and we can see an improvement in
+performance, but the overﬁtting still exists (Figure 7 (b)).
+We ﬁnd the use of random POIs gives the best performance
+and generalizes well to unseen data (Figure 7 (c)). This
+seemly surprising observation is, in fact, reasonable as it
+forces the model to learn a more general way to extract fea-
+tures at a ﬁne-grained level, instead of memorizing some
+feature points that may look different when projected from
+a different view.
+
+POI Convolution. We also explore two design options
+for the POI convolution layer. First, it is worth knowing
+that how much neighborhood information around the POI is
+necessary to extract a distinctive feature while the learning
+can still be easily generalized. To this end, we try different
+sizes of the feature kernel for POI convolution as given in
+Equation (6). Rows 1-3 in Table 1 show the performance of
+the POINT network with different feature kernel sizes. We
+observe that a 1 × 1 kernel does not give features distinc-
+tive enough for better similarity measure and a 5 × 5 kernel
+seems to include too much neighborhood information (and
+use more computation) that is harder for the model to ﬁg-
+ure out a general representation. In general, a 3 × 3 kernel
+serves better for the feature similarity measure. It should
+also be noted that a 1 × 1 kernel does not mean only the
+information at the current pixel location is used since each
+element of FD or FX is supported by the receptive ﬁeld of
+the U-Net that readily provides rich neighborhood informa-
+tion. Second, we compare the performance of the POINT
+network with or without having the weight W in Equation
+(6). Rows 2 and 6 show that it is critical to have a weighted
+feature kernel convolution so that discriminate features can
+be highlighted in the similarity measure.
+
+Shift-Invariant Tracking. The POINT network beneﬁts
+from the shift invariant property of the convolution opera-
+tion, which makes it less sensitive to the in-plane offset of
+the DRRs. Figure 8 shows some tracking results from the
+POINT network. Here the odd rows show the (a) X-ray and
+(b-d) DRR images. The heatmap below each DRR shows
+the tracking result between this DRR and the leftmost X-ray
+image. The red and the blue marks on the X-ray and DRR
+images denote the POIs. The red and the blue marks on the
+heatmaps are the ground truth POIs and the tracked POIs,
+respectively. The green blobs are the heatmap responses
+and they are used to generate the tracked POIs (blue) ac-
+cording to Equation (7). The numbers under each DRR de-
+note the mPD scores before and after the tracking. As we
+can observe that the tracking results are consistently good,
+no matter how much initial offset there is between the DRR
+and the X-ray image. This shows that our POINT network
+indeed beneﬁts from the POI convolution layer and provide
+more consistent outputs regardless of the in-plane offsets.
+
+Table 1: Ablation study of the proposed POINT network.
+
+Kernel size
+1
+5
+X
+
+3
+
+X
+
+X
+
+X
+
+X
+
+X
+
+#
+
+1
+2
+3
+4
+5
+6
+
+POI type
+
+land. Harris
+
+Weight
+rand. w/ w/o
+
+X
+
+X
+
+X
+
+X
+
+X
+
+X
+
+X
+
+X
+
+X
+
+X
+
+X
+
+X
+
+mPD
+(mm)
+8.46
+8.12
+9.49
+9.87
+12.72
+11.26
+
+4.4. 2D/3D Registration
+
+We compare our method with one learning-based
+(MDP [13]) and three optimization-based methods (Opt-
+GC [4], Opt-GO [4] and Opt-NGI [16]). To further eval-
+uate the performances of the proposed method as an initial
+pose estimator, we also compare two approaches that use
+MDP or our method to initialize the optimization. We de-
+note these two approaches as MDP+opt and POINT2+opt,
+respectively. Finally, we investigate the registration perfor-
+mance of our method that only uses the POINT network
+without the triangulation layer, and denote the correspond-
+ing models as POINT and POINT+opt. For MDP+opt,
+POINT+opt and POINT2+opt, we use the Opt-GC method
+during the optimization as we ﬁnd it converges faster when
+the initial pose is close to the global optima.
+
+Following the standard in 2D/3D registration [24], the
+performances of the proposed method and the baseline
+methods are evaluated with mean target registration error
+(mTRE), i.e., the mean distance (in mm) between the pa-
+tient landmarks and the aligned CT landmarks in 3D. The
+mTRE results are reported in forms of the 50th, 75th, and
+95th percentiles to demonstrate the robustness of the com-
+pared methods. In addition, we also report the gross fail-
+ure rate (GFR) and average registration time, where GFR
+is deﬁned as the percentage of the tested cases with a TRE
+greater than 10 mm [13].
+
+The evaluation results are given in Table 2. We ﬁnd that
+the optimization-based methods generally require a good
+initialization for accurate registration. Otherwise, they fail
+quickly. Opt-NGI overall is less sensitive to the initial loca-
+tion than Opt-GO and Opt-GC, with more than half of the
+registration results have less than 1 mm mTRE. Despite the
+high accuracy, it still suffers from the high failure rate and
+long registration time and so do the Opt-GO and Opt-GC
+methods. On the other hand, MDP achieves a better GFR
+and registration time by learning a function that guides the
+iterative pose searching. This also demonstrates the beneﬁt
+of using a learning-based approach to guide the registration.
+However, due to the problems we have mentioned in Sec-
+tion 1, it still has a relatively high GFR and a noticeable
+registration time.
+In contrast, our base model POINT al-
+ready achieves comparable performance to MDP; however,
+
+12644
+
+13.6 → 7.3
+
+22.9 → 9.0
+
+37.1 → 7.8
+
+19.5 → 8.7
+
+26.0 → 9.5
+
+41.1 → 11.4
+
+Table 2: 2D/3D registration performance comparing with
+the state-of-the-art results.
+
+Initial
+
+Opt-NGI [16]
+Opt-GO [4]
+Opt-GC [4]
+MDP [13]
+
+POINT
+POINT2
+
+MDP [13] + Opt
+
+POINT + Opt
+POINT2 + Opt
+
+mTRE (mm)
+
+50th
+20.4
+0.62
+6.53
+7.40
+5.40
+5.63
+4.22
+1.06
+1.19
+0.55
+
+75th
+24.4
+25.2
+23.8
+25.7
+8.62
+7.72
+5.70
+2.25
+4.67
+0.96
+
+95th
+29.7
+57.8
+44.7
+56.5
+27.6
+12.8
+9.84
+24.6
+21.8
+5.67
+
+GFR
+
+Reg.
+time
+92.9% N/A
+40.0% 23.5s
+45.1% 22.8s
+47.7% 22.1s
+16.4% 1.74s
+18.6% 0.75s
+4.9% 0.78s
+15.6% 3.21s
+14.8% 2.16s
+2.7% 2.25s
+
+tion, our method requires X-rays from at least two views to
+be available. Hence, for the applications where only a sin-
+gle view is acceptable, our method will render an estimate
+of registration parameter with inherent ambiguity.
+
+(a)
+
+(b)
+
+(c)
+
+(d)
+
+6. Conclusion
+
+Figure 8: POI tracking results. (a) X-ray image. (b-d) DRR
+images with different in-plane offsets. The heatmaps of the
+tracking results are all aligned with the X-ray images and
+appear similar, showing the shift-invariant property.
+
+it runs over twice faster. Further, by including the triangula-
+tion layer, POINT2 performs signiﬁcantly better than both
+POINT and MDP in terms of mTRE and GFR. It means that
+the triangulation layer that brings the 3D information to the
+training of the POINT network is indeed useful.
+
+In addition, we notice that when our method is com-
+bined with an optimization-based method (POINT2 + Opt)
+the GFR is greatly reduced, which demonstrates that our
+method provides initial poses that are close to the global
+optima such that the optimization is unlikely to fall into lo-
+cal optima. The speed is also signiﬁcantly improved due to
+faster convergence and less sampling over the pose space.
+
+5. Limitations
+
+First, similar to other learning-based approaches, our
+method requires a considerably large dataset from the tar-
+geting medical domain for learning reliable feature rep-
+resentations. When the data is insufﬁcient, the proposed
+method may fail. Second, although our method alone is
+quite robust and its accuracy is state-of-the-art through a
+combination with the optimization-based approach, it is still
+desirable to come up with a more elegant solution to solve
+the problem directly. Finally, due to the use of triangula-
+
+We proposed a fast and robust method for 2D/3D reg-
+istration. The proposed method avoids the often costly
+and unreliable iterative pose searching by directly aligning
+the CT with the patient through a novel POINT2 frame-
+work, which ﬁrst establishes the point-to-point correspon-
+dence between the pre- and intra-intervention data in both
+2D and 3D, and then performs a shape alignment between
+the matched points to estimate the pose of the CT. We eval-
+uated the proposed POINT2 framework on a challenging
+and large-scale CBCT dataset and showed that 1) a robust
+POINT network should be trained with random POIs, 2)
+a good POI convolution layer should be convolved with
+weighted 3 × 3 feature kernel, and 3) the POINT network
+is not sensitive to in-plane offsets. We also demonstrated
+that the proposed POINT2 framework is signiﬁcantly more
+robust and faster than the state-of-the-art learning-based ap-
+proach. When used as an initial pose estimator, we also
+showed that the POINT2 framework can greatly improve
+the speed and robustness of the current optimization-based
+approach while attaining a higher registration accuracy.
+Finally, we discussed several limitations of the POINT2
+framework which we will address in our future work.
+
+Acknowledgement: This work was partially supported by
+NSF award #17228477, and the Morris K. Udall Center of
+Excellence in Parkinson’s Disease Research by NIH.
+
+References
+
+[1] Luca Bertinetto, Jack Valmadre, Joao F Henriques, Andrea
+Vedaldi, and Philip HS Torr. Fully-convolutional siamese
+
+12645
+
+networks for object tracking.
+computer vision, pages 850–865. Springer, 2016.
+
+In European conference on
+
+[2] Bastian Bier, Mathias Unberath, Jan-Nico Zaech, Javad Fo-
+touhi, Mehran Armand, Greg Osgood, Nassir Navab, and
+Andreas K. Maier. X-ray-transform invariant anatomical
+landmark detection for pelvic trauma surgery.
+In Interna-
+tional Medical Image Computing and Computer Assisted In-
+tervention, volume 11073 of Lecture Notes in Computer Sci-
+ence, pages 55–63. Springer, 2018.
+
+[3] International Electrotechnical Commission et al. Radiother-
+IEC,
+
+apy equipment: coordinates, movements and scales.
+2008.
+
+[4] T De Silva, A Uneri, MD Ketcha, S Reaungamornrat, G
+Kleinszig, S Vogt, N Aygun, SF Lo, JP Wolinsky, and JH
+Siewerdsen. 3d–2d image registration for target localization
+in spine surgery: investigation of similarity metrics provid-
+ing robustness to content mismatch. Physics in Medicine &
+Biology, 61(8):3009, 2016.
+
+[5] Joyoni Dey and Sandy Napel. Targeted 2d/3d registration
+using ray normalization and a hybrid optimizer. Medical
+physics, 33(12):4730–4738, 2006.
+
+[6] Richard Hartley and Andrew Zisserman. Multiple view ge-
+ometry in computer vision. Cambridge university press,
+2003.
+
+[7] H-S Jans, AM Syme, S Rathee, and BG Fallone. 3d interfrac-
+tional patient position veriﬁcation using 2d-3d registration
+of orthogonal images. Medical physics, 33(5):1420–1439,
+2006.
+
+[8] Ali Khamene, Peter Bloch, Wolfgang Wein, Michelle Svatos,
+and Frank Sauer. Automatic registration of portal images
+and volumetric ct for patient positioning in radiation therapy.
+Medical Image Analysis, 10(1):96–112, 2006.
+
+[9] David LaRose, John Bayouth, and Takeo Kanade. Trans-
+graph: Interactive intensity-based 2d/3d registration of x-ray
+and ct data. In Medical Imaging 2000: Image Processing,
+volume 3979, pages 385–397. International Society for Op-
+tics and Photonics, 2000.
+
+[10] David A LaRose. Iterative X-ray/CT registration using ac-
+
+celerated volume rendering. PhD thesis, Citeseer, 2001.
+
+[11] Rui Liao, Shun Miao, Pierre de Tournemire, Sasa Grbic, Ali
+Kamen, Tommaso Mansi, and Dorin Comaniciu. An artiﬁ-
+cial agent for robust image registration. In Proceedings of
+the Thirty-First AAAI Conference on Artiﬁcial Intelligence,
+February 4-9, 2017, San Francisco, California, USA., pages
+4168–4175, 2017.
+
+[12] Primoz Markelj, Dejan Tomaˇzeviˇc, Bostjan Likar, and Franjo
+Pernuˇs. A review of 3d/2d registration methods for image-
+guided interventions. Medical image analysis, 16(3):642–
+661, 2012.
+
+[13] Shun Miao, Sebastien Piat, Peter Walter Fischer, Ahmet Tuy-
+suzoglu, Philip Walter Mewes, Tommaso Mansi, and Rui
+Liao. Dilated FCN for multi-agent 2d/3d medical image reg-
+istration.
+In Proceedings of the Thirty-Second AAAI Con-
+ference on Artiﬁcial Intelligence, (AAAI-18), the 30th inno-
+vative Applications of Artiﬁcial Intelligence (IAAI-18), and
+the 8th AAAI Symposium on Educational Advances in Artiﬁ-
+cial Intelligence (EAAI-18), New Orleans, Louisiana, USA,
+February 2-7, 2018, pages 4694–4701, 2018.
+
+[14] Shun Miao, Z Jane Wang, and Rui Liao. A cnn regression
+approach for real-time 2d/3d registration. IEEE transactions
+on medical imaging, 35(5):1352–1363, 2016.
+
+[15] Yoshito Otake, Mehran Armand, Robert S Armiger,
+Michael D Kutzer, Ehsan Basafa, Peter Kazanzides, and Rus-
+sell H Taylor. Intraoperative image-based multiview 2d/3d
+registration for image-guided orthopaedic surgery: incorpo-
+ration of ﬁducial-based c-arm tracking and gpu-acceleration.
+imaging, 31(4):948–962,
+IEEE transactions on medical
+2012.
+
+[16] Yoshito Otake, Adam S Wang, J Webster Stayman, Ali
+Uneri, Gerhard Kleinszig, Sebastian Vogt, A Jay Khanna,
+Ziya L Gokaslan, and Jeffrey H Siewerdsen. Robust 3d–
+2d image registration: application to spine interventions and
+vertebral labeling in the presence of anatomical deformation.
+Physics in Medicine & Biology, 58(23):8535, 2013.
+
+[17] Franjo Pernus et al.
+
+3d-2d registration of cerebral an-
+giograms: a method and evaluation on clinical images. IEEE
+transactions on medical imaging, 32(8):1550–1563, 2013.
+
+[18] Olaf Ronneberger, Philipp Fischer, and Thomas Brox. U-
+net: Convolutional networks for biomedical image segmen-
+tation. In International Conference on Medical image com-
+puting and computer-assisted intervention, pages 234–241.
+Springer, 2015.
+
+[19] Daniel B Russakoff, Torsten Rohlﬁng, Kensaku Mori, Daniel
+Rueckert, Anthony Ho, John R Adler, and Calvin R Maurer.
+Fast generation of digitally reconstructed radiographs using
+attenuation ﬁelds with application to 2d-3d image registra-
+tion. IEEE transactions on medical imaging, 24(11):1441–
+1454, 2005.
+
+[20] George AF Seber. Multivariate observations, volume 252.
+
+John Wiley & Sons, 2009.
+
+[21] George W Sherouse, Kevin Novins, and Edward L Chaney.
+Computation of digitally reconstructed radiographs for use
+in radiotherapy treatment design.
+International Journal of
+Radiation Oncology Biology Physics, 18(3):651–658, 1990.
+
+[22] Daniel Toth, Shun Miao, Tanja Kurzendorfer, Christopher A
+Rinaldi, Rui Liao, Tommaso Mansi, Kawal Rhode, and Pe-
+ter Mountney. 3d/2d model-to-image registration by imita-
+tion learning for cardiac procedures. International journal of
+computer assisted radiology and surgery, pages 1–9, 2018.
+
+[23] Jack Valmadre, Luca Bertinetto, Jo˜ao Henriques, Andrea
+Vedaldi, and Philip HS Torr. End-to-end representation
+learning for correlation ﬁlter based tracking.
+In Computer
+Vision and Pattern Recognition (CVPR), 2017 IEEE Confer-
+ence on, pages 5000–5008. IEEE, 2017.
+
+[24] Everine B Van de Kraats, Graeme P Penney, Dejan Tomaze-
+vic, Theo Van Walsum, and Wiro J Niessen. Standardized
+evaluation methodology for 2-d-3-d registration. IEEE trans-
+actions on medical imaging, 24(9):1177–1189, 2005.
+
+[25] Jian Wang, Roman Schaffert, Anja Borsdorf, Benno Heigl,
+Xiaolin Huang, Joachim Hornegger, and Andreas Maier. Dy-
+namic 2-d/3-d rigid registration framework using point-to-
+plane correspondence model. IEEE transactions on medical
+imaging, 36(9):1939–1954, 2017.
+
+[26] B-M You, Pepe Siy, William Anderst, and Scott Tashman. In
+vivo measurement of 3-d skeletal kinematics from sequences
+
+12646
+
+of biplane radiographs: application to knee kinematics. IEEE
+transactions on medical imaging, 20(6):514–525, 2001.
+
+[27] L Zollei, Eric Grimson, Alexander Norbash, and W Wells.
+2d-3d rigid registration of x-ray ﬂuoroscopy and ct images
+using mutual information and sparsely sampled histogram
+estimators.
+In Computer Vision and Pattern Recognition,
+2001. CVPR 2001. Proceedings of the 2001 IEEE Computer
+Society Conference on, volume 2, pages II–II. IEEE, 2001.
+
+12647
+
+

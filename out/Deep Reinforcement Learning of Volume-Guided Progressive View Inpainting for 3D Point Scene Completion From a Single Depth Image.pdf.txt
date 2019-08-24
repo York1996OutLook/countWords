@@ -1,0 +1,1273 @@
+Deep Reinforcement Learning of Volume-guided Progressive View Inpainting
+
+for 3D Point Scene Completion from a Single Depth Image
+
+1,3Xiaoguang Han, 2,3Zhaoxuan Zhang, 3,4Dong Du, 1,3Mingdai Yang, 5Jingming Yu, 5Pan Pan
+
+2Xin Yang, 4Ligang Liu, 6Zixiang Xiong, 1,3Shuguang Cui
+
+1CUHK(Shenzhen), 2DUT, 3SRIBD, 4USTC, 5Alibaba Group, 6TAMU
+
+Abstract
+
+We present a deep reinforcement learning method of pro-
+gressive view inpainting for 3D point scene completion un-
+der volume guidance, achieving high-quality scene recon-
+struction from only a single depth image with severe oc-
+clusion. Our approach is end-to-end, consisting of three
+modules: 3D scene volume reconstruction, 2D depth map
+inpainting, and multi-view selection for completion. Given
+a single depth image, our method ﬁrst goes through the 3D
+volume branch to obtain a volumetric scene reconstruction
+as a guide to the next view inpainting step, which attempts
+to make up the missing information; the third step involves
+projecting the volume under the same view of the input, con-
+catenating them to complete the current view depth, and in-
+tegrating all depth into the point cloud. Since the occluded
+areas are unavailable, we resort to a deep Q-Network to
+glance around and pick the next best view for large hole
+completion progressively until a scene is adequately recon-
+structed while guaranteeing validity. All steps are learned
+jointly to achieve robust and consistent results. We perform
+qualitative and quantitative evaluations with extensive ex-
+periments on the SUNCG data, obtaining better results than
+the state of the art.
+
+1. Introduction
+
+Recovering missing information in occluded regions of a
+3D scene from a single depth image is a very active research
+area of late [36, 56, 12, 23, 9, 47]. This is due to its impor-
+tance in robotics and vision tasks such as indoor navigation,
+surveillance, and augmented reality. Although this problem
+is mild in human vision system, it becomes severe in ma-
+chine vision because of the sheer imbalance between input
+and output information. One class of popular approaches
+[32, 2, 13, 11] to this problem is based on classify-and-
+search: pixels of the depth map are classiﬁed into several
+semantic object regions, which are mapped to most simi-
+
+(a) depth
+
+(b) visible surface
+
+(c) output: two views
+
+Figure 1. Surface-generated Scene Completion. (a) A single-view
+depth map as input; (b) Visible surface from the depth map, which
+is represented as the point cloud. In our paper, the color of depth
+and point cloud is for visualization only; (c) Our scene comple-
+tion results: directly recovering the missing points of the occluded
+regions. Here we choose two views for a better display.
+
+lar 3D ones in a prepared dataset to construct a fully 3D
+scene. Owing to the limited capacity of the database, re-
+sults from classify-and-search are often far away from the
+ground truth. By transforming the depth map into an in-
+complete point cloud, Song et al.
+[36] recently presented
+the ﬁrst end-to-end deep network to map it to a fully vox-
+elized scene, while simultaneously outputting the class la-
+bels each voxel belongs to. The availability of volumetric
+representations makes it possible to leverage 3D convolu-
+tional neural networks (3DCNN) to effectively capture the
+global contextual information, however, starting with an in-
+complete point cloud results in loss of input information and
+consequently low-resolution outputs. Several recent works
+[23, 12, 9, 47] attempt to compensate the lost information
+by extracting features from the 2D input domain in parallel
+
+234
+
+and feeding them to the 3DCNN stream. To our best knowl-
+edge, no work has been done on addressing the second issue
+of improving output quality.
+
+Taking an incomplete depth map as input, in this work
+we advocate the approach of straightforwardly reconstruct-
+ing 3D points to ﬁll missing region and achieve high-
+resolution completion (Figure 1). To this end, we propose to
+carry out completion on multi-view depth maps in an iter-
+ative fashion until all holes are ﬁlled, with each iteration
+focusing on one viewpoint. At each iteration/viewpoint,
+we render a depth image relative to the current view and
+ﬁll the produced holes using 2D inpainting. The recov-
+ered pixels are re-projected to 3D points and used for the
+next iteration. Our approach has two issues: First, differ-
+ent choices of sequences of viewpoints strongly affect the
+quality of ﬁnal results because given a partial point cloud,
+different visible contexts captured from myriad perspectives
+present various levels of difﬁculties in the completion task,
+producing diverse prediction accuracies; moreover, select-
+ing a larger number of views for the sake of easier inpaint-
+ing to ﬁll smaller holes in each iteration will lead to error
+accumulation in the end. Thus we need a policy to deter-
+mine the next best view as well as the appropriate num-
+ber of selected viewpoints. Second, although existing deep
+learning based approaches [28, 16, 20] show excellent per-
+formance for image completion, directly applying them to
+depth maps across different viewpoints usually yields in-
+accurate and inconsistent reconstructions. The reason is
+because of lack of global context understanding. To ad-
+dress the ﬁrst issue, we employ a reinforcement learning
+optimization strategy for view path planning. In particular,
+the current state is deﬁned as the updated point cloud after
+the previous iteration and the action space is spanned by a
+set of pre-sampled viewpoints chosen to maximize 3D con-
+tent recovery. The policy that maps the current state to the
+next action is approximated by a multi-view convolutional
+neural network (MVCNN) [38] for classiﬁcation. The sec-
+ond issue is handled by a volume-guided view completion
+deepnet. It combines one 2D inpainting network [20] and
+another 3D completion network [36] to form a joint learn-
+ing machine. In it low-resolution volumetric results of the
+3D net are projected and concatenated to inputs of the 2D
+net, lending better global context information to depth map
+inpainting. At the same time, losses from the 2D net are
+back-propagated to the 3D stream to beneﬁt its optimiza-
+tion and further help improve the quality of 2D outputs. As
+demonstrated in our experimental results, the proposed joint
+learning machine signiﬁcantly outperforms existing meth-
+ods quantitatively and qualitatively.
+
+In summary, our contributions are
+
+• The ﬁrst surface-generated algorithm for 3D scene
+completion from a single depth image by directly gen-
+erating the missing points.
+
+• A novel deep reinforcement learning strategy for de-
+termining the optimal sequence of viewpoints for pro-
+gressive scene completion.
+
+• A volume-guided view inpainting network that not
+only produces high-resolution outputs but also makes
+full use of the global context.
+
+2. Related Works
+
+Many prior works are related to scene completion. The
+
+literature review is conducted in the following aspects.
+
+Geometry Completion Geometry completion has a long
+history in 3D processing, known for cleaning up broken sin-
+gle objects or incomplete scenes. Small holes can be ﬁlled
+by primitives ﬁtting[31, 19], smoothness minimization[37,
+58, 17], or structures analysis[25, 35, 39]. These methods
+however seriously depend on prior knowledge. Template or
+part based approaches can successfully recover the underly-
+ing structures of a partial input by retrieving the most simi-
+lar shape from a database, matching with the input, deform-
+ing disparate parts and assembling them[34, 18, 30, 39].
+However, these methods require manually segmented data,
+and tend to fail when the input does not match well with the
+template due to the limited capacity of the database. Re-
+cently, deep learning based methods have gained much at-
+tentions for shape completion[30, 42, 33, 45, 5, 14], while
+scene completion from sparse observed views remains chal-
+lenging due to large-scale data loss in occluded regions.
+Song et al.[36] ﬁrst propose an end-to-end network based
+on 3DCNNs, named SSCNet, which takes a single depth
+image as input and simultaneously outputs occupancy and
+semantic labels for all voxels in the camera view frustum.
+ScanComplete[6] extends it to handle larger scenes with
+varying spatial extent. Wang et al.[47] combine it with an
+adversarial mechanism to make the results more plausible.
+Zhang et al.[56] apply a dense CRF model followed with
+SSCNet to further increase the accuracy. In order to exploit
+the information of input images, Garbade et al.[9] adopt a
+two stream neural network, leveraging both depth informa-
+tion and semantic context features extracted from the RGB
+images. Guo et al.[12] present a view-volume CNN which
+extracts detailed geometric features from the 2D depth im-
+age and projects them into a 3D volume to assist completed
+scene inference. However, all these works based on the vol-
+umetric representation result in low-resolution outputs. In
+this paper, we directly predict point cloud to achieve high-
+resolution completion by conducting inpainting on multi-
+view depth images.
+
+Depth Inpainting Similar to geometry completion, re-
+searchers have employed various priors or optimized mod-
+els to complete a depth image[15, 21, 27, 41, 3, 22, 51, 55].
+The patch-based image synthesis idea is also applied[7, 10].
+Recently, signiﬁcant progresses have been achieved in im-
+
+235
+
+Point  Cloud
+
+Depth
+
+SSCNet
+
+Voxel
+
+DQN
+
+Output
+
+View
+
+View
+
+View
+
+View
+
+2DCNN
+
+Figure 2. The pipeline of our method. Given a single depth image D0, we convert it to a point cloud P , here shown in two different views.
+DQN is used to seek the next-best-view, under which the point cloud is projected to a new depth image D1, causing holes. In parallel, the
+P is also completed in volumetric space by SSCNet, resulting in V . Under the view of D1, V is projected and guide the inpainting of D1
+with a 2DCNN network. Repeating this process several times, we can achieve the ﬁnal high-quality scene completion.
+
+age or video inpainting ﬁeld with deep convolutional net-
+works and generative adversarial networks (GANs) for reg-
+ular or free-form holes[16, 20, 54, 59, 46]. Zhang et al.[57]
+imitate them with a deep end-to-end model for depth in-
+painting. Compared with inpainting task on colorful im-
+ages, recovering missing information from a single depth
+map is more challenging due to the absence of strong con-
+text features in depth maps. To address it, an additional 3D
+global context is provided in our paper, guiding the inpaint-
+ing on diverse views to reach more accurate and consistent
+output.
+
+View Path Planing Projecting a scene or an object to
+the image plane will severely cause information loss be-
+cause of self-occusions. A straightforward solution is uti-
+lizing dense views for making up[38, 29, 40], yet it will
+lead to heavy computation cost. Choy et al.[4] propose a
+3D recurrent neural networks to integrate information from
+multi-views which decreases the number of views to ﬁve or
+less. Even so, how many views are sufﬁcient for comple-
+tion and which views are better to provide the most infor-
+mative features, are still open questions. Optimal view path
+planning, as the problem to predict next best view from cur-
+rent state, has been studied in recent years. It plays critical
+roles for scene reconstruction as well as environment navi-
+gation in autonomous robotics system[24, 1, 60, 49]. Most
+recently, this problem is also explored in the area of object-
+level shape reconstruction[52]. A learning framework is de-
+signed in [50], by exploiting the spatial and temporal struc-
+ture of the sequential observations, to predict a view se-
+quence for groundtruth ﬁtting. Our work explores the ap-
+proaches of view path planning for scene completion. We
+propose to train a Deep Q-Network (DQN)[26] to choose
+the best view sequence in a reinforcement learning frame-
+work.
+
+3. Algorithm
+
+Overview
+
+Taking a depth image D0 as input, we ﬁrst convert it to
+a point cloud P0, which suffers from severe data loss. Our
+goal is to generate 3D points to complete P0. The main
+thrust of our proposed algorithm is to represent the incom-
+plete point cloud as multi-view depth maps and perform
+2D inpainting tasks on them. To take full advantage of the
+context information, we execute these inpainting operations
+view by view in an accumulative way, with inferred points
+for the current viewpoint kept and used to help inpainting
+of the next viewpoint. Assume D0 is rendered from P0 un-
+der viewpoint v0, we start our completion procedure with a
+new view v1 and render P0 under v1 to obtain a new depth
+map D1, which potentially has many holes. We ﬁll these
+holes in D1 with 2D inpainting, turning D1 to ˆD1. The in-
+ferred depth pixels in ˆD1 are then converted to 3D points
+and aggregated with P0 to output a denser point cloud P1.
+This procedure is repeated for a sequence of new viewpoints
+v2, v3, ..., vn, yielding point clouds P2, P3, ..., Pn, with Pn
+being our ﬁnal output. Figure 2 depicts the overall pipeline
+of our proposed algorithm. Since Pn depends on the view
+path v2, v3, ..., vn, we describe in section 3.2 a deep rein-
+forcement learning framework to seek the best view path.
+Before that, we introduce our solution to another critical
+problem of 2D inpainting, i.e., transforming Di to ˆDi, in
+section 3.1 ﬁrst.
+
+3.1. Volume guided View Inpainting
+
+Deep Convolutional Neural Network (CNN) has been
+widely utilized to effectively extract context features for im-
+age inpainting tasks, achieving excellent performance. Al-
+though it can be directly applied to each viewpoint indepen-
+dently, this simplistic approach will lead to inconsistencies
+across views because of lack of global context understand-
+ings. We propose a volume-guided view inpainting frame-
+work by ﬁrst conducting completion in the voxel space, con-
+verting P0’s volumetric occupancy grid V to its completed
+version V c. Denote the projected depth map from V c to the
+view vi as Dc
+i . Our inpainting of the ith view takes both Di
+
+236
+
+i as input and outputs ˆDi. As shown in Figure 2, this
+and Dc
+is implemented using a three-module neural network archi-
+tecture consisting of a volume completion network, a depth
+inpainting network, and a differentiate projection layer con-
+necting them. The details of each module and our training
+strategy are described below.
+Volume Completion We employ SSCNet proposed in [36]
+to map V to V c for volume completion. SSCNet predicts
+not only volumetric occupancy but also the semantic labels
+for each voxel. Such a multi-task learning scheme helps us
+better capture object-aware context features and contributes
+to higher accuracy. The readers are referred to [36] for
+details on how to set up this network architecture. We train
+the network as a voxel-wise binary classiﬁcation task and
+take the output 3D probability map as V c. The resolution
+of input is 240 × 144 × 240, and the output is 60 × 36 × 60.
+Depth Inpainting In our work, the depth map is rendered
+as a 512 × 512 grayscale image. Among various existing
+approaches, the method of
+[20] is chosen to handle our
+case with holes of irregular shapes. Speciﬁcally, Di and
+Dc
+i are ﬁrst concatenated to form a map with 2 channels.
+The resulting map is then fed into a U-Net structure imple-
+mented with a masked and re-normalized convolution oper-
+ation (also called partial convolution), followed by an auto-
+matic mask-updating step. The output is also in 512 × 512.
+We refer the readers to [20] for details of the architecture
+settings and the design of loss functions.
+Projection Layer As validated in our experiments de-
+scribed in 4.2, the projection of V c greatly beneﬁts inpaint-
+ing of 2D depth maps. We further exploit the beneﬁt of
+2D inpainting to volume completion by propagating the 2D
+loss back to optimize the parameters of 3D CNNs. Doing
+so requires a differentiable projection layer. There are two
+options for the implementation of this layer: the technique
+proposed in [43] and the homography warping method in
+[53]. The ﬁrst one is chosen for a more accurate projec-
+tion. Thus, we connect V c and Dc
+i using this layer. For
+the sake of notational convenience, we use V to represent
+V c and D to represent Dc
+i . Speciﬁcally, for each pixel x in
+D, we launch a ray that starts from the viewpoint vi, passes
+through x, and intersects a sequence of voxels in V , noted
+as l1, l2, ..., lNx . We denote the value of the kth voxel in V
+as Vk, which represents the probability of this voxel being
+empty. Then, we deﬁne the depth value of this pixel x as
+
+Nx
+
+D(x) =
+
+X
+
+P x
+
+k dk
+
+k=1
+
+(1)
+
+where dk is the distance from the viewpoint to voxel lk and
+P x
+k the probability of the ray corresponding to x ﬁrst meets
+the lk voxel
+
+P x
+
+k = (1 − Vk)
+
+k−1
+
+Y
+
+j=1
+
+Vj, k = 1, 2, ..., Nx
+
+(2)
+
+512
+
+256
+
+1
+
+20
+
+20
+
+Q­value
+
+View
+Pooling
+
+CNN
+
+CNN
+
+CNN
+
+CNN
+
+Point Cloud
+
+Depth
+
+Figure 3. The architecture of our DQN. For a point cloud state,
+MVCNN is used to predict the best view for the next inpainting.
+
+The derivative of D(x) with respect to Vk can be calculated
+as
+
+Nx
+
+∂D(x)
+
+∂Vk
+
+=
+
+X
+
+(di+1 − di) Y
+
+Vt.
+
+(3)
+
+i=k
+
+1≤t≤i,t6=k
+
+This guarantees back propagation of the projection layer. In
+order to speed up implementation, the processing of all rays
+are implemented in parallel via GPUs.
+Joint Training Because our network consists of three sub-
+networks, we divide the entire training process into three
+stages to guarantee convergence: 1) The 3D convolution
+network is trained independently for scene completion; 2)
+With ﬁxed parameters of the 3D convolution network, we
+train the 2D convolution network for depth image inpaintng
+under the guidance of 3D models; 3) We train the entire net-
+work jointly and ﬁne tune it with all the parameters freed in
+2D and 3D convolution networks.
+
+The training data are generated based on the SUNCG
+synthetic scene dataset provided in [36]. We ﬁrst create
+N depth images by rendering randomly selected scenes un-
+der randomly picked camera viewpoints. Each depth image
+D is then converted to a point cloud P . Assuming D is
+the projection of P under the viewpoint v, we project P to
+m depth maps from m randomly sampled views near v to
+avoid causing large holes and to ensure that sufﬁcient con-
+textual information is available in the learning process.
+
+3.2. Progressive Scene Completion
+
+Given an incomplete point cloud P0 that is converted
+from D0 with respect to view v0, we describe in this
+subsection how to obtain the optimal next view sequence
+v1, v2, ..., vn. The problem is deﬁned as a Markov decision
+process (MDP) consisting of state, action, reward, and an
+agent which takes actions during the process. The agent
+inputs the current state, outputs the corresponding optimal
+action, and receives the most reward from the environment.
+We train our agent using DQN [26], an algorithm of deep re-
+inforcement learning. The deﬁnition of the proposed MDP
+and the training procedure are given below.
+State We deﬁne the state as the updated point cloud at each
+iteration, with the initial state being P0. As the iteration
+
+237
+
+continues, the state for performing completion on the ith
+view is Pi−1, which is accumulated from all previous itera-
+tion updates.
+Action Space The action at the ith iteration is to deter-
+mine the next best view vi. To ease the training process
+and support the use of DQN, we evenly sample a set of
+scene-centric camera views to form a discrete action space.
+Speciﬁcally, we ﬁrst place P0 in its bounding sphere and
+keep it upright. Then, two circle paths are created for both
+the equatorial and 45-degree latitude line.
+In our experi-
+ments, 20 camera views are uniformly selected on these
+two paths, 10 per circle. All views are facing to the cen-
+ter of the bounding sphere. We ﬁxed these views for all
+training samples. The set of 20 views is denoted as C =
+{c1, c2, ..., c20}.
+Reward An reward function is commonly unitized to eval-
+uate the result for an action executed by the agent. In our
+work, at the ith iteration, the input is an incomplete depth
+map Di rendered from Pi−1 under view vi chosen in the ac-
+tion space C. The result of the agent action is an inpainted
+depth image ˆDi. Hence the accuracy of this inpainting op-
+eration can be used as the primary rewarding strategy. It can
+be measured by the mean error of the pixels inside the holes
+between ˆDi and its ground truth Dgt
+i . All the ground truth
+depth maps are pre-rendered from SUNCG dataset. Thus
+we deﬁne the award function as
+
+Racc
+
+i = −
+
+1
+|Ω|
+
+L1
+
+Ω( ˆDi, Dgt
+
+i ),
+
+(4)
+
+where L1 denotes the L1 loss, Ω the set of pixels inside the
+holes, and |Ω| the number of pixels inside Ω.
+
+i
+
+If we only use the above reward function Racc
+
+, the agent
+tends to change the viewpoint slightly in each action cycle,
+since doing this results in small holes. However, this in-
+curs higher computational cost while accumulating errors.
+We thus introduce a new reward term to encourage infer-
+ring more missing points at each step. This is implemented
+by measuring the percentage of ﬁlled original holes. To
+do so, we need to calculate the area of missing regions in
+an incomplete point cloud P , which is not trivial in a 3D
+space. Therefore, we project P under all camera views to
+the action space C and count the number of pixels inside the
+generated holes in each rendered image. The sum of these
+numbers is denoted as Areah(P ) for measuring the area.
+We thus deﬁne the new reward term as
+
+Rhole
+
+i =
+
+Areah(Pi−1) − Areah(Pi)
+
+Areah(P0)
+
+− 1
+
+(5)
+
+to avoid the agent from choosing the same action as in pre-
+vious steps. We further deﬁne a termination criterion to stop
+view path search by Areah(Pi)/Areah(P0) < 5%, which
+means that all missing points of P0 have been nearly recov-
+ered. We set the reward for terminal to zero.
+
+Input & GT
+
+DepInw/oVG
+
+DepInw/oPBP
+
+Ours
+
+Figure 4. Comparisons on variants of depth inpainting network.
+Given incompleted depth images, we show results of our proposed
+method w/o volume-guidance, w/o projection back-propagation
+and also ours, compared with the groundtruth. Both the inpainted
+map and its error map are shown.
+
+Therefore, our ﬁnal reward function is
+
+Rtotal
+
+i
+
+= wRacc
+
+i + (1 − w)Rhole
+
+i
+
+,
+
+(6)
+
+where w is a fractional weight that balances the two reward
+terms.
+DQN Training Our DQN is built upon MVCNN[38].
+It
+takes mutil-view depth maps projected from Pi−1 as inputs
+and outputs the Q-value of different actions. The whole
+network is trained to approximate the action-value function
+Q(Pi−1, vi), which is the expected reward that the agent
+receives when taking action vi at state Pi−1.
+
+To ensure stability of the learning process, we introduce
+a target network separated from the architecture of [26],
+whose loss function for training DQN is
+
+Loss(θ) = E[(r+γ max
+vi+1
+
+Q(Pi, vi+1; θ′)−Q(Pi−1, vi; θ))2].
+
+(7)
+where r is the reward, γ a discount factor, and θ′ the
+parameters of the target network.
+For effective learn-
+ing, we create an experience replay buffer to reduce the
+correlation between data. The buffer stores the tuples
+(Pi−1, vi, r, Pi) proceeded with the episode. We also em-
+ploy the technique of [44] to remove upward bias caused by
+maxvi+1 Q(Pi, vi+1; θ′) and change the loss function to
+
+Lour = E[(r + γQ(Pi, arg max
+vi+1
+
+Q(Pi, vi+1; θ); θ′)
+
+− Q(Pi−1, vi; θ))2].
+
+(8)
+
+Combining with the dueling DQN structure [48], our net-
+work structure is shown in Figure 3. At state Pi−1, we
+
+238
+
+i , D2
+
+i , ..., D20
+i
+
+render at all viewpoints c1, c2, ..., c20 in the action space
+C in 224 × 224 resolution and get the corresponding multi-
+view depth maps D1
+. These depth maps are
+then sent to the same CN N as inputs. After a view pooling
+layer and a fully-connected layer, we obtain a 512-D vector,
+which is split evenly into two parts to learn the advantage
+function A(v, P ) and the state value function V (P ) [48].
+Finally, after combining the results of the two functions, we
+have our ﬁnal result, which is a 20-D Q-values based on the
+action space C. We use an ǫ-greedy policy to choose ac-
+tion vi for state Pi−1, i.e., a random action with probability
+1 − ǫ or an action that maximizes the Q-values with proba-
+bility ǫ. In the end, we reach the decision on depth map Di
+for inpainting.
+
+The training data are also generated from SUNCG. We
+use the same N depth images as in section 3.1. We also
+choose the action space C to generate new data. The ground
+truth depth maps, which are used in the reward calculation,
+are generated in the same viewpoint from the action space
+C.
+
+4. Experimental Results
+
+Dataset The dataset we used to train our 2DCNN and
+DQN is generated from SUNCG [36]. Speciﬁcally, for
+2DCNN, we set N = 3, 000 and m = 10 and get 30, 000
+depth maps. We further remove the maps whose camera
+views are occluded by doors or walls. Then, 3, 000 of them
+are took for testing and the rest is used for training. For
+DQN, we set N = 2, 500 with 2300 for the training episode
+and 200 for the testing.
+
+Implementation Details Our network architecture is
+implemented in PyTorch. The provided pre-trained model
+of SSCNet [36] is used to initialize parameters of our
+3DCNN part.
+It takes 30 hours to train inpainting net-
+work on our training dataset and 20 hours to ﬁne-tune the
+whole network after the addition of projection layer. Dur-
+ing DQN training process, we ﬁrst use 200 episodes to ﬁll
+experience replay buffer. In each episode, the DQN chooses
+the action randomly in each iteration step, and store the tu-
+ple (Pi−1, vi, r, Pi) in the buffer. After those episodes be-
+ing pre-trained, the network begins to learn by randomly
+sampled batches in buffers for each step during different
+episodes. The buffer can store 5, 000 tuples and the batch
+size is set to 16. The weight w for reward calculation is
+set as 0.7 and the discount factor γ is set to 0.9, while ǫ
+decreases from 0.9 to 0.2 over 10, 000 steps and then be
+ﬁxed to 0.2. Training DQN takes 3 days and running our
+complete algorithm once takes about 60s which adopts ﬁve
+view points on average.
+
+4.1. Comparisons Against State of the Arts
+
+In this part, we evaluate our proposed method against
+SSCNet [36] and ScanComplete [6], which are the most
+
+popular approaches in this area. Based on SSCNet, there
+although exists many incremental works such as [47] and
+[12], they all produce volumetric outputs in the same reso-
+lution as SSCNet. Regarding neither the code nor the pre-
+trained model of these methods is public, we propose to
+compare our result with the corresponding 3D groundtruth
+volume, whose output accuracy can be treated as the upper
+bound of all existing volume-based scene completion meth-
+ods. We denote this method as V olume − GT1. For evalua-
+tion, we ﬁrst render the volume obtained from SSCNet and
+the volume gt to several depth maps under the same view-
+points as our method. We then convert these depth maps to
+point cloud. Note that, the method of [6] is also built upon
+SSCNet, but can output higher resolution volume. The ac-
+curacy of the groundtruth volume in that resolution, denoted
+as V olume − GT2, is also reported.
+
+Quantitative Comparisons The Chamfer Distance
+(CD) [8] is used as one of our metrics for evaluate the ac-
+curacy of our generated point set P , compared with the
+goundtruth point cloud PGT . Similar to [8], we also use
+another completeness metric to evaluate how complete of
+the generated result. We deﬁne it as:
+
+Cr(P, PGT ) =
+
+|{d(x, P ) < r|x ∈ PGT }|
+
+|{y|y ∈ PGT }|
+
+(9)
+
+where d(x, P ) denotes the distance from a point x to a
+point set P , |·| denotes the number of the elements in the
+set, and r means the distance threshold.
+In our exper-
+iments, we report the completeness w.r.t ﬁve different r
+(0.02, 0.04, 0.06, 0.08, 0.10 are used). The results are re-
+ported in Tab 1. As seen, our approach signiﬁcantly out-
+performs all the others. This also validates that the using of
+volumetric representation greatly reduces the quality of the
+outputs.
+
+Qualitative Comparisons The visual comparisons of
+these methods are shown in Figure 5. It can be seen that,
+the generated point cloud from SSCNet is of no surface de-
+tails. Although our method shows more errors than volume-
+gt in some local regions, it overall produces more accurate
+results. This can be validated in Tab 1. In addition, by con-
+ducting completion in multiple views, our approach also re-
+covers more missing points, showing better completeness
+as validated in Tab 1.
+
+4.2. Ablation Studies
+
+To ensure the effectiveness of several key components of
+our system, we do some control experiments by removing
+each component.
+
+On Depth Inpainting Firstly, to evaluate the efﬁcacy
+of the volume guidance, we propose two variants of our
+method: 1) we train a 2D inpainting network directly with-
+out projecting volume as guidance, which is denoted as
+
+239
+
+Input & GT
+
+SSCNet
+
+Volume­GT
+
+Ours
+
+Figure 5. Comparisons against the state-of-the-arts. Given different inputs and the referenced groundtruth, we show the completion results
+of three methods, with the corresponding point cloud error maps below, and zoom-in areas beside. More blue more accurate.
+
+Table 1. Quantitative comparisons of our method against existing methods and its variants. The CD metric and the completeness metric
+(w.r.t different thresholds) are used. V olume − GT1 has same resolution with SSCNet, V olume − GT2 has same resolution with
+ScanComplete.
+
+SSCN et
+
+V olume − GT1
+
+ScanComplete
+
+V olume − GT2
+
+U5
+
+U10
+
+DQNw/o−hole
+
+CD
+
+Cr=0.02(%)
+Cr=0.04(%)
+Cr=0.06(%)
+Cr=0.08(%)
+Cr=0.10(%)
+
+0.5162
+14.61
+30.10
+52.82
+71.24
+78.23
+
+0.5140
+13.28
+32.23
+50.14
+72.33
+78.96
+
+0.2193
+34.46
+58.83
+74.60
+79.59
+81.01
+
+0.2058
+31.18
+61.11
+74.88
+81.04
+81.61
+
+0.1642
+79.18
+83.33
+85.81
+87.66
+89.06
+
+0.1841
+80.17
+84.15
+86.56
+88.33
+89.70
+
+0.1495
+79.22
+83.50
+86.02
+87.81
+89.24
+
+Ours
+
+0.1148
+79.26
+83.68
+86.28
+88.20
+89.68
+
+DepInw/oV G; 2) we train the volume guided 2D inpaint-
+ing network without projection back-propagation, which is
+denoted as DepInw/oP BP . We use the metrics of L1
+Ω,
+P SN R and SSIM for the comparisons. The quantitative
+results are reported in Tab 2 and the visual comparisons are
+shown in Figure 4. All of them show the superiority of our
+design.
+
+Table 2. Quantitative ablation studies on inpainting network.
+
+DepInw/oV G DepInw/oP BP
+
+L1
+Ω
+
+P SN R
+SSIM
+
+0.0717
+22.15
+0.910
+
+0.0574
+23.12
+0.926
+
+Ours
+
+0.0470
+24.73
+0.930
+
+On View Path Planning Without using DQN for path
+planning, there exists a straightforward way to do comple-
+
+tion: we can uniformly sample a ﬁxed number of views
+from C and directly perform depth implanting on them.
+In this uniform manner, two methods with two different
+numbers of views (5 and 10 are selected) are evaluated.
+We denote them as U5 and U10. The results of CD and
+Cr(P, PGT ) using these two methods and ours are reported
+in Tab 1. As seen, increasing the uniform sampled views
+causes accuracy reducing. This might be because of the in-
+creased accumulated errors. Using DQN greatly improves
+the accuracy, which validates the importance of a better
+view path. And all of them give rise to similar complete-
+ness. In addition, we also train a new DQN with only the re-
+ward Racc
+, denoted as DQNw/o−hole, which chooses seven
+view points on average since it tends to pick views with
+small holes for higher Racc
+. The results in Tab 1 verify
+
+i
+
+i
+
+240
+
+Input & GT
+
+U5
+
+U10
+
+DQNw/o­hole
+
+Ours
+
+Figure 6. Comparisons on the variants of view path planning. Given different inputs and the referenced groundtruth, we show the comple-
+tion results of four different approaches, with the corresponding point cloud error maps below.
+
+the efﬁciency of the reward Rhole
+. Visual comparison re-
+sults on some sampled scenes are shown in Figure 6, where
+our proposed model results in much better appearances than
+others.
+
+i
+
+5. Conclusion
+
+In this paper, we propose the ﬁrst surface-generated ap-
+proach for 3D scene completion from a single depth image.
+The missing 3D points are inferred by conducting comple-
+tion on multi-view depth maps. To guarantee a more accu-
+rate and consistent output, a volume-guided view inpiant-
+ing network is proposed. In addition, a deep reinforcement
+learning framework is devised to seek the optimal view path
+to contribute the best result in accuracy. The experiments
+demonstrate that our model is the best choice and signif-
+icantly outperforms existing methods. There are three re-
+
+search directions worth further exploration in the future: 1)
+how to make use of the texture information from the input
+RGBD images to achieve more accurate depth inpainting;
+2) how to do texture completion together with the depth in-
+painting, to output a complete textured 3D scene; 3) how to
+guarantee a watertight completion.
+
+Acknowledgements
+
+We thank the anonymous reviewers for the insightful and
+constructive comments.This work was funded in part by The
+Pearl River Talent Recruitment Program Innovative and En-
+trepreneurial Teams in 2017 under grant No. 2017ZT07X152,
+Shenzhen Fundamental Research Fund under grants No.
+KQTD2015033114415450 and No. ZDSYS201707251409055,
+and by the National Natural Science Foundation of China under
+Grant 91748104, Grant 61632006, Grant 61751203.
+
+241
+
+References
+
+[1] Paul S Blaer and Peter K Allen. Data acquisition and view planning
+for 3-d modeling tasks.
+In Intelligent Robots and Systems, 2007.
+IROS 2007. IEEE/RSJ International Conference on, pages 417–422.
+IEEE, 2007.
+
+[2] Kang Chen, Yu-Kun Lai, Yu-Xin Wu, Ralph Martin, and Shi-Min
+Hu. Automatic semantic modeling of indoor scenes from low-
+quality rgb-d data using contextual information. ACM Trans. Graph.,
+33(6):208:1–208:12, Nov. 2014.
+
+[3] Weihai Chen, Haosong Yue, Jianhua Wang, and Xingming Wu. An
+improved edge detection algorithm for depth map inpainting. Optics
+and Lasers in Engineering, 55:69–77, 2014.
+
+[4] Christopher B Choy, Danfei Xu, JunYoung Gwak, Kevin Chen, and
+Silvio Savarese. 3d-r2n2: A uniﬁed approach for single and multi-
+view 3d object reconstruction. In European conference on computer
+vision, pages 628–644. Springer, 2016.
+
+[5] Angela Dai, Charles Ruizhongtai Qi, and Matthias Nießner. Shape
+completion using 3d-encoder-predictor cnns and shape synthesis.
+In Proc. IEEE Conf. on Computer Vision and Pattern Recognition
+(CVPR), volume 3, 2017.
+
+[6] Angela Dai, Daniel Ritchie, Martin Bokeloh, Scott Reed, J¨urgen
+Sturm, and Matthias Nießner. Scancomplete: Large-scale scene
+completion and semantic segmentation for 3d scans. computer vi-
+sion and pattern recognition, 2018.
+
+[7] David Doria and Richard J Radke. Filling large holes in lidar data by
+inpainting depth gradients. In Computer Vision and Pattern Recogni-
+tion Workshops (CVPRW), 2012 IEEE Computer Society Conference
+on, pages 65–72. IEEE, 2012.
+
+[8] Haoqiang Fan, Hao Su, and Leonidas J Guibas. A point set gener-
+ation network for 3d object reconstruction from a single image. In
+CVPR, volume 2, page 6, 2017.
+
+[9] Martin Garbade, Johann Sawatzky, Alexander Richard, and Juergen
+Gall. Two stream 3d semantic scene completion. arXiv preprint
+arXiv:1804.03550, 2018.
+
+[10] Josselin Gautier, Olivier Le Meur, and Christine Guillemot. Depth-
+based image completion for view synthesis. In 3DTV Conference:
+The True Vision-capture, Transmission and Display of 3D Video
+(3DTV-CON), 2011, pages 1–4. IEEE, 2011.
+
+[11] Ruiqi Guo, Chuhang Zou, and Derek Hoiem. Predicting complete 3d
+
+models of indoor scenes. arXiv preprint arXiv:1504.02437, 2015.
+
+[12] Yu-Xiao Guo and Xin Tong. View-volume network for semantic
+scene completion from a single depth image. In IJCAI 2018: 27th
+International Joint Conference on Artiﬁcial Intelligence, pages 726–
+732, 2018.
+
+[13] Saurabh Gupta, Pablo Andr´es Arbel´aez, Ross B. Girshick, and Jiten-
+dra Malik. Aligning 3d models to RGB-D images of cluttered scenes.
+In CVPR, pages 4731–4740. IEEE Computer Society, 2015.
+
+[14] Xiaoguang Han, Zhen Li, Haibin Huang, Evangelos Kalogerakis,
+and Yizhou Yu. High-resolution shape completion using deep neu-
+ral networks for global structure and local geometry inference.
+In
+Proceedings of IEEE International Conference on Computer Vision
+(ICCV), 2017.
+
+[15] Daniel Herrera, Juho Kannala, Janne Heikkil¨a, et al. Depth map
+inpainting under a second-order smoothness prior. In Scandinavian
+Conference on Image Analysis, pages 555–566. Springer, 2013.
+
+[16] Satoshi Iizuka, Edgar Simo-Serra, and Hiroshi Ishikawa. Globally
+and locally consistent image completion. ACM Transactions on
+Graphics (TOG), 36(4):107, 2017.
+
+[17] Michael Kazhdan and Hugues Hoppe. Screened poisson surface re-
+construction. ACM Transactions on Graphics (ToG), 32(3):29, 2013.
+
+[19] Yangyan Li, Xiaokun Wu, Yiorgos Chrysathou, Andrei Sharf, Daniel
+Cohen-Or, and Niloy J Mitra. Globﬁt: Consistently ﬁtting primitives
+by discovering global relations. In ACM Transactions on Graphics
+(TOG), volume 30, page 52. ACM, 2011.
+
+[20] Guilin Liu, Fitsum A Reda, Kevin J Shih, Ting-Chun Wang, Andrew
+Tao, and Bryan Catanzaro. Image inpainting for irregular holes using
+partial convolutions. arXiv preprint arXiv:1804.07723, 2018.
+
+[21] Junyi Liu, Xiaojin Gong, and Jilin Liu. Guided inpainting and ﬁlter-
+ing for kinect depth maps. In Pattern Recognition (ICPR), 2012 21st
+International Conference on, pages 2055–2058. IEEE, 2012.
+
+[22] Miaomiao Liu, Xuming He, and Mathieu Salzmann. Building scene
+models by completing and hallucinating depth and semantics.
+In
+European Conference on Computer Vision, pages 258–274. Springer,
+2016.
+
+[23] Shice Liu, Yu Hu, Yiming Zeng, Qiankun Tang, Beibei Jin, Yinhe
+Han, and Xiaowei Li. See and think: Disentangling semantic scene
+completion. In NIPS 2018: The 32nd Annual Conference on Neural
+Information Processing Systems, 2018.
+
+[24] Kok-Lim Low and Anselmo Lastra. An adaptive hierarchical next-
+best-view algorithm for 3d reconstruction of indoor scenes. In Pro-
+ceedings of 14th Paciﬁc Conference on Computer Graphics and Ap-
+plications (Paciﬁc Graphics 2006), pages 1–8, 2006.
+
+[25] Niloy J Mitra, Leonidas J Guibas, and Mark Pauly. Partial and ap-
+proximate symmetry detection for 3d geometry. ACM Transactions
+on Graphics (TOG), 25(3):560–568, 2006.
+
+[26] Volodymyr Mnih, Koray Kavukcuoglu, David Silver, Andrei A Rusu,
+Joel Veness, Marc G Bellemare, Alex Graves, Martin Riedmiller,
+Andreas K Fidjeland, Georg Ostrovski, et al. Human-level control
+through deep reinforcement learning. Nature, 518(7540):529, 2015.
+
+[27] Suryanarayana M Muddala, Marten Sjostrom, and Roger Ols-
+son. Depth-based inpainting for disocclusion ﬁlling.
+In 3DTV-
+Conference: The True Vision-Capture, Transmission and Display of
+3D Video (3DTV-CON), 2014, pages 1–4. IEEE, 2014.
+
+[28] Deepak Pathak, Philipp Krahenbuhl, Jeff Donahue, Trevor Darrell,
+and Alexei A Efros. Context encoders: Feature learning by inpaint-
+ing. In Proceedings of the IEEE Conference on Computer Vision and
+Pattern Recognition, pages 2536–2544, 2016.
+
+[29] Charles R Qi, Hao Su, Matthias Nießner, Angela Dai, Mengyuan
+Yan, and Leonidas J Guibas. Volumetric and multi-view cnns for ob-
+ject classiﬁcation on 3d data. In Proceedings of the IEEE conference
+on computer vision and pattern recognition, pages 5648–5656, 2016.
+
+[30] Jason Rock, Tanmay Gupta, Justin Thorsen, JunYoung Gwak,
+Daeyun Shin, and Derek Hoiem. Completing 3d object shape from
+one depth image. In Proceedings of the IEEE Conference on Com-
+puter Vision and Pattern Recognition, pages 2484–2493, 2015.
+
+[31] Ruwen Schnabel, Patrick Degener, and Reinhard Klein. Completion
+and reconstruction with primitive shapes. In Computer Graphics Fo-
+rum, volume 28, pages 503–512. Wiley Online Library, 2009.
+
+[32] Tianjia Shao, Weiwei Xu, Kun Zhou, Jingdong Wang, Dongping
+Li, and Baining Guo. An interactive approach to semantic mod-
+eling of indoor scenes with an rgbd camera. ACM Trans. Graph.,
+31(6):136:1–136:11, Nov. 2012.
+
+[33] Abhishek Sharma, Oliver Grau, and Mario Fritz. Vconv-dae: Deep
+volumetric shape learning without object labels. In European Con-
+ference on Computer Vision, pages 236–250. Springer, 2016.
+
+[34] Chao-Hui Shen, Hongbo Fu, Kang Chen, and Shi-Min Hu. Structure
+recovery by part assembly. ACM Transactions on Graphics (TOG),
+31(6):180, 2012.
+
+[35] Ivan Sipiran, Robert Gregor, and Tobias Schreck. Approximate sym-
+metry detection in partial 3d meshes. In Computer Graphics Forum,
+volume 33, pages 131–140. Wiley Online Library, 2014.
+
+[18] Vladimir G Kim, Wilmot Li, Niloy J Mitra, Siddhartha Chaudhuri,
+Stephen DiVerdi, and Thomas Funkhouser. Learning part-based tem-
+plates from large collections of 3d shapes. ACM Transactions on
+Graphics (TOG), 32(4):70, 2013.
+
+[36] Shuran Song, Fisher Yu, Andy Zeng, Angel X. Chang, Manolis
+Savva, and Thomas A. Funkhouser. Semantic scene completion from
+a single depth image. In 2017 IEEE Conference on Computer Vision
+and Pattern Recognition (CVPR), pages 190–198, 2017.
+
+242
+
+total generalized variation. Multimedia Tools and Applications,
+77(7):9003–9020, 2018.
+
+[56] Liang Zhang, Le Wang, Xiangdong Zhang, Peiyi Shen, Mohammed
+Bennamoun, Guangming Zhu, Syed Afaq Ali Shah, and Juan Song.
+Semantic scene completion with dense crf from a single depth image.
+Neurocomputing, 318:182–195, 2018.
+
+[57] Yinda Zhang and Thomas Funkhouser. Deep depth completion of
+In Proceedings of the IEEE Conference on
+
+a single rgb-d image.
+Computer Vision and Pattern Recognition, pages 175–185, 2018.
+
+[58] Wei Zhao, Shuming Gao, and Hongwei Lin. A robust hole-ﬁlling
+algorithm for triangular mesh. The Visual Computer, 23(12):987–
+997, 2007.
+
+[59] Yajie Zhao, Weikai Chen, Jun Xing, Xiaoming Li, Zach Bessinger,
+Fuchang Liu, Wangmeng Zuo, and Ruigang Yang. Identity preserv-
+ing face completion for large ocular region occlusion. arXiv preprint
+arXiv:1807.08772, 2018.
+
+[60] Qian-Yi Zhou and Vladlen Koltun. Dense scene reconstruction with
+points of interest. ACM Transactions on Graphics (ToG), 32(4):112,
+2013.
+
+[37] Olga Sorkine and Daniel Cohen-Or. Least-squares meshes. In Shape
+Modeling Applications, 2004. Proceedings, pages 191–199. IEEE,
+2004.
+
+[38] Hang Su, Subhransu Maji, Evangelos Kalogerakis, and Erik G.
+Learned-Miller. Multi-view convolutional neural networks for 3d
+shape recognition. In Proc. ICCV, 2015.
+
+[39] Minhyuk Sung, Vladimir G Kim, Roland Angst, and Leonidas
+Guibas. Data-driven structural priors for shape completion. ACM
+Transactions on Graphics (TOG), 34(6):175, 2015.
+
+[40] Maxim Tatarchenko, Alexey Dosovitskiy, and Thomas Brox. Multi-
+view 3d models from single images with a convolutional network. In
+European Conference on Computer Vision, pages 322–337. Springer,
+2016.
+
+[41] Ali K Thabet, Jean Lahoud, Daniel Asmar, and Bernard Ghanem. 3d
+aware correction and completion of depth maps in piecewise planar
+scenes. In Asian Conference on Computer Vision, pages 226–241.
+Springer, 2014.
+
+[42] Duc Thanh Nguyen, Binh-Son Hua, Khoi Tran, Quang-Hieu Pham,
+and Sai-Kit Yeung. A ﬁeld model for repairing 3d shapes. In Pro-
+ceedings of the IEEE Conference on Computer Vision and Pattern
+Recognition, pages 5676–5684, 2016.
+
+[43] Shubham Tulsiani, Tinghui Zhou, Alexei A. Efros, and Jitendra Ma-
+lik. Multi-view supervision for single-view reconstruction via differ-
+entiable ray consistency. CoRR, abs/1704.06254, 2017.
+
+[44] Hado Van Hasselt, Arthur Guez, and David Silver. Deep reinforce-
+ment learning with double q-learning. In AAAI, volume 2, page 5.
+Phoenix, AZ, 2016.
+
+[45] Jacob Varley, Chad DeChant, Adam Richardson, Joaqu´ın Ruales, and
+Peter Allen. Shape completion enabled robotic grasping. In Intelli-
+gent Robots and Systems (IROS), 2017 IEEE/RSJ International Con-
+ference on, pages 2442–2447. IEEE, 2017.
+
+[46] Chuan Wang, Haibin Huang, Xiaoguang Han, and Jue Wang. Video
+inpainting by jointly learning temporal structure and spatial details.
+arXiv preprint arXiv:1806.08482, 2018.
+
+[47] Yida Wang, David Joseph Tan, Nassir Navab, and Federico Tombari.
+Adversarial semantic scene completion from a single depth image. In
+2018 International Conference on 3D Vision (3DV), pages 426–434.
+IEEE, 2018.
+
+[48] Ziyu Wang, Tom Schaul, Matteo Hessel, Hado Van Hasselt, Marc
+Lanctot, and Nando De Freitas. Dueling network architectures
+for deep reinforcement learning. arXiv preprint arXiv:1511.06581,
+2015.
+
+[49] Shihao Wu, Wei Sun, Pinxin Long, Hui Huang, Daniel Cohen-
+Or, Minglun Gong, Oliver Deussen, and Baoquan Chen. Quality-
+driven poisson-guided autoscanning. ACM Transactions on Graph-
+ics, 33(6), 2014.
+
+[50] Kai Xu, Yifei Shi, Lintao Zheng, Junyu Zhang, Min Liu, Hui Huang,
+Hao Su, Daniel Cohen-Or, and Baoquan Chen. 3d attention-driven
+depth acquisition for object identiﬁcation. ACM Transactions on
+Graphics (TOG), 35(6):238, 2016.
+
+[51] Hongyang Xue, Shengming Zhang, and Deng Cai. Depth im-
+Improving low rank matrix completion with low
+IEEE Transactions on Image Processing,
+
+age inpainting:
+gradient regularization.
+26(9):4311–4320, 2017.
+
+[52] Xin Yang, Yuanbo Wang, Yaru Wang, Baocai Yin, Qiang Zhang,
+Xiaopeng Wei, and Hongbo Fu. Active object reconstruction using a
+guided view planner. arXiv preprint arXiv:1805.03081, 2018.
+
+[53] Yao Yao, Zixin Luo, Shiwei Li, Tian Fang, and Long Quan. Mvs-
+net: Depth inference for unstructured multi-view stereo. In Proceed-
+ings of the European Conference on Computer Vision (ECCV), pages
+767–783, 2018.
+
+[54] Jiahui Yu, Zhe Lin, Jimei Yang, Xiaohui Shen, Xin Lu, and Thomas S
+Huang. Free-form image inpainting with gated convolution. arXiv
+preprint arXiv:1806.03589, 2018.
+
+[55] Hai-Tao Zhang, Jun Yu, and Zeng-Fu Wang. Probability contour
+guided depth map inpainting and superresolution using non-local
+
+243
+
+

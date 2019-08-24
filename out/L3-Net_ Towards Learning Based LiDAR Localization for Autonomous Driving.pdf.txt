@@ -1,0 +1,1584 @@
+L3-Net: Towards Learning based LiDAR Localization for Autonomous Driving
+
+Weixin Lu∗
+
+Yao Zhou∗ Guowei Wan
+
+Shenhua Hou
+
+Shiyu Song†
+
+Baidu Autonomous Driving Business Unit (ADU)
+
+{luweixin, zhouyao, wanguowei, houshenhua, songshiyu}@baidu.com
+
+Abstract
+
+We present L3-Net - a novel learning-based LiDAR lo-
+calization system that achieves centimeter-level localization
+accuracy, comparable to prior state-of-the-art systems with
+hand-crafted pipelines. Rather than relying on these hand-
+crafted modules, we innovatively implement the use of vari-
+ous deep neural network structures to establish a learning-
+based approach. L3-Net learns local descriptors speciﬁ-
+cally optimized for matching in different real-world driv-
+ing scenarios. 3D convolutions over a cost volume built in
+the solution space signiﬁcantly boosts the localization ac-
+curacy. RNNs are demonstrated to be effective in modeling
+the vehicle’s dynamics, yielding better temporal smooth-
+ness and accuracy. We comprehensively validate the effec-
+tiveness of our approach using freshly collected datasets.
+Multiple trials of repetitive data collection over the same
+road and areas make our dataset ideal for testing local-
+ization systems. The SunnyvaleBigLoop sequences, with a
+year’s time interval between the collected mapping and test-
+ing data, made it quite challenging, but the low localization
+error of our method in these datasets demonstrates its ma-
+turity for real industrial implementation.
+
+1. Introduction
+
+In recent years, autonomous driving has gained substan-
+tial interest in both academia and in the industry. A pre-
+cise and reliable localization module that estimates the po-
+sition and orientation of the autonomous vehicle is highly
+critical. In an ideal situation, the positioning accuracy has
+to be speciﬁc to the level of centimeters and reach sub-
+degree attitude accuracy universally. In the last decade, sev-
+eral methods have been proposed to achieve this goal with
+the help of 3D light detection and ranging (LiDAR) scan-
+ners [19, 20, 18, 36, 37, 17, 9, 32]. A classic localization
+pipeline typically involves several steps with certain vari-
+ations as shown in Figure 1. They are a feature represen-
+tation method (e.g., points[2], planes, poles, Gaussian bars
+
+∗Authors with equal contributions
+†Author to whom correspondence should be addressed
+
+Figure 1: Architectures of the traditional and the proposed
+learning based method. In our method, L3-Net takes online
+LiDAR scans, a pre-built map and a predicted pose as in-
+puts, learns features by PointNet, constructs cost volumes
+over the solution space, applies CNNs and RNNs to esti-
+mate the optimal pose.
+
+over 2D grids [20, 37, 32]), a matching algorithm, an out-
+lier rejection step (optional), a matching cost function, a
+spatial searching or optimization method (e.g., exhaustive
+or coarse-to-ﬁne searching, Monte Carlo sampling or iter-
+ative gradient-descent minimization) and a temporal opti-
+mization or ﬁltering framework. Although some of them
+have shown excellent performance in terms of the accuracy
+and robustness across different scenarios, it usually requires
+signiﬁcant engineering effort in tuning each module in the
+pipeline and designing the hard-coded featuring and match-
+ing methods. Moreover, these handcrafted systems typi-
+cally have strong preferences over the running scenarios.
+Making a universal localization system that is adaptive to
+all challenging scenarios requires tremendous engineering
+efforts, which is not feasible.
+
+The learning based method opens a completely new win-
+dow to solving the above problems in a data-driven fashion.
+The good part is that it’s easy to collect a huge amount of
+training data for a localization task because the ground truth
+trajectory typically can be obtained automatically or semi-
+automatically using ofﬂine methods.
+In this way, human
+labeling efforts can be minimized making it more attrac-
+tive and more cost-effective. Thus, localization or other 3D
+
+16389
+
+Traditional MethodThe Proposed MethodPointNetCNNsRNNsOptimalPoserelated geometry problems are naturally well suited to be
+solved using the data-driven techniques. Conversely, learn-
+ing based methods have shown excellent performance in re-
+dundant tasks, such as classiﬁcation, detection or segmen-
+tation. These examples have demonstrated that deep neu-
+ral networks are very efﬁcient for understanding semantics.
+But this has not been the case for tasks related to the 3D
+geometry, for example, the localization problem.
+
+In this paper, we propose a deep neural network architec-
+ture to accurately estimate the vehicle’s position and orien-
+tation using LiDAR scans. Modules in the traditional hand-
+crafted pipelines are replaced with deep neural networks.
+We ﬁrst extract a set of keypoints evaluated by their lin-
+earities and scattering deﬁned with the eigenvalues of the
+neighbors of a 3D point [34]. Inspired by [7], a single mini-
+PointNet [27] is used to extract feature descriptors. They
+encode certain statistical properties of the points and are
+trained to optimize the matching robustness especially in
+different scenarios through our network architecture. The
+key design of our network is to signiﬁcantly improve the
+localization accuracy, yielding comparable results to hand-
+crafted pipelines, in a fully differentiable cost volume over
+x × y × yaw dimensions regularized by 3D convolutions
+inspired by recent learning based stereo [16]. Finally, we
+calculate the matching probabilities of all the dimensions
+and obtain the optimal estimation. The temporal motion dy-
+namics, which are typically modeled by ﬁltering methods,
+such as a particle ﬁlter, are implicitly encapsulated by deep
+Recurrent Neural Networks (RNNs).
+
+To summarize, our main contributions are:
+
+• To the best of our knowledge, this is the ﬁrst learning
+based LiDAR localization framework for autonomous
+driving that directly processes point clouds and ac-
+curately estimates the vehicle’s position and orienta-
+tion, yielding comparable results to prior state-of-the-
+art handcrafted ones.
+
+• Novel use of 3D convolutions for learning how to reg-
+ularize the cost volume over x × y × yaw dimensions
+which boosts the localization accuracy.
+
+• Rigorous tests in various urban roads together with the
+release of a dataset including more than 380km real
+trafﬁc driving and multiple trials traveling at different
+times on the same roads, that is well suitable for the
+localization task.
+
+2.1. Methods based on Geometry
+
+Traditional LiDAR localization methods are based on
+geometry. They rely heavily on geometric constraints to es-
+timate the motion of the vehicle. The most straightforward
+method is to apply point-cloud registration algorithms to
+solve the motion problem. Iterative Closest Point (ICP) [2],
+G-ICP [30] and Normal Distributions Transform (NDT) [3]
+are common registration algorithms that can be considered.
+K. Yoneda and S. Mita [40] localized their vehicle by us-
+ing ICP to align their online point cloud to the pre-recorded
+point cloud map. Another example that can be considered
+is, S. Kato et al. [13] provided an open-source platform,
+named Autoware. It provides a rich set of self-driving mod-
+ules including localization where registration methods, such
+as ICP and NDT are supported. However, it is known that
+these registration methods are very sensitive to the initial
+guess. They fail in scenes without abundant 3D features,
+such as highways or other open spaces.
+
+A more pervasive strategy is to utilize the LiDAR in-
+tensity and limit the solution space to only three degrees of
+freedom (x, y, and yaw) = (x, y, ψ) as other elements (z, roll
+and pitch) = (z, φ, θ) can be estimated from an inertial mea-
+surement unit (IMU) and a digital elevation model (DEM)
+of the ground plane. J. Levinson and S. Thrun [19, 20] pro-
+pose a LiDAR intensity-based localization method. LiDAR
+intensity provides more texture information of the environ-
+ment, for example, the road lane markers, as valuable addi-
+tional cues compared to the system solely based on the ge-
+ometry information of the point cloud. Several recent works
+[36, 37, 17, 32] combine both intensity and altitude cues
+to achieve more robust and accurate results. G. Wan and
+S. Song [32] achieve 5-7cm RMS horizontal and longitudi-
+nal accuracy by adaptively fusing the intensity and altitude
+cues. The system has been demonstrated to be more ro-
+bust to environmental changes, such as road construction.
+R. Wolcott and R. Eustice [36, 37] uses a Gaussian mixture
+map that captures both the intensity and the altitude. The
+system performs well in severe weathers, such as snow.
+
+Some works [5, 23] localize the vehicle with low-end
+2D LiDARs. But as the retail price of 3D LiDAR scan-
+ners keeps falling, the cost advantage that current 2D Li-
+DARs have over 3D will no longer exist. Other works
+[24, 29, 35] focus more on Advanced Driver-assistance Sys-
+tems (ADAS) with Ibeo 3D LiDARs, but those are currently
+beyond the scope of this paper.
+
+2. Related Work
+
+2.2. Methods based on Learning
+
+LiDAR-based localization for autonomous vehicles has
+been under study for quite some time because of its preci-
+sion and reliability compared to other sensors. In this paper
+we summarize related work. Note that the generic point
+cloud registration methods potentially available for our ap-
+plication are beyond the scope of this paper.
+
+Deep learning is a machine learning technique inspired
+by the structure and function of the human brain.
+It has
+shown excellent performance in semantic tasks, for exam-
+ple, detection, classiﬁcation or segmentation. However,
+they typically are not considered as effective approaches to
+geometric problems as humans are not good at accurate dis-
+
+6390
+
+tance measuring without the assistance of tools, either.
+
+To the our best knowledge, there are few prior existing
+ways of tackling these problems. But none of them have
+achieved state-of-the-art performance in terms of accuracy,
+compared to a well-designed handcrafted pipeline. PoseNet
+[15] and its variants [14, 25, 31] attempt to solve the visual
+re-localization problem, in which an accurate solution is not
+Improvements [6, 4] over PoseNet incorporate
+the goal.
+relative geometric constraints between frames or integrate
+temporal information through a bidirectional LSTM. The
+pose trajectories are smoothed and localization errors are
+reduced, but they still do not meet the needs of autonomous
+driving applications yet. DeLS-3D [33] applies the net-
+work architecture of PoseNet to solve the visual localization
+problem, but the translational error is about 0.9-1.3m. Some
+existing methods [41, 7, 10] could also be applied to solve
+the re-localization problem with point clouds. But, in order
+to obtain accurate matching results, methods, such as ICP,
+are still necessary for registration reﬁnement. [39] applies a
+semi-handcrafted deep neural network, LocNet, to globally
+re-localize the vehicle and ICP registration is again used to
+obtain accurate localization results. Most recently, I. Barsan
+et al. [1] proposed a learning based localization method, us-
+ing LiDAR intensity images similar to [19, 20, 32]. Com-
+pared to processing point clouds directly, it arguably loses
+important information that potentially could be learned and
+encoded by neural networks. In this paper, we propose a
+novel learning based LiDAR localization system that pro-
+cesses point clouds directly. It has the capability to match
+the performance of the state-of-the-art handcrafted localiza-
+tion pipeline.
+
+3. Problem Statement
+
+We have designed a deep learning framework for
+LiDAR-based localization that consumes an online LiDAR
+point cloud and a pre-built 3D point cloud map. The online
+LiDAR point cloud can be a single or several consecutive
+frames from a LiDAR device that is mounted on a vehi-
+cle, accumulated from multiple LiDAR scans taking mo-
+tion compensation into consideration. It is represented as
+a set of 3D points {Pi|i = 1, ..., n}, where each point Pi
+is a vector of (x, y, z, r) including its coordinates and re-
+ﬂection intensity in the local vehicle or LiDAR coordinate
+system. The pre-built 3D point cloud map is a collection of
+LiDAR points with global coordinates collected by survey-
+ing or mapping vehicles. For better storage efﬁciency, the
+3D point cloud map is down-sampled using a voxel grid ﬁl-
+ter. Furthermore, we perform semantic segmentation using
+PointNet++ [28] to remove dynamic objects like vehicles,
+bicycles, pedestrians, etc., in the point cloud map.
+
+Besides the online point cloud and the pre-built map,
+the input to our localization framework also includes a pre-
+dicted pose usually generated by an inertial measurement
+
+It
+unit (IMU), or the vehicle dynamics (motion model).
+measures the incremental motion between consecutive Li-
+DAR frames. Therefore, the task is to seek an optimal off-
+set between the ﬁnal and predicted poses by minimizing the
+matching cost between the online point cloud and the 3D
+map. For better efﬁciency and robustness, we follow state-
+of-the-art localization systems, and estimate the 2D hori-
+zontal and heading offset (∆x, ∆y, ∆ψ) only.
+
+4. L3-Net
+
+This section describes the architecture of the proposed
+network designed for the Learning based LiDAR Localiza-
+tion problem in detail, the so-called L3-Net, shown in Figure
+2.
+
+4.1. Keypoint Features
+
+The ﬁrst step is extracting local feature descriptors from
+a set of local patches, which we call keypoints. The selec-
+tion of keypoints considers several local and global geome-
+try characteristics from different aspects. After the keypoint
+selection, feature descriptors are extracted using a mini-
+version of PointNet [27].
+
+Keypoint Selection Given online LiDAR point cloud,
+we extract a ﬁxed number of keypoints considering some
+factors including density, geometric characteristic, and dis-
+tribution. Firstly, we traverse all the points and ﬁnd the can-
+didates with enough point density in their neighborhood.
+Secondly, we then evaluate the linearity and scattering of
+each candidate keypoint using the well-known 3D structure
+tensor [34]. Features with strong linear and scattering struc-
+tures are considered to be suitable for the localization task
+because of their uniqueness and richness in common road
+scenes. Thirdly, we sort the candidate keypoints by their
+combinatorially geometric characteristic taking their linear-
+ity and scattering into consideration. From the most sig-
+niﬁcant to the least, we try to select a minimum number
+of keypoints, and conﬁrm that the newly selected keypoints
+has maintained enough distance from the existing ones. The
+parameters and thresholds of the implementation are dis-
+cussed in-detail in Section 5.1.
+
+Descriptor Extraction Once all the qualiﬁed keypoints
+have been selected, we extract meaningful feature descrip-
+tors for them. Conventionally, simple geometric or statisti-
+cal features are used to describe the similarity between point
+clouds using features learned by deep networks. In the pro-
+posed method, we extract feature descriptors by applying
+PointNet [27], which is a pioneer work addressing the issue
+of consuming unordered points in a network architecture.
+
+For each keypoint, we collect 64 neighboring points. For
+each neighboring point, the relative coordinate to keypoint
+and its reﬂection intensity (x, y, z, r) is used for descriptor
+
+6391
+
+Figure 2: Architecture of the proposed Learning-based LiDAR Localization Network, L3-Net. During the ﬁrst training
+stage, only the black arrows are involved, which include the keypoint selection, the mini-PointNet feature extraction and the
+regularization based on the 3D CNNs. The cyan arrows indicate the second training stage where the temporal smoothness
+based on the RNNs is added.
+
+extraction. Therefore, the input of the mini-PointNet net-
+work is a 64 × 4 tensor, and the output is a 32-dimensional
+vector representing local feature of the keypoint patch. To
+be more speciﬁc, the mini-version PointNet as shown in
+Figure. 2 includes: a multi-layer perceptron (MLP) of 3
+stacking fully connected layers and a max-pooling layer
+to aggregate and obtain the feature descriptor. We use
+a parameter-shared mini-PointNet structure for feature ex-
+traction of both the online point cloud and the ofﬂine map.
+
+4.2. Cost Volume and 3D CNNs
+
+The next step is building a network to accurately in-
+fer the localization offset (∆x, ∆y, ∆ψ). This is done
+by constructing a cost volume in the solution space (x, y,
+ψ), and regularize it with 3D convolutional neural networks
+(3D CNNs). First of all, we divide the solution space into
+discrete spaces in x, y and ψ dimensions, and denote nx,
+ny, nψ as the size in each dimension.
+In the following,
+we denote {f1, ..., fN } as the keypoint descriptors of the
+online LiDAR point cloud. Therefore, the cost volume is
+N × nx × ny × nψ. Each cell represents the matching cost
+between the corresponding keypoint and the 3D map point
+with the given offset.
+
+Differentiable Transformation Given the predicted
+pose, all the local keypoints of the online point cloud are
+transformed to their global coordinates. Then, we divide
+the neighborhood of the predicted pose in x, y and yaw di-
+mensions, denoted as {(∆xi, ∆yj, ∆ψk)|1 ≤ i ≤ nx, 1 ≤
+j ≤ ny, 1 ≤ k ≤ nψ}. The corresponding coordinates in
+the 3D map can be computed using a transform expressed
+by a 2 × 2 rotation matrix and a 2d translation vector:
+
+ x′
+y′! =(cid:18) cos ∆ψk − sin ∆ψk
+
+cos ∆ψk (cid:19) · x
+
+sin ∆ψk
+
+y! + ∆xi
+∆yj!.
+
+(1)
+
+Then again, the neighboring points of the computed cor-
+responding coordinates in the 3D map are used to extract its
+feature descriptor through a mini-PointNet structure. Ev-
+ery cell in the cost volume is related to an original keypoint
+from the online point cloud with its feature descriptor, a
+transformation, and also a corresponding feature descrip-
+tor from the map. Furthermore, a bilinear interpolation ﬁl-
+ter is also applied to reﬁne the corresponding feature de-
+scriptor from the map with its four neighbors in x and y
+dimensions. As a core step to bridge the keypoint features
+and the regularization network, the transformation, and the
+bilinear interpolation are differentiable, enabling the fea-
+ture learning in the mini-PointNet structure through back-
+propagation during the training stages. With the descriptor
+pair from the online point cloud and the map, we can form
+a N × nx × ny × nψ volume in the offset solution space,
+by computing the metric distance between them, which is
+the input of the regularization network. Metric distance is a
+32-dimensional vector, in which each element is calculated
+by L2 distance from the corresponding one in the descriptor
+pair.
+
+Regularization Given the above input, we hope to learn
+a regularization function which is able to take into account
+the context in this volume and reﬁne matching costs. The
+matching costs in the offset space are calculated indepen-
+dently for each keypoint, so they can never be perfect, even
+if they were using deep feature representations.
+
+Inspired by recent learning based stereo methods [16, 38,
+21, 11], we apply 3D convolutions for volume regulariza-
+tion. In Section 6.3, we show the effectiveness of the 3D
+CNNs and how they help improve the localization precision
+signiﬁcantly. Our 3D CNNs consists of three layers; The
+ﬁrst two 3D convolutional layers use ReLU unit and batch
+normalization where a batch includes all keypoints from a
+
+6392
+
+ReduceAverageCost VolumeMarginalizationReduceSumEstimated OffsetGT Offset( 𝚫𝒙, 𝚫𝒚, 𝚫𝝍)(𝚫𝒙∗,𝚫𝒚∗,𝚫𝝍∗)𝒏𝒙×𝒏𝒚×𝒏𝝍WeightedSum𝒏𝒙×𝒏𝒚×𝒏𝝍×𝟑𝟐𝒏𝒙×𝒏𝒚×𝒏𝝍𝟔𝟒×𝟒𝒏𝒙×𝒏𝒚×𝒏𝝍×𝟑𝟐𝟑𝟐𝟔𝟒×𝟒𝟔𝟒×𝟒𝟔𝟒×𝟒Sharedmini-PointNet𝒏𝒙×𝒏𝒚×𝒏𝝍3D CNNsSharedSharedWeights𝑪𝒐𝒏𝒗𝟑𝒅(𝟏𝟔,𝟏,𝟏)𝑪𝒐𝒏𝒗𝟑𝒅(𝟏,𝟑,𝟏)𝑪𝒐𝒏𝒗𝟑𝒅(𝟒,𝟑,𝟏)mini-PointNetmini-PointNetmini-PointNetRNNsRNNsRNNs𝒕𝒕−𝟏𝒕−𝟐LSTMLSTMLSTMLSTMLSTMLSTM……𝒙𝒚𝝍𝒙𝒚𝝍Probability Vectors(log(Pi(∆T )),
+
+(2)
+
+The loss function is deﬁned as below:
+
+single frame. The last convolutional layer directly sends
+its output, omitting the normalization and activation opera-
+tions. 3D CNNs is performed on each nx × ny × nψ sub-
+volumes and they share the same parameters, which signif-
+icantly increases the speed of convergence and effectively
+avoids over-ﬁtting.
+
+4.3. Probability Offset Volume
+
+In Section 4.2, we calculate the matching costs of all
+offset conﬁgurations {∆xi, ∆yj, ∆ψk} for each keypoint
+independently. In this section, we introduce a probability
+offset volume to represent the consensus of all keypoints in
+the offset space, which is a nx × ny × nψ volume. It rep-
+resents the overall matching cost between the online point
+cloud and the 3D map given the offset.
+
+Marginalization Suppose that all keypoints are indepen-
+dent of each other, then the matching probability of an offset
+∆T = (∆xi, ∆yj, ∆ψk) can be calculated by the follow-
+ing: QN
+i=1 Pi(∆T ), where Pi(∆T ) represents the matching
+probability of i-th keypoint at offset ∆T .
+
+Because the product can easily cause overﬂow, the above
+
+equation is converted into log-likelihood:
+
+C(∆T ) ∝ log(
+
+Pi(∆T )) =
+
+N
+
+Yi=1
+
+N
+
+Xi=1
+
+where C(∆T ) represents the overall matching cost at offset
+∆T between the online point cloud and the 3D map.
+
+In our
+
+implementation, we take the above cost
+log(Pi(∆T )) as input, and then marginalize it into a nx ×
+ny × nψ cost volume across the keypoint dimension by ap-
+plying a reduce average operation, which corresponds to
+the overall matching costs C(∆T ).
+
+Probability The value of each cell in the marginalized
+cost volume is the overall matching cost of the correspond-
+ing offset. We apply the sof tmax operation along x, y, and
+yaw dimensions to convert the matching costs C(∆T ) into
+normalized values, interpreted as probabilities P (∆T ). In
+Section 6.3, we visualize the distributions of the matching
+cost and the probability offset volume in x-y dimensions
+with given yaws. Finally, we marginalize the probability
+offset volume P (∆T ) into probability vectors across x, y,
+and ψ dimensions by applying a reduce sum operation:
+Pi(∆xi) = Py,ψ P (∆T ), Pj(∆yj) = Px,ψ P (∆T ) and
+Pk(∆ψk) = Px,y P (∆T ).
+
+4.4. Temporal Smoothness
+
+The above sections introduce the spatial matching be-
+tween the online point cloud and the map. The probability
+offset volumes of sequential frames are therefore indepen-
+dent of each other. However, the localization task is a se-
+quential process, so the poses of sequential frames should
+be considered jointly. In traditional methods [19, 20, 32],
+
+the historical distributions within the histogram ﬁlter are
+propagated to estimate the current matching distribution,
+which ensures the temporal smoothness of the output. Fol-
+lowing this spirit, we introduce the recurrent neural net-
+works (RNNs) to achieve similar temporal smoothness. To
+be more speciﬁc, we use LSTM [8] in our network as
+shown in Figure 2. The probability vector of each dimen-
+sion (x, y, ψ) from the probability offset volume is treated
+as the input of each parameter independent RNNs unit.
+Through learning of historical information by RNNs, the
+trajectory of localization result is smoother and more accu-
+rate as shown in Table 3 of Sec. 6.
+
+4.5. Loss
+
+Unlike prior work [41, 7] using the feature space distance
+as a loss, we directly deﬁne the loss as squared L2 distance
+between the estimated offset ˆ∆T = ( ˆ∆x, ˆ∆y, ˆ∆ψ) and the
+ground truth ∆T ∗ = (∆x∗, ∆y∗, ∆ψ∗). The estimated off-
+set can be calculated by:
+
+ˆ∆T = (
+
+nx
+
+Xi=1
+
+Pi(∆xi)·∆xi,
+
+ny
+
+Xj=1
+
+Pj(∆yj)·∆yj ,
+
+nψ
+
+Xk=1
+
+Pk(∆ψk)·∆ψk)
+
+(3)
+
+Loss = α · (k ˆ∆x − ∆x∗k2 + k ˆ∆y − ∆y∗k2) + k ˆ∆ψ − ∆ψ∗k2,
+(4)
+
+where α is the balancing factor.
+
+5. Implementation Details
+
+5.1. Hyperparameters
+
+During the keypoint selection, we choose 128 keypoints
+within a frame of the LiDAR point cloud. The solution
+space of the cost volume is set as 11 × 11 × 11, and the
+steps in x, y and ψ dimensions are 0.25m, 0.25m and 0.5◦,
+respectively. Therefore, the maximum affordable offset of
+the predicted pose is about (0.25 × 11−1
+2 = 1.25m, 1.25m,
+2.5◦) which is sufﬁcient for our application. In our imple-
+mentation, the mini-PointNet structure is 64×32×32 MLP,
+3D CNNs is Conv3d (16, 1, 1) - Conv3d (4, 3, 1) - Conv3d
+(1, 3, 1), and RNNs is a two layer LSTM with 11 hidden
+states.
+
+5.2. Training
+
+We adopt a 2-step strategy during the training stage. In
+the ﬁrst step, we only train the mini-PointNet structure and
+the 3D CNNs.
+In order to achieve this, we ﬁrst remove
+RNNs in the network architecture and calculate the loss di-
+rectly from the probability vectors inferred from the proba-
+bility offset volume. The batch size and the learning rate are
+set to be 1 and 0.01, respectively. In order to make the ex-
+tracted features more robust, we add a uniformly distributed
+
+6393
+
+random noise of [0 ∼ 1.0]m in x-y dimension, and a ran-
+dom error of [0 ∼ 2.0]◦ in yaw dimension to the input pre-
+dicted pose. In the second step, we train the parameters of
+RNNs with those ﬁxed in the mini-PointNet structure and
+the 3D CNNs. The batch size and the learning rate are set
+to be 1 and 0.001, respectively. We sample the sequences
+with a length of 10 during the RNNs training. Given that
+the frequency of LiDAR frames is 10hz, the actual recep-
+tive ﬁeld of RNNs is about 1.0 second. In these two steps,
+we randomly divide the dataset into the training and valida-
+tion set, yielding the ratio of training to validation as 4 to 1.
+We decide to stop at 100 epochs for these two steps when
+there is no performance gain.
+
+6. Experiments
+
+6.1. The Apollo SouthBay Dataset
+
+The common sensor in a LiDAR-based localization sys-
+tem for autonomous driving applications is a 360◦ 3D Li-
+DAR. To build the map and test the system, we also need
+multiple trials of data collection on the same road. To the
+best of our knowledge, no public datasets meet this require-
+ment, as summarized in Table 1. Therefore, we needed
+to collect data using our own vehicle by driving through
+different areas in southern San Francisco Bay Area cover-
+ing different scenarios including but not limited to residen-
+tial areas, urban downtown areas, and highways, and build
+a new dataset, Apollo-SouthBay Dataset. We equipped a
+standard Lincoln MKZ sedan with a Velodyne HDL-64E
+LiDAR, and an integrated navigation system for data collec-
+tion. We have collected data for multiple trials over a period
+of days, weeks, or even a year to meet the needs of mapping,
+training and testing the vehicle. And this historical data is
+what is currently being used for map building and testing for
+a localization system for autonomous driving applications.
+We currently use the high-end integrated navigation system,
+NovAtel ProPak6, a triple-frequency GNSS RTK receiver,
+together with the IMU-ISA-100C, a near navigation-grade
+IMU. The GNSS RTK/INS integrated solution using post-
+processing software, such as the NovAtel Inertial Explorer,
+is employed as the ground truth. In total, our dataset covers
+a driving distance of 380.5 km and contains a set of 506, 679
+LiDAR frames with high-quality ground truth. The Apollo-
+SouthBay Dataset is to be released soon.
+
+6.2. Performance
+
+Training and Testing Setup Our dataset involves six
+different routes as shown in Table 2.
+In the ﬁrst ﬁve of
+these routes, BaylandsToSeafood, · · · , SanJoseDowntown,
+the collection time interval between the mapping/training
+and testing data is approximately a week. The sixth one,
+SunnyvaleBigLoop, which is the longest and covers differ-
+ent scenarios including residential areas, urban roads, and
+
+Datasets
+
+Length
+
+Ground
+Truth
+
+360◦
+LiDAR
+
+Multiple
+Trials
+
+Ford Campus[26]
+KITTI[12]
+Oxford RobotCar[22]
+Ours
+
+5.1km
+39.2km
+1000.0km
+380.5km
+
+X
+
+X
+
+X
+
+X
+
+X
+
+X
+×
+X
+
+×
+×
+X
+
+X
+
+Table 1: Our dataset compared to other available related
+datasets. As seen above, only our dataset fully meets the
+requirement for map building and testing for a localization
+system for autonomous driving applications.
+
+the highway, is excluded from the training dataset deliber-
+ately. Please note that SunnyvaleBigLoop has a wide time
+interval of as long as a year between the mapping and test
+data collection, which is very challenging for localization.
+The mapping procedure requires multiple repetitions of data
+collection to ensure good data density depending on the ve-
+hicle’s speed. That’s the reason why the data length of the
+mapping dataset is often longer than the others.
+
+Route
+
+Mapping
+
+Training
+
+Testing
+
+Dist.(km) Fram.
+
+Dist.(km) Fram.
+
+Dist.(km) Fram.
+
+BaylandsToSeafood
+ColumbiaPark
+Highway237
+MathildaAVE
+SanJoseDowntown
+SunnyvaleBigLoop
+
+24.91
+44.83
+29.51
+40.99
+23.23
+108.1
+
+36,304
+69,552
+19,625
+50,638
+59,774
+128,937
+
+4.15
+13.9
+4.82
+8.83
+5.69
+-
+
+5,551
+19,705
+2,057
+10,596
+14,849
+-
+
+5.73
+8.55
+4.34
+9.07
+6.17
+37.7
+
+6,445
+13,685
+1,717
+9,483
+16,591
+41,170
+
+Table 2: Routes and their usage for mapping, training and
+testing purposes. The time interval between the mapping,
+training and testing data is approximately one year (Sunny-
+valeBigLoop) and a week (others).
+
+Quantitative Analysis Our proposed learning-based lo-
+calization system L3-Net has been extensively tested in real-
+world driving scenarios. The localization performance is
+compared against several state-of-the-art LiDAR-based lo-
+calization methods, such as Levinson et al. [20], and Wan
+et al. [32]. The pre-built map resolutions of Levinson et
+al., Wan et al. and ours are all 12.5cm. The input pre-
+dicted poses are generated from the built-in tightly-coupled
+GNSS/IMU integrated solution in NovAtel with the RTK
+disabled, which is the same as the usage of the LiDAR local-
+ization module in [20], although currently, the multi-sensor
+fusion system is not our focus in this paper. The 2-Systems
+mode is used in [32] since our focus is on the LiDAR-based
+localization task.
+
+In Table 3, we give a quantitative analysis of each avail-
+able method. It further demonstrates that the localization
+performance of our learning based L3-Net is comparable to
+the state-of-the-art handcrafted method [32] for real-world
+driving scenarios. In addition, note our vast performance
+improvement over [20]. The low localization error of our
+system in SunnyvaleBigLoop demonstrates that our net-
+
+6394
+
+Route
+
+Methods
+
+Horiz.
+RMS
+
+Horiz.
+Max
+
+Long.
+RMS
+
+Lat.
+RMS
+
+< 0.1m
+Pct.
+
+< 0.2m
+Pct.
+
+< 0.3m
+Pct.
+
+Yaw.
+RMS
+
+Yaw.
+Max
+
+< 0.1◦
+Pct.
+
+< 0.3◦
+Pct.
+
+< 0.6◦
+Pct.
+
+BaylandsToSeafood
+
+ColumbiaPark
+
+Highway237
+
+MathildaAVE
+
+SanJoseDowntown
+
+SunnyvaleBigLoop
+
+0.148
+Levinson et al.[20]
+0.036
+Wan et al.[32]
+Ours.(WithoutRNN) 0.054
+Ours.(WithRNN)
+0.050
+
+0.063
+Levinson et al.[20]
+Wan et al.[32]
+0.046
+Ours.(WithoutRNN) 0.047
+0.043
+Ours.(WithRNN)
+
+0.161
+Levinson et al.[20]
+0.049
+Wan et al.[32]
+Ours.(WithoutRNN) 0.053
+0.045
+Ours.(WithRNN)
+
+0.106
+Levinson et al.[20]
+0.040
+Wan et al.[32]
+Ours.(WithoutRNN) 0.054
+Ours.(WithRNN)
+0.051
+
+0.103
+Levinson et al.[20]
+Wan et al.[32]
+0.058
+Ours.(WithoutRNN) 0.057
+0.055
+Ours.(WithRNN)
+
+Levinson et al.[20]
+0.132
+Wan et al.[32]
+0.069
+Ours.(WithoutRNN) 0.060
+0.055
+Ours.(WithRNN)
+
+1.501
+0.203
+0.328
+0.209
+
+0.202
+0.160
+0.161
+0.159
+
+0.622
+0.196
+0.257
+0.190
+
+0.779
+0.179
+0.379
+0.154
+
+0.586
+0.290
+0.288
+0.294
+
+1.423
+0.368
+0.451
+0.347
+
+0.115
+0.026
+0.041
+0.039
+
+0.045
+0.034
+0.034
+0.032
+
+0.138
+0.038
+0.046
+0.034
+
+0.086
+0.030
+0.040
+0.040
+
+0.075
+0.039
+0.037
+0.036
+
+0.097
+0.050
+0.039
+0.037
+
+0.074
+0.019
+0.026
+0.024
+
+0.034
+0.024
+0.025
+0.023
+
+0.061
+0.022
+0.019
+0.023
+
+0.044
+0.020
+0.028
+0.025
+
+0.055
+0.034
+0.037
+0.034
+
+0.070
+0.038
+0.037
+0.032
+
+54.62% 82.41% 91.10%
+98.88% 99.98% 100.0% 0.054
+94.49% 99.77% 99.95% 0.029
+96.48% 99.89% 100.0% 0.020
+
+-
+
+87.30% 99.99% 100.0%
+96.46% 100.0% 100.0% 0.081
+95.82% 100.0% 100.0% 0.049
+98.02% 100.0% 100.0% 0.028
+
+-
+
+37.05% 69.90% 86.09%
+93.27% 100.0% 100.0% 0.069
+92.05% 99.77% 100.0% 0.048
+99.01% 100.0% 100.0% 0.038
+
+-
+
+65.20% 90.43% 94.83%
+98.72% 100.0% 100.0% 0.060
+96.82% 99.91% 99.99% 0.033
+98.87% 100.0% 100.0% 0.019
+
+-
+
+58.20% 88.39% 97.75%
+87.72% 99.55% 100.0% 0.052
+89.81% 98.93% 100.0% 0.033
+91.32% 99.20% 100.0% 0.034
+
+-
+
+43.95% 87.51% 94.99%
+80.86% 99.08% 99.96% 0.081
+88.24% 98.99% 99.85% 0.046
+92.42% 99.14% 99.94% 0.033
+
+-
+
+-
+
+0.372
+0.294
+0.179
+
+-
+
+0.384
+0.322
+0.190
+
+-
+
+0.302
+0.211
+0.112
+
+-
+
+0.453
+0.674
+0.176
+
+-
+
+0.246
+0.274
+0.221
+
+-
+
+0.679
+0.405
+0.262
+
+-
+
+-
+
+-
+
+86.82% 99.86% 100.0%
+98.56% 100.0% 100.0%
+99.35% 100.0% 100.0%
+
+-
+
+-
+
+-
+
+67.27% 99.74% 100.0%
+92.57% 99.99% 100.0%
+99.50% 100.0% 100.0%
+
+-
+
+-
+
+-
+
+78.12% 99.94% 100.0%
+94.51% 100.0% 100.0%
+99.30% 100.0% 100.0%
+
+-
+
+-
+
+-
+
+82.91% 99.74% 100.0%
+97.56% 99.83% 99.97%
+99.31% 100.0% 100.0%
+
+-
+
+-
+
+-
+
+87.82% 100.0% 100.0%
+99.02% 100.0% 100.0%
+98.86% 100.0% 100.0%
+
+-
+
+-
+
+-
+
+69.51% 98.60% 100.0%
+91.32% 99.98% 100.0%
+96.44% 100.0% 100.0%
+
+Table 3: Comparison with other LiDAR-based localization systems. Note that we nearly match even the state-of-the-art
+system [32] that has an elaborate handcrafted pipeline. Our wide improvement over other systems [20] is notable.
+
+work can generalize decently in new road scenarios. In most
+routes, the temporal smoothness by the RNNs gives us bet-
+ter performance, which illustrates its effectiveness.
+
+Methods
+
+Levinson[20]
+
+Wan[32]
+
+Runtime (ms)
+Map Size (MB/km)
+
+73.2
+10
+
+61.6
+5
+
+Ours
+
+121.3
+14
+
+Table 4: Runtime performance analysis:
+processing time and the storage size of the map.
+
+to illustrate the
+
+Run-time Analysis We evaluated the runtime perfor-
+mance of our platform with a GTX 1080 Ti GPU, Core i7-
+9700K CPU, and 16GB Memory as shown in Table 4. It
+takes 31.0ms, 22.7ms and 67.6ms in the keypoint selection,
+differential transformation and forward pass steps, respec-
+tively. The total end-to end processing time of each frame
+is 121.3ms, yielding a real-time system.
+
+6.3. Ablations and Visualization
+
+We use the same training and test data introduced in Sec-
+
+tion 6.2 to better evaluate the proposed network.
+
+Feature Descriptor Comparison We substitute our
+mini-PointNet structure for PointNet [27] and PPFNet [7]
+in the descriptor extraction step as shown in Table 5. We
+note that our mini-PointNet structure outperforms PointNet
+[27] and PPFNet [7] signiﬁcantly. In PPFNet, global fea-
+tures are concatenated to local features to introduce the spa-
+tial relations of the local features. Intuitively, our input pre-
+
+Methods
+
+PointNet
+PPFNet
+Ours
+
+Horiz.
+RMS
+
+Horiz.
+Std
+
+<10cm
+Pct.
+
+Yaw.
+RMS
+
+Yaw.
+Std
+
+< 0.1◦
+Pct.
+
+0.130
+0.085
+0.069
+
+0.278
+0.122
+0.057
+
+74.33% 0.12
+79.68% 0.07
+84.22% 0.06
+
+0.40
+0.17
+0.05
+
+81.57%
+82.61%
+83.29%
+
+Table 5: Comparison with various network structures. The
+beneﬁts of our proposed mini-PointNet that focuses more
+on local features are clearly visible.
+
+dicted pose is already accurate enough for the network to
+focus on local matching, therefore the global features are
+not necessary in our task. Moreover, the descriptor size and
+the structure of the mini-PointNet in our design are much
+smaller than PointNet to let them further focus on local fea-
+ture learning, yielding better performance in localization
+task rather than semantic tasks, such as classiﬁcation and
+segmentation.
+
+Methods
+
+Horiz.
+RMS
+
+Horiz.
+Std
+
+<10cm
+Pct.
+
+Yaw.
+RMS
+
+3D CNNs ×
+3D CNNs ↓
+3D CNNs ↑
+Ours
+
+0.134
+0.137
+0.060
+0.065
+
+0.072
+0.108
+0.057
+0.056
+
+33.67% 0.089
+37.35% 0.085
+89.48% 0.047
+86.49% 0.056
+
+Yaw.
+Std
+
+0.073
+0.073
+0.041
+0.048
+
+< 0.3◦
+Pct.
+
+65.09%
+84.03%
+90.94%
+83.74%
+
+Table 6: Comparison with various 3D CNNs setups. Note
+that decreasing or removing the CNN layers give much
+worse results. The importance of 3D CNNs is clear.
+
+6395
+
+Figure 3: Visualization of network outputs in different stages in Section 4. The cost volume is visualized over (x, y)
+dimensions with ﬁxed yaw values and selected keypoints. The matching response is clearly signiﬁcant after we accumulate
+the matching costs from all the keypoints as shown in the probability offset volume in the middle. The ﬁnal estimated offsets
+(0.538m, 0.993m, 1.001
+
+) and their ground truths (0.524m, 0.994m, 1.044
+
+) are shown in the right.
+
+◦
+
+◦
+
+3D CNNs In order to verify the importance of 3D
+CNNs, we conduct the following experiments: removing
+3D CNNs, decreasing layers from 3 to 1 and increasing
+layers from 3 to 4, denoted as 3D CNNs ×, 3D CNNs ↓
+and 3D CNNs ↑. Our results are shown in Table 6, where
+the localization accuracy drops heavily using 3D CNNs ×
+and 3D CNNs ↓. This shows that 3D CNNs can learn the
+real feature distance and effectively regularize the output in
+the solution space as compared to directly applying the L2
+distance between descriptor pairs (No 3D CNNs). Larger-
+capacity 3D CNNs leads to better localization accuracy,
+however, more data is also required empirically in training.
+We use 3 layers as a default setup in our method.
+
+Visualization To have better insights of the mechanism
+of the network, we visualize the cost volume, the probabil-
+ity offset volume, and the probability vectors discussed in
+Section 4. In Figure 3, on the left is the cost volume visual-
+ized in x, y dimensions given 11 different yaws from 20 out
+of 128 keypoints after being regularization with 3D CNNs.
+On the left, marginalized cost volume is displayed, which
+is obtained from the cost volume of all keypoints, and the
+probability offset volume after the sof tmax operation on
+the central columns of the ﬁgure. The right side shows the
+probability vectors marginalized from the probability offset
+volume, the estimated offsets, and the ground truth offsets.
+It is seen that the matching cost estimation from a single
+keypoint is not reliable due to the insufﬁcient geometric
+uniqueness over the solution space. However, the match-
+ing response in the probability offset volume is absolutely
+
+clear after all the matching costs are accumulated from all
+the keypoints.
+
+7. Conclusion
+
+We have presented a novel learning-based LiDAR lo-
+calization framework, designed for autonomous driving ap-
+plications. Elaborately hand-crafted modules in traditional
+localization pipelines are substituted with learning-based
+deep neural networks. Our system achieves comparable lo-
+calization accuracy to prior state-of-the-art systems, and is
+ready for industrial use. The probability offset volume im-
+plies the matching conﬁdence over the solution space mak-
+ing it ready to be deployed in a multi-sensor fusion based
+localization framework. A 360◦ 3D LiDAR sensor, a high-
+end integrated navigation system and the data which in-
+cludes multiple trials of driving over the same road areas
+in southern San Francisco Bay make our dataset ideal for
+benchmarking localization systems.
+
+ACKNOWLEDGMENT
+
+This work is supported by Baidu Autonomous Driving
+Business Unit (Baidu ADU) in conjunction with the Apollo
+Project (http://apollo.auto/). We would like to thank our
+colleagues for their kind help and support throughout the
+project. Natasha Dsouza helped with the text editing and
+proof reading. Yong Xiao and Runxin He helped with data
+collection. Yu Liu processed mapping and testing data.
+
+6396
+
+∆𝒙∆𝒚∆𝝍𝟐.𝟎°𝟏.𝟎°−𝟏.𝟎°−𝟐.𝟎°𝟎°References
+
+[1] I. A. Barsan, S. Wang, A. Pokrovsky, and R. Urtasun. Learn-
+ing to localize using a LiDAR intensity map. In Conference
+on Robot Learning, pages 605–616, 2018. 3
+
+[2] P. J. Besl and N. D. McKay. A method for registration of 3-D
+shapes. IEEE Transactions on Pattern Analysis and Machine
+Intelligence, 14(2):239–256, Feb 1992. 1, 2
+
+[3] P. Biber and W. Straßer. The normal distributions trans-
+form: A new approach to laser scan matching. In Proceed-
+ings 2003 IEEE/RSJ International Conference on Intelligent
+Robots and Systems (IROS), volume 3, pages 2743–2748,
+2003. 2
+
+[4] S. Brahmbhatt, J. Gu, K. Kim, J. Hays, and J. Kautz.
+Geometry-aware learning of maps for camera localization.
+In IEEE Conference on Computer Vision and Pattern Recog-
+nition (CVPR), pages 2616–2625, 2018. 3
+
+[5] Z. J. Chong, B. Qin, T. Bandyopadhyay, M. H. Ang, E. Fraz-
+zoli, and D. Rus. Synthetic 2D LIDAR for precise vehi-
+cle localization in 3D urban environment.
+In IEEE Inter-
+national Conference on Robotics and Automation (ICRA),
+pages 1554–1559, May 2013. 2
+
+[6] R. Clark, S. Wang, A. Markham, N. Trigoni, and H. Wen.
+VidLoc: A deep spatio-temporal model for 6-DoF video-clip
+relocalization. In IEEE Conference on Computer Vision and
+Pattern Recognition (CVPR), volume 3, 2017. 3
+
+[7] H. Deng, T. Birdal, and S. Ilic. PPFNet: Global context
+aware local features for robust 3D point matching. In IEEE
+Conference on Computer Vision and Pattern Recognition
+(CVPR), June 2018. 2, 3, 5, 7
+
+[8] J. Donahue, L. A. Hendricks, M. Rohrbach, S. Venugopalan,
+S. Guadarrama, K. Saenko, and T. Darrell. Long-term recur-
+rent convolutional networks for visual recognition and de-
+scription. IEEE Transactions on Pattern Analysis and Ma-
+chine Intelligence, 39(4):677–691, Apr. 2017. 5
+
+[9] R. Dub, M. G. Gollub, H. Sommer, I. Gilitschenski, R. Sieg-
+wart, C. Cadena, and J. Nieto. Incremental-segment-based
+localization in 3-D point clouds.
+IEEE Robotics and Au-
+tomation Letters, 3(3):1832–1839, July 2018. 1
+
+[10] G. Elbaz, T. Avraham, and A. Fischer. 3D point cloud reg-
+istration for localization using a deep neural network auto-
+encoder. In IEEE Conference on Computer Vision and Pat-
+tern Recognition (CVPR), pages 2472–2481, July 2017. 3
+
+[11] J. Flynn, I. Neulander, J. Philbin, and N. Snavely. Deep-
+Stereo: Learning to predict new views from the world’s im-
+agery. In Proceedings of the IEEE Conference on Computer
+Vision and Pattern Recognition, pages 5515–5524, 2016. 4
+
+[12] A. Geiger, P. Lenz, and R. Urtasun. Are we ready for au-
+tonomous driving? the KITTI vision benchmark suite.
+In
+IEEE Conference on Computer Vision and Pattern Recogni-
+tion (CVPR), pages 3354–3361, June 2012. 6
+
+[13] S. Kato, E. Takeuchi, Y. Ishiguro, Y. Ninomiya, K. Takeda,
+and T. Hamada. An open approach to autonomous vehicles.
+IEEE Micro, 35(6):60–68, Nov 2015. 2
+
+[14] A. Kendall, R. Cipolla, et al. Geometric loss functions for
+camera pose regression with deep learning. In IEEE Confer-
+ence on Computer Vision and Pattern Recognition (CVPR),
+volume 3, page 8, 2017. 3
+
+[15] A. Kendall, M. Grimes, and R. Cipolla. PoseNet: A convolu-
+tional network for real-time 6-DOF camera relocalization. In
+IEEE International Conference on Computer Vision (ICCV),
+pages 2938–2946, Dec 2015. 3
+
+[16] A. Kendall, H. Martirosyan, S. Dasgupta, and P. Henry. End-
+to-end learning of geometry and context for deep stereo re-
+gression.
+In IEEE International Conference on Computer
+Vision (ICCV), pages 66–75, Oct 2017. 2, 4
+
+[17] H. Kim, B. Liu, C. Y. Goh, S. Lee, and H. Myung. Robust
+vehicle localization using entropy-weighted particle ﬁlter-
+based data fusion of vertical and road intensity information
+for a large scale urban area. IEEE Robotics and Automation
+Letters, 2(3):1518–1524, July 2017. 1, 2
+
+[18] R. Kummerle, D. Hahnel, D. Dolgov, S. Thrun, and W. Bur-
+gard. Autonomous driving in a multi-level parking structure.
+In IEEE International Conference on Robotics and Automa-
+tion (ICRA), pages 3395–3400, May 2009. 1
+
+[19] J. Levinson, M. Montemerlo, and S. Thrun. Map-based
+In
+precision vehicle localization in urban environments.
+Robotics: Science and Systems, volume 4, page 1. Citeseer,
+2007. 1, 2, 3, 5
+
+[20] J. Levinson and S. Thrun. Robust vehicle localization in
+urban environments using probabilistic maps.
+In IEEE In-
+ternational Conference on Robotics and Automation (ICRA),
+pages 4372–4378, May 2010. 1, 2, 3, 5, 6, 7
+
+[21] W. Luo, A. G. Schwing, and R. Urtasun. Efﬁcient deep learn-
+ing for stereo matching. In Proceedings of the IEEE Con-
+ference on Computer Vision and Pattern Recognition, pages
+5695–5703, 2016. 4
+
+[22] W. Maddern, G. Pascoe, C. Linegar, and P. Newman. 1 Year,
+1000km: The Oxford RobotCar Dataset. The International
+Journal of Robotics Research (IJRR), 36(1):3–15, 2017. 6
+
+[23] W. Maddern, G. Pascoe, and P. Newman. Leveraging expe-
+rience for large-scale LIDAR localisation in changing cities.
+In IEEE International Conference on Robotics and Automa-
+tion (ICRA), pages 1684–1691, May 2015. 2
+
+[24] R. Matthaei, G. Bagschik, and M. Maurer. Map-relative
+localization in lane-level maps for ADAS and autonomous
+driving.
+In IEEE Intelligent Vehicles Symposium Proceed-
+ings, pages 49–55, June 2014. 2
+
+[25] I. Melekhov, J. Ylioinas, J. Kannala, and E. Rahtu. Image-
+based localization using hourglass networks.
+In IEEE In-
+ternational Conference on Computer Vision Workshops (IC-
+CVW), pages 870–877, Oct 2017. 3
+
+[26] G. Pandey, J. R. McBride, and R. M. Eustice. Ford campus
+vision and LiDAR data set. International Journal of Robotics
+Research, 30(13):1543–1552, 2011. 6
+
+[27] C. R. Qi, H. Su, K. Mo, and L. J. Guibas. PointNet: Deep
+learning on point sets for 3D classiﬁcation and segmentation.
+In IEEE Conference on Computer Vision and Pattern Recog-
+nition (CVPR), pages 77–85, July 2017. 2, 3, 7
+
+[28] C. R. Qi, L. Yi, H. Su, and L. J. Guibas. PointNet++:
+Deep hierarchical feature learning on point sets in a metric
+space. In Advances in Neural Information Processing Sys-
+tems, pages 5099–5108, 2017. 3
+
+[29] A. Schlichting and C. Brenner. Localization using automo-
+tive laser scanners and local pattern matching. In IEEE In-
+
+6397
+
+telligent Vehicles Symposium Proceedings, pages 414–419,
+June 2014. 2
+
+[30] A. Segal, D. Haehnel, and S. Thrun. Generalized-ICP. In
+Robotics: Science and Systems (RSS), volume 2, page 435,
+2009. 2
+
+[31] F. Walch, C. Hazirbas, L. Leal-Taixe, T. Sattler, S. Hilsen-
+beck, and D. Cremers.
+Image-based localization using
+LSTMs for structured feature correlation. In IEEE Interna-
+tional Conference on Computer Vision (ICCV), pages 627–
+637, 2017. 3
+
+[32] G. Wan, X. Yang, R. Cai, H. Li, Y. Zhou, H. Wang, and
+S. Song. Robust and precise vehicle localization based on
+multi-sensor fusion in diverse city scenes.
+In IEEE Inter-
+national Conference on Robotics and Automation (ICRA),
+pages 4670–4677, May 2018. 1, 2, 3, 5, 6, 7
+
+[33] P. Wang, R. Yang, B. Cao, W. Xu, and Y. Lin. DeLS-3D:
+Deep localization and segmentation with a 3D semantic map.
+In IEEE Conference on Computer Vision and Pattern Recog-
+nition (CVPR), June 2018. 3
+
+[34] M. Weinmann, B. Jutzi, S. Hinz, and C. Mallet. Semantic
+point cloud interpretation based on optimal neighborhoods,
+relevant features and efﬁcient classiﬁers. ISPRS Journal of
+Photogrammetry and Remote Sensing, 105:286 – 304, 2015.
+2, 3
+
+[35] J. Wiest, H. Deusch, D. Nuss, S. Reuter, M. Fritzsche, and
+K. Dietmayer. Localization based on region descriptors in
+grid maps. In IEEE Intelligent Vehicles Symposium Proceed-
+ings, pages 793–799, June 2014. 2
+
+[36] R. W. Wolcott and R. M. Eustice. Fast LIDAR localization
+using multiresolution gaussian mixture maps.
+In IEEE In-
+ternational Conference on Robotics and Automation (ICRA),
+pages 2814–2821, May 2015. 1, 2
+
+[37] R. W. Wolcott and R. M. Eustice. Robust LIDAR local-
+ization using multiresolution gaussian mixture maps for au-
+tonomous driving. The International Journal of Robotics Re-
+search, 36(3):292–319, 2017. 1, 2
+
+[38] Y. Yao, Z. Luo, S. Li, T. Fang, and L. Quan. MVSNet:
+Depth inference for unstructured multi-view stereo. CoRR,
+abs/1804.02505, 2018. 4
+
+[39] H. Yin, L. Tang, X. Ding, Y. Wang, and R. Xiong. LocNet:
+Global localization in 3D point clouds for mobile vehicles.
+In IEEE Intelligent Vehicles Symposium Proceedings, June
+2018. 3
+
+[40] K. Yoneda, H. Tehrani, T. Ogawa, N. Hukuyama, and
+S. Mita. LiDAR scan feature for localization with highly
+precise 3-D map.
+In IEEE Intelligent Vehicles Symposium
+Proceedings, pages 1345–1350, June 2014. 2
+
+[41] A. Zeng, S. Song, M. Niener, M. Fisher, J. Xiao, and
+T. Funkhouser.
+3DMatch: Learning local geometric de-
+scriptors from RGB-D reconstructions. In IEEE Conference
+on Computer Vision and Pattern Recognition (CVPR), pages
+199–208, July 2017. 3, 5
+
+6398
+
+

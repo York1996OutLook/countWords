@@ -1,0 +1,1568 @@
+LO-Net: Deep Real-time Lidar Odometry
+
+Qing Li1, Shaoyang Chen1, Cheng Wang1, Xin Li2, Chenglu Wen1, Ming Cheng1, Jonathan Li1
+
+1Xiamen University, Fujian, China
+
+2Louisiana State University, Louisiana, USA
+
+{hello.qingli,tinyyoh}@gmail.com, xinli@cct.lsu.ed, {cwang,clwen,chm99,junli}@xmu.edu.cn
+
+Abstract
+
+We present a novel deep convolutional network pipeline,
+LO-Net,
+for real-time lidar odometry estimation. Un-
+like most existing lidar odometry (LO) estimations that
+go through individually designed feature selection,
+fea-
+ture matching, and pose estimation pipeline, LO-Net can
+be trained in an end-to-end manner. With a new mask-
+weighted geometric constraint loss, LO-Net can effectively
+learn feature representation for LO estimation, and can im-
+plicitly exploit the sequential dependencies and dynamics in
+the data. We also design a scan-to-map module, which uses
+the geometric and semantic information learned in LO-Net,
+to improve the estimation accuracy. Experiments on bench-
+mark datasets demonstrate that LO-Net outperforms exist-
+ing learning based approaches and has similar accuracy
+with the state-of-the-art geometry-based approach, LOAM.
+
+1. Introduction
+
+Estimating 3D position and orientation of a mobile plat-
+form is a fundamental problem in 3D computer vision, and
+it provides important navigation information for robotics
+and autonomous driving. Mobile platforms usually collect
+information from the real-time perception of the environ-
+ment and use on-board sensors such as lidars, Inertial Mea-
+surement Units (IMU), or cameras, to estimate their mo-
+tions. Lidar can obtain robust features of different environ-
+ments as it is not sensitive to lighting conditions, and it also
+acquires more accurate distance information than cameras.
+Therefore, developing an accurate and robust real-time lidar
+odometry estimation system is desirable.
+
+Classic lidar-based registration methods used in pose es-
+timation include Iterative Closest Point (ICP) [3], ICP vari-
+ants [24], and feature-based approaches [26]. But due to the
+nonuniformity and sparsity of the lidar point clouds, these
+methods often fail to match such data.
+ICP approaches
+ﬁnd transformations between consecutive scans by mini-
+mizing distances between corresponding points from these
+scans, but points in one frame may miss their spatial coun-
+
+Figure 1. Top: Data stream of LO-Net. Bottom: Network architec-
+ture of feature extraction layers (red dashed line) and mask predic-
+tion layers (black dashed line) . Our network takes two consecutive
+lidar scans as input and infers the relative 6-DoF pose. The output
+data will be further processed by the mapping module.
+
+terparts in the next frame, due to sparsity of scan resolu-
+tion. Feature-based methods are less sensitive to the qual-
+ity of scans, and hence, are more powerful. However, they
+are usually more computationally expensive. Furthermore,
+most feature-based methods are sensitive to another envi-
+ronmental factor, dynamic objects in the scene. These two
+issues inhibit many feature-based methods from producing
+effective odometry estimation.
+
+Recently, deep learning-based methods have outper-
+formed classic approaches in many computer vision prob-
+lems. Many Convolutional Neural Networks (CNNs) ar-
+chitectures and training models have become the state-of-
+the-art in these tasks. However, the exploration of effec-
+tive CNNs in some 3D geometric data processing problems,
+such as 6-DoF pose estimation, has not been this success-
+ful yet. Although quite a few CNN-based 6-DoF pose esti-
+mation (from RGB images) strategies [34, 43, 36, 39] have
+been explored recently, these methods often suffer from
+
+8473
+
+MaskMaskOdometryStSt-1Conv BlockF-deconvFire ModuleFCInputOutputOdometry RegressionNormalNormalNormal Estimationthe inaccurate depth prediction and scale drift. This pa-
+per proposes a new deep neural network architecture for
+lidar odometry estimation. We are inspired by the re-
+cent CNNs-based camera localization and pose regression
+works [43, 2, 16, 37] in the context of network structure de-
+sign, and the traditional lidar odometry methods [41, 21, 7]
+in the aspect of lidar mapping. The pipeline is illustrated
+in Figure 1. Our method can better accumulate motion-
+speciﬁc features by incorporating pairwise scans, better in-
+terpret the spatial relations of scans by applying normal con-
+sistency, and better locate effective static regions using a
+simultaneously learned uncertainty mask.
+
+The main contributions of this paper are as follows: 1)
+We propose a novel scan-to-scan lidar odometry estimation
+network which simultaneously learns to estimate the normal
+and a mask for dynamic regions. 2) We incorporate a spa-
+tiotemporal geometry consistency constraint to the network,
+which provides higher-order interaction between consecu-
+tive scans and helps better regularize odometry learning.
+3) We couple an efﬁcient mapping module into the estima-
+tion pipeline. By utilizing the normal and mask information
+learned from LO-Net, we can achieve a still real-time but
+more accurate odometry estimation.
+
+We compared our approach with existing representative
+methods on commonly used benchmark datasets KITTI [10,
+11] and Ford Campus Vision and Lidar Data Set [22]. Our
+approach achieves the state-of-the-art results. To our best
+knowledge, this is the ﬁrst neural network regression model
+that is comparable to the state-of-the-art geometry feature
+based techniques in 3D lidar odometry estimation.
+
+2. Related work
+
+A. ICP variants
+
+Most existing lidar-based pose estimation algorithms are
+built upon variants of the ICP method [3, 24].
+ICP iter-
+atively matches the adjacent scans and estimates the pose
+transformation, by minimizing distances between corre-
+sponded elements, until a speciﬁc termination condition is
+met. Despite its wide applicability, ICP is computationally
+expensive and sensitive to initial poses. Various ICP vari-
+ants, such as point-to-plane or plane-to-plane ICP, were de-
+veloped to improve ICP’s convergence speed and robustness
+against local minima.
+
+By combining point-to-point ICP and point-to-plane ICP,
+Segal et al. [28] introduce a plane-to-plane strategy called
+Generalized ICP (GICP). The covariance matrices of the lo-
+cal surfaces is used to match corresponding point clouds.
+Their results show better accuracy over original ICP. The
+Normal Iterative Closest Point (NICP) [29] takes into ac-
+count the normal and curvature of each local surface point.
+Experiments show that NICP can offer better robustness and
+performance than the GICP.
+
+Grant et al. [12] derive a novel Hough-based voting
+scheme for ﬁnding planes in laser point clouds. A plane-
+based registration method [23], that aligns detected planes,
+is adopted to compute the ﬁnal transformation. For the non-
+uniformly sampled point clouds from laser sensors, Seraﬁn
+et al. [30] present a fast method to extract robust feature
+points. They remove ground points by a ﬂat-region-removal
+method, then extract key-points of lines and planes, and use
+them to estimate the transformation. They show compara-
+tive results against the NARF key-point detector [31] and
+highlight that the feature extraction algorithm is applica-
+ble to the Simultaneous Localization and Mapping (SLAM)
+problem [13, 5]. Similarly, Douillard et al. [8] remove the
+ground points by voxelization, cluster the remaining points
+into the segments, then match these segments through a
+modiﬁed ICP algorithm.
+
+To overcome the sparsity of lidar point clouds, Collar
+Line Segments (CLS) [32] groups the points into polar bins,
+and generates line segments within each bin. Then, ICP can
+be used to register the corresponding lines and estimate the
+transformation between two scans. Although it produces
+better results than GICP [28], CLS is not real-time because
+the line segments computation is very slow.
+
+Over the past few years, Lidar Odometry And Mapping
+(LOAM) [41, 42] has been considered as the state-of-the-
+art lidar motion estimation method. It extracts the line and
+plane features in lidar data, and saves these features to the
+map for edge-line and plane-surface matching. LOAM dose
+not consider the dynamic objects in the scene and achieves
+low-drift and real-time odometry estimation by having two
+modules running in parallel. The estimated motion of scan-
+to-scan registration is used to correct the distortion of point
+clouds and guarantee the real-time performance. Finally,
+the odometry outputs are optimized through a map.
+
+B. Deep learning-based methods
+
+Deep learning has achieved promising results on the is-
+sues of visual odometry (VO) [34, 43, 40, 36], image-based
+pose estimation or localization [17, 16, 4], and point cloud
+classiﬁcation and segmentation [25, 19]. Unfortunately, us-
+ing deep learning methods to solve 3D lidar odometry prob-
+lems still remains challenging. Velas et al. [33] use CNNs
+to do lidar odometry estimation on lidar scan sequences.
+To train the CNNs, the original lidar data is transformed
+into dense matrix with three channels. However, this model
+formulates the odometry estimation as a classiﬁcation prob-
+lem, rather than a numerical regression, and it only esti-
+mates translational parameters. Hence, is not competent for
+accurate 6-DoF parameters estimation. The method of [33]
+and ours are conceptually similar, but our network better
+handles uncertain dynamic regions through mask predic-
+tion, and more effectively uses spatiotemporal consistency
+to regularize the learning for stable estimations.
+
+8474
+
+3. Method
+
+Odometry estimation algorithm uses consecutive point
+clouds obtained by a moving robot as inputs. Our LO-
+Net can interpret and exploit more information by perform-
+ing sequential learning rather than processing a single scan.
+And the features learned by LO-Net encapsulate geomet-
+ric information for the LO problem. As shown in Fig-
+ure 1, our LO-Net architecture consists of a normal esti-
+mation sub-network, a mask prediction sub-network, and a
+Siamese pose regression main-network. LO-Net takes two
+consecutive scans (St−1; St) as input and jointly estimates
+the 6-DoF relative pose between the scans, point-wise nor-
+mal vector, and a mask of moving objects for each scan.
+Despite being jointly trained, the three modules can be used
+independently for inference. The odometry outputs of the
+LO-Net are then reﬁned through a lidar mapping, which
+registers the lidar point clouds onto a globally constructed
+map. The ﬁnal output is the transformation of scan St with
+respect to the initial reference position, namely, the pose of
+each St in the world coordinate system.
+
+3.1. Lidar data encoding
+
+As shown in Figure 2, the 3D lidar point clouds with
+ring structures are usually represented by Cartesian coordi-
+nates. Additional information includes intensity values. To
+convert the original sparse and irregular point clouds into a
+structured representation that can be fed into networks, we
+encode the lidar data into point cloud matrices by a cylin-
+drical projection [6]. Given a 3D point p = (x, y, z) in lidar
+coordinate system (X, Y, Z), the projection function is
+
+Figure 2. Illustration of data encoding and normal estimation
+
+where (X ik − X i) is a 3D vector, wik is the weight of X ik
+with respect to X i, and [·]T is a k × 3 vector. kN (X i)k2 =
+1. We set wik = exp(−0.2|r(X ik ) − r(X i)|) to put more
+weight on points which have similar range value r with X i,
+and less weight otherwise. A commonly adopted strategy
+for solving Equation (2) is to perform a Principal Com-
+ponent Analysis (PCA), and convert the normal estimation
+to the computation of eigenvectors/eigenvalues of the co-
+variance matrix created from X i’s neighbors. In our work,
+this normal estimation needs to be embedded into the net-
+work. The computation of covariance matrices and their
+eigenvectors makes the training and estimation inefﬁcient.
+Hence, we simplify the normal estimation by computing the
+weighted cross products over X i’s four neighbors. Then we
+smooth normal vectors using a moving average ﬁlter [20].
+This can be formulated as
+
+α = arctan(y/x)/∆α
+β = arcsin(z/px2 + y2 + z2)/∆β
+
+(1)
+
+N (X i) = X
+
+(wik(X ik − X i) × wij(X ij − X i))
+
+where α and β are the indexes which set the points’ posi-
+tions in the matrix. ∆α and ∆β are the average angular res-
+olution between consecutive beam emitters in the horizontal
+and vertical directions, respectively. The element at (α, β)
+of the point cloud matrix is ﬁlled with intensity value and
+range value r = px2 + y2 + z2 of the lidar point p. We
+keep the point closer to the lidar when multiple points are
+projected into a same position. After applying this projec-
+tion on the lidar data, we get a matrix of size H × W × C,
+and C is the number of matrix channels. An example of the
+range channel of the matrix is shown in Figure 9.
+
+3.2. Geometric consistency constraint
+
+Normal estimation. As shown in Figure 2, given a 3D
+point X i and its k neighbors X ij , j = 1, 2, . . . , k on the
+grid. The normal N (X i) can be estimated by
+
+arg min
+N (X i)
+
+k[wi1(X i1 − X i), · · · , wik(X ik − X i)]T N (X i)k2
+
+(2)
+
+X ik ,X ij ∈P
+
+(3)
+where P is the set of neighboring points of X i, sorted coun-
+terclockwisely, as {X i1 , X i2 , X i3 , X i4} shown in Figure 2.
+The ﬁnal normal vectors are normalized to 1.
+
+Due to the temporal spatial geometric consistency of
+scan sequences, the points in a point cloud matrix should
+have the corresponding ones in another. Let X αβ
+t−1 and X αβ
+be the spatial corresponding point elements of the consecu-
+tive data matrices St−1 and St, respectively. We can derive
+ˆX αβ
+
+from X αβ
+
+t−1 through
+
+t
+
+t
+
+ˆX αβ
+
+t = P TtP −1X αβ
+t−1
+
+(4)
+
+where Tt is the relative rigid pose transformation between
+the consecutive scans. P denotes the projection process and
+P −1 is its inverse operation. Therefore, ˆX αβ
+are
+a pair of matching elements, and we can measure the simi-
+larity between the corresponding elements to verify the cor-
+rectness of pose transformation. The noise inevitably ex-
+ists in the coordinate and intensity values because of lidar
+
+and X αβ
+
+t
+
+t
+
+8475
+
+measurements. We compare the normal N (x) as it reﬂects
+smooth surface layouts and clear edge structures of the road
+environment (see Figure 8). Thus, the constraint of pose
+transformation can be formulated as minimizing
+
+Ln = X
+
+kN ( ˆX αβ
+
+t
+
+) − N (X αβ
+
+t
+
+)k1 · e|∇r( ˆX αβ
+
+t
+
+)|
+
+(5)
+
+αβ
+
+rotational pose components, previous works [17, 34] gave
+a weight regularizer λ to the rotational loss to jointly learn
+the 6-DoF pose. However, the hyper-parameter λ need to be
+tuned when using new data from different scene. To avoid
+this problem, we use two learnable parameters sx and sq
+to balance the scale between the translational and rotational
+components in the loss term [16].
+
+t
+
+where ∇r( ˆX αβ
+) is a local range smooth measurement, and
+∇ is the differential operator with α and β. The item e|·|
+allows the loss function to focus more on sharply changing
+areas in the scene.
+
+3.3. Lidar odometry regression
+
+To infer the 6-DoF relative pose between the scans St−1
+and St, we construct a two-stream network. The input to the
+network is encoded point cloud matrices with point-wise
+normal vectors. As shown in Figure 1, LO-Net concate-
+nates the features coming from two individual streams of
+feature extraction networks, then pass these concatenated
+features to the following four convolution units. The last
+three fully-connected layers output the 6-DoF pose between
+the input scans. The last two fully-connected layers are of
+dimensions 3 and 4, for regressing the translation x and rota-
+tion quaternion q, respectively. Finally, we get a 7D vector,
+which can be converted to a 4 × 4 transformation matrix.
+
+In order to reduce the number of model parameters and
+computation cost, we replace most of convolution layers of
+odometry regression network with ﬁreConv [15], which has
+been used for object detection from lidar point clouds [35].
+We follow [15] to construct our feature extraction layers.
+Since the width of intermediate features is much larger than
+its height, we only down-sample the width by using max-
+pooling during feature extraction. The detailed network ar-
+chitecture is illustrated in the supplementary material.
+
+Learning position and orientation simultaneously. In
+our method, we choose the quaternion to represent the ro-
+tation as it is a continuous and smooth representation of ro-
+tation. The quaternions q and −q map to the same rotation,
+so we need to constrain them to a unit hemisphere. We use
+Lx(St−1; St) and Lq(St−1; St) to demonstrate how to learn
+the relative translational and rotational components, respec-
+tively.
+
+Lx(St−1; St) = kxt − ˆxtkl
+ˆqt
+k ˆqtk
+
+Lq(St−1; St) = (cid:13)(cid:13)(cid:13)(cid:13)
+
+qt −
+
+(6)
+
+(cid:13)(cid:13)(cid:13)(cid:13)l
+
+Lo = Lx(St−1; St) exp(−sx) + sx
++ Lq(St−1; St) exp(−sq) + sq
+
+(7)
+
+We use the initial values of sx = 0.0 and sq = −2.5 for all
+scenes during the training.
+
+3.4. Mask prediction
+
+Given two consecutive scans St−1 and St in a static rigid
+scene, we can get point matching relationships of the en-
+coded data matrix pairs through transformation and cylin-
+drical projection, as illustrated in Section 3.2. Lidar point
+clouds are considered as the 3D model of the scene, and of-
+ten contain dynamic objects such as cars and pedestrians in
+the road environment. These factors may inhibit the learn-
+ing pipeline of odometry regression.
+
+Based on the encoder-decoder architecture (see Fig-
+ure 1), we deploy a mask prediction network [43, 38] to
+learn the compensation for dynamic objects, and improve
+the effectiveness of the learned features and the robustness
+of the network. The encoding layers share parameters with
+feature extraction layers of the odometry regression net-
+work, and we train these two networks jointly and simul-
+taneously. The deconvolution layers are variants of ﬁreDe-
+conv [15], and adopt the skip-connection. The detailed net-
+work architecture is described in the supplementary mate-
+rial.
+
+The predicted mask M(X αβ
+
+) ∈ [0, 1] indicates the area
+where geometric consistency can be modeled or not, and
+implicitly ensures the reliability of the features learned in
+the pose regression network. Therefore, the geometric con-
+sistency error as formulated in Equation (5) is weighted by
+
+t
+
+Ln = X
+
+M(X αβ
+
+t
+
+)kN ( ˆX αβ
+
+t
+
+) − N (X αβ
+
+t
+
+)k1 · e|∇r( ˆX αβ
+
+t
+
+)| .
+
+αβ
+
+(8)
+Note that there is no ground truth label or supervision to
+train the mask prediction. The network can minimize the
+loss by setting all values of the predicted mask to be 0. To
+avoid this, we add a cross-entropy loss as a regularization
+term
+
+Lr = − X
+
+log P (M(X αβ
+
+t
+
+) = 1).
+
+(9)
+
+where xt and qt are the ground truth relative translational
+and rotational components, ˆxt and ˆqt denote their predicted
+l refers to the distance norm in Euclidean
+counterparts.
+space, and we use the ℓ2-norm in this work. Due to the
+difference in scale and units between the translational and
+
+αβ
+
+In summary, our ﬁnal objective function to minimize for
+
+odometry regression is
+
+L = Lo + λnLn + λrLr
+
+(10)
+
+8476
+
+where λn and λr are the weighting factors for geometric
+consistency loss and mask regularization, respectively.
+
+3.5. Mapping: scan to map reﬁnement
+
+Consecutive scan-to-scan matches could introduce accu-
+mulative error, and also, may suffer when available com-
+mon feature points between consecutive frames are limited.
+Hence, we maintain a global map reconstructed from the
+previously scans, then use the registration between this map
+and the current scan to reﬁne the odometry. Unlike the tra-
+ditional scan-to-map approaches [41, 42], which directly
+match all the detected edge and plane points, we use the
+normal information (estimated by LO-Net) to select points
+from smooth area and use the mask (also an output of LO-
+Net) to exclude points from moving object.
+
+At a test time t, let [Tt, St] be the data from LO-Net. Tt
+is the odometry computed by LO-Net, which is used as the
+initial pose for mapping. St is a multi-channel data matrix
+containing the intensity, range, normal, and mask values of
+each point. The coordinates of each point can be calculated
+from its range value. The mapping takes the scan and the
+odometry as input, then matches the point cloud onto the
+global map. Figure 3 shows the diagram of our mapping
+module. The details of diagram are as follows:
+
+∗ : Based on the normal channels of St, we deﬁne a term
+
+c to evaluate the smoothness of the local area.
+
+c =
+
+3
+
+X
+
+k=1
+
+(K ∗ Nk)2
+
+(11)
+
+where Nk is the normal vector channel of St. The symbol ∗
+denotes the convolution operation. K is a 3 × 5 convolution
+kernel. For K, the value of the central element is -14, and
+the others are 1. We compute c for each point in St, and sort
+the values in increasing order. The ﬁrst nc points in the list,
+except for marked points of the mask, are selected as planar
+points as they are in the smooth area.
+
+Π : Compute an initial estimate of the lidar pose relative
+Mt−1, where Mt
+
+to its ﬁrst position: Minit = Mt−1M−1
+t−2
+is the lidar transformation at time t.
+
+Ψ : Eliminate the motion distortion of lidar point cloud
+from St by compensating for the ego-motion using a linear
+interpolation of Tt. Then, use Minit to transform the cor-
+rected scan St to the global coordinate system in which the
+map is located, and prepare for matching.
+
+Suppose pi = (pix , piy , piz , 1)T is a point in the scan St,
+mi = (mix , miy , miz , 1)T is the corresponding point in the
+map built by the previous scans, ni = (nix , niy , niz , 0)T is
+the unit normal vector at mi. The goal of mapping is to ﬁnd
+the optimal 3D rigid-body transformation
+
+ˆMopt = arg min
+
+ˆM
+
+X
+
+i
+
+(( ˆM · pi − mi) · ni)2 .
+
+(12)
+
+Figure 3. The mapping module consecutively computes the low-
+drift motion of the lidar in the world coordinate system and builds
+a 3D map for the traversed environment using the lidar data. The
+speciﬁc meanings of the function symbols are explained in the text.
+
+Θ : Iteratively register the scan onto the map by solving
+Equation (12) until a maximum number of iteration niter.
+Then, calculate the ﬁnal transformation Mt by accumulat-
+ing the transformation during the iteration ˆMk and the ini-
+tial pose Minit
+
+Mt =
+
+niter
+
+Y
+
+k=1
+
+ˆMkMinit .
+
+(13)
+
+Φ : Generate a new point cloud from the current scan
+St by linear interpolation of vehicle motion between Mt−1
+and Mt.
+
+Σ, N: Add the new point cloud to the map. Then, re-
+move the oldest point cloud scans to only maintain nm
+transformed scans in the map.
+
+This mapping-based reﬁnement is performed iteratively
+along with the scan sequence. It can further improve the
+accuracy of odometry estimation, as shown in Section 4.2.
+
+4. Experiments
+
+Implementation details. The point cloud data we
+use is captured by the Velodyne HDL-64 3D lidar sen-
+sor(64 laser beams, 10Hz, collecting about 1.3 million
+points/second). Therefore, during encoding the data ma-
+trix, we set H = 64 and W = 1800 by considering the
+sparseness of point clouds. The width of input data ma-
+trix are resized to 1792 by cropping both ends of the ma-
+trix. During the training, the length of input sequence
+is set to be 3. We form the temporal pairs by choos-
+ing scan [St−2, St−1], [St−1, St], [St−2, St]. LO-Net pre-
+dicts relative transformation between the pairs. The whole
+framework is implemented with the popular Tensorﬂow li-
+brary [1]. During the training, the mask prediction network
+is pre-trained using KITTI 3D object detection dataset, and
+all layers are trained simultaneously. The initial learning
+rate is 0.001 and exponentially decays after every 10 epochs
+until 0.00001. The loss weights of Equation (10) are set to
+be λn = 0.15 and λr = 0.05, and the batch size is 8. We
+
+8477
+
+OdometryScanfunction moduleΝMapGlobalPose*Ψ6-DOF pose flowscan flowmap flowΣMapGlobalPoseΠΦΘFigure 4. Trajectory (in red) and the built map of LO-
+Net+Mapping on Ford dataset 1. Our reconstructed trajectory
+(without enforcing loop closure) has small drift and forms closed
+loops accurately (yellow circle).
+
+choose the Adam [18] solver with default parameters for
+optimization. The network is trained on an NVIDIA 1080
+Ti GPU. For the mapping, we set the number of points in
+each scan nc = 0.01HW , the number of scans in the map
+nm = 100, and the number of iterations niter = 15.
+
+4.1. Datasets
+
+KITTI. The KITTI odometry dataset [10, 11] consists of
+22 independent sequences with stereo gray-scale and color
+camera images, point clouds captured by a Velodyne li-
+dar sensor, and calibration ﬁles. Sequences 00-10 (23201
+scans) are provided with ground truth pose obtained from
+the IMU/GPS readings. For sequences 11-21 (20351 scans),
+there is no ground truth available, and are provided for
+benchmarking purposes. The dataset is captured during
+driving in a variety of road environments with dynamic ob-
+jects and vegetation, such as highways, country roads and
+urban areas. The driving speed is up to 90km/h.
+
+FORD. The Ford Campus Vision and Lidar Data
+Set [22] consists time-synchronized 2D panoramic image,
+3D lidar point clouds and IMU/GPS data. Like KITTI, the
+lidar dataset is captured using horizontally scanning 3D li-
+dar mounted on the top of a vehicle. The dataset contains
+two loop closure sequences collected in different urban en-
+vironments, and there are more moving vehicles than the
+KITTI dataset.
+
+4.2. Odometry results
+
+Baselines. We compare our approach with several clas-
+ICP-point2point
+sic lidar odometry estimation methods:
+(ICP-po2po),
+ICP-point2plane (ICP-po2pl), GICP [28],
+CLS [32], LOAM [42] and Velas et al. [33]. The ﬁrst two
+ICP methods are implemented using the Point Cloud Li-
+brary [27]. As far as we know, [33] is the only deep learn-
+ing based lidar odometry method that has comparable re-
+sults, but it has no codes publicly available. We obtain the
+
+Figure 5. 3D trajectory plots of our method for KITTI Seq. 10. The
+mapping module effectively reduces the vertical drift generated in
+LO-Net.
+
+results of other evaluated methods using the publicly avail-
+able code, and some of the results are even better than those
+in the originally published papers. For LOAM algorithm, it
+achieves the best results among lidar-based methods in the
+KITTI odometry evaluation benchmark [11]. In order to en-
+able the map-based optimization of LOAM to run for every
+input scan and determine the full potential of the algorithm,
+we make some modiﬁcations and parameter adjustments in
+the originally published code. Loop closure detection is not
+implemented for all methods since we aim to test the limits
+of accurate odometry estimation.
+
+We ﬁrstly conduct the training and testing experiments
+on the KITTI dataset. Then, based on the model trained
+only on the KITTI dataset, we directly test the model on the
+Ford dataset without any further training or ﬁne-tuning. We
+use the KITTI odometry evaluation metrics [11] to quanti-
+tatively analyze the accuracy of odometry estimation. Ta-
+ble 1 shows the evaluation results of the methods on KITTI
+and Ford datasets.
+It can be seen that the results of LO-
+Net+Mapping are slightly better than LOAM and clearly
+superior to the others. Although there are differences be-
+tween the two datasets, such as different lidar calibration
+parameters and different systems for obtaining ground truth,
+our approach still achieves the best average performance
+among evaluated methods. Figure 5 shows the 3D trajec-
+tory plots of our method at different stages. Some trajecto-
+ries produced by different methods are shown in Figure 4
+and 6. Figure 7 shows the average evaluation errors on
+KITTI Seq. 00-10. More estimated trajectories for KITTI
+and Ford datasets are shown in our supplementary material.
+
+Ablation study. In order to investigate the importance
+of different loss components proposed in Section 3, we
+perform an ablation study on KITTI dataset by training
+and testing the LO-Net using different combinations of the
+losses. As shown in Table 2, the network achieves the best
+average performance when it is trained with the full loss.
+
+4.3. Normal results
+
+Since KITTI and Ford datasets do not provide a bench-
+mark for normal evaluation, we compare the normal esti-
+
+8478
+
+x (m)0100200300400500600y (m)0100z (m)0GTLO-NetLO-Net+MappingStart PointTable 1. Odometry results on KITTI and Ford datasets. Our network is trained on KITTI sequences and then tested on the two datasets.
+
+Seq.
+
+ICP-po2po
+trel
+rrel
+
+ICP-po2pl
+trel
+
+rrel
+
+GICP [28]
+trel
+rrel
+
+00†
+01†
+02†
+03†
+04†
+05†
+06†
+07*
+08*
+09*
+10*
+
+mean†
+mean*
+
+Ford-1
+Ford-2
+
+6.88
+11.21
+8.21
+11.07
+6.64
+3.97
+1.95
+5.17
+10.04
+6.93
+8.91
+7.13
+7.76
+
+8.20
+16.23
+
+2.99
+2.58
+3.39
+5.05
+4.02
+1.93
+1.59
+3.35
+4.93
+2.89
+4.74
+3.08
+3.98
+
+2.64
+2.84
+
+3.80
+13.53
+9.00
+2.72
+2.96
+2.29
+1.77
+1.55
+4.42
+3.95
+6.13
+5.15
+4.01
+
+3.35
+5.68
+
+1.73
+2.58
+2.74
+1.63
+2.58
+1.08
+1.00
+1.42
+2.14
+1.71
+2.60
+1.91
+1.97
+
+1.65
+1.96
+
+1.29
+4.39
+2.53
+1.68
+3.76
+1.02
+0.92
+0.64
+1.58
+1.97
+1.31
+2.23
+1.38
+
+3.07
+5.11
+
+0.64
+0.91
+0.77
+1.08
+1.07
+0.54
+0.46
+0.45
+0.75
+0.77
+0.62
+0.78
+0.65
+
+1.17
+1.47
+
+CLS [32]
+
+trel
+
+2.11
+4.22
+2.29
+1.63
+1.59
+1.98
+0.92
+1.04
+2.14
+1.95
+3.46
+2.11
+2.15
+
+10.54
+14.78
+
+rrel
+
+0.95
+1.05
+0.86
+1.09
+0.71
+0.92
+0.46
+0.73
+1.05
+0.92
+1.28
+0.86
+1.00
+
+3.90
+4.60
+
+LOAM [42]1
+trel
+
+rrel
+
+Velas et al. [33]2
+trel
+
+rrel
+
+LO-Net
+
+trel
+
+rrel
+
+LO-Net+Mapping
+trel
+
+rrel
+
+1.10 (0.78)
+2.79 (1.43)
+1.54 (0.92)
+1.13 (0.86)
+1.45 (0.71)
+0.75 (0.57)
+0.72 (0.65)
+0.69 (0.63)
+1.18 (1.12)
+1.20 (0.77)
+1.51 (0.79)
+1.35 (0.85)
+1.15 (0.83)
+
+1.68
+1.78
+
+0.53
+0.55
+0.55
+0.65
+0.50
+0.38
+0.39
+0.50
+0.44
+0.48
+0.57
+0.51
+0.50
+
+0.54
+0.49
+
+3.02
+4.44
+3.42
+4.94
+1.77
+2.35
+1.88
+1.77
+2.89
+4.94
+3.27
+3.12
+3.22
+
+NA
+NA
+
+NA
+NA
+NA
+NA
+NA
+NA
+NA
+NA
+NA
+NA
+NA
+NA
+NA
+
+NA
+NA
+
+1.47
+1.36
+1.52
+1.03
+0.51
+1.04
+0.71
+1.70
+2.12
+1.37
+1.80
+1.09
+1.75
+
+2.27
+2.18
+
+0.72
+0.47
+0.71
+0.66
+0.65
+0.69
+0.50
+0.89
+0.77
+0.58
+0.93
+0.63
+0.79
+
+0.62
+0.59
+
+0.78
+1.42
+1.01
+0.73
+0.56
+0.62
+0.55
+0.56
+1.08
+0.77
+0.92
+0.81
+0.83
+
+1.10
+1.29
+
+0.42
+0.40
+0.45
+0.59
+0.54
+0.35
+0.33
+0.45
+0.43
+0.38
+0.41
+0.44
+0.42
+
+0.50
+0.44
+
+1: The results on KITTI dataset outside the brackets are obtained by running the code, and those in the brackets are taken from [42].
+2: The results on KITTI dataset are taken from [33], and the results on Ford dataset are not available.
+†: The sequences of KITTI dataset that are used to train LO-Net.
+∗: The sequences of KITTI dataset that are not used to train LO-Net.
+trel: Average translational RMSE (%) on length of 100m-800m.
+rrel: Average rotational RMSE (◦/100m) on length of 100m-800m.
+
+Table 2. Comparison of different combinations of the losses. The
+mean values of translational and rotational RMSE on KITTI train-
+ing and testing sequences are computed as in Table 1. L′
+n indicates
+that the geometric consistency loss is not weighted by the mask.
+
+Seq.
+
+mean†
+mean∗
+
+Lo
+
+trel
+
+rrel
+
+1.46
+2.03
+
+1.01
+1.50
+
+Lo, L′
+
+trel
+
+1.18
+1.80
+
+n
+rrel
+
+0.70
+0.82
+
+Lo, Ln, Lr
+rrel
+trel
+
+1.09
+1.75
+
+0.63
+0.79
+
+Figure 6. Trajectory plots of KITTI Seq. 08 with ground truth. Our
+LO-Net+Mapping produces most accurate trajectory.
+
+Figure 7. Evaluation results on the KITTI Seq. 00-10. We show
+the average errors of translation and rotation with respect to path
+length intervals. Our LO-Net+Mapping achieves the best perfor-
+mance among all the evaluated methods.
+
+mation with that computed from the methods of PCA and
+Holzer [14]. The PCA estimates the surface normal at a
+point by ﬁtting a least-square plane from its surrounding
+neighboring points. In our experiment, we choose the radius
+
+r = 0.5m and r = 1.0m as the scale factor to determine the
+set of nearest neighbors of a point. As shown in Figure 8,
+our estimated normals can extract smooth scene layouts and
+clear edge structures.
+
+For quantitative comparison purpose, the normals com-
+puted from PCA with r = 0.5m are interpolated and used as
+the ground truth. Then a point-wise cosine distance is em-
+ployed to compute the error between the predicted normal
+and the ground truth.
+
+ei = arccos(ni · ˆni),
+
+ˆni ∈ N
+
+(14)
+
+where the angle ei is the normal error at point pi, ni and ˆni
+are ground truth and predicted normal vector of point pi, re-
+spectively. ˆni ∈ N denotes the point pi is a valid point with
+ground truth normal. The normal evaluations performed on
+KITTI dataset are shown in Table 3, our approach outper-
+forms the others under most metrics. The metrics include
+the mean and median values of ei, and the percent-good-
+normals whose angle fall within the given thresholds [9, 37].
+“GT median” which denotes that we set a normal direction
+for all points with the median value of the ground truth, is
+employed as a baseline. The evaluation demonstrates that
+
+8479
+
+Figure 8. Visual comparison of normal results on KITTI dataset.
+Different colors indicate different normal directions. Our results
+show smooth surface layouts and clear edge structures. The im-
+ages are cropped and reshaped for better visualization.
+
+Table 3. Normal performances of our method and the baseline
+methods on KITTI dataset.
+
+Method
+
+(Lower Better)
+Mean Median < 11.25◦ < 22.5◦ < 30◦
+
+(Higher Better)
+
+GT median
+PCA(r=1.0)
+
+Holzer et al. [14]
+
+Ours
+
+23.38
+14.38
+13.18
+10.35
+
+5.78
+11.55
+5.19
+3.29
+
+0.632
+0.470
+0.696
+0.769
+
+0.654
+0.895
+0.820
+0.865
+
+0.663
+0.946
+0.863
+0.897
+
+our estimated normal can serve as a reliable property of road
+scene for the geometric consistency constraint.
+
+4.4. Mask visualization
+
+Examples of the mask predicted by our network are vi-
+sualized in Figure 9. The highlighted areas suggest that
+LO-Net has learned to identify dynamic objects and tend to
+mask vegetation as unexplainable, and indicate that the net-
+work will pay less attention to these areas in the odometry
+regression. Dynamic objects and the relationships between
+scan sequences are important for odometry estimation prob-
+lems. They are difﬁcult to explicitly model but implicitly
+learned by our network.
+
+4.5. Runtime
+
+The lidar scanning point cloud are captured one by one
+over time, and processing these data in time is critical for
+robotic applications. Note that unlike image-based com-
+puter vision applications, the commonly used lidar sensors,
+such as Velodyne HDL-64 used in the KITTI and Ford
+dataset, rotate at a rate of 10Hz, that is 0.1s per-scan. There-
+fore, the real-time performance here means that the process-
+ing time of each scanning data is less than 0.1s. An NVIDIA
+1080 Ti GPU and an Intel Core i7 3.4GHz 4-core CPU are
+chose as our test platform. In test-time, the data batch-size
+of LO-Net is set to 1. Table 4 shows the average running
+times on Seq. 00 of KITTI dataset. The average processing
+time of our framework is about 80.1ms per-scan in total.
+Reasonably, most of our runtime is spent on the mapping
+procedure. Compared with most of traditional lidar odom-
+
+Figure 9. Sample visualizations of masks on range channel of the
+data matrix and its corresponding RGB images. The yellow pixels
+indicate the uncertain points in the surrounding environment for
+odometry estimation, such as points of moving cars, cyclists and
+others. The images are cropped and reshaped for better visualiza-
+tion.
+
+Table 4. Average runtime on KITTI Seq. 00
+
+Data preparation
+
+Inference
+
+Mapping
+
+total
+
+8.5ms on CPU
+
+10.2ms on GPU 61.4ms on CPU 80.1ms
+
+etry estimation methods, including the methods evaluated
+in Section 4.2, our map-based optimization is lightning fast
+since we consume a new representation of input data. Our
+approach enables real-time performance through a straight-
+forward pipeline on a platform with GPU. For lower per-
+formance platforms, we can also speed up the processing
+through the parallelism of LO-Net and the mapping. Cur-
+rently, some parts of our framework run on CPU, and we
+can implement them on GPU to further increase the speed.
+
+5. Conclusions
+
+We present a novel learning framework LO-Net to per-
+form lidar odometry estimation. An efﬁcient mapping mod-
+ule is coupled into the estimation framework to further im-
+prove the performance. Experiments on public benchmarks
+demonstrate the effectiveness of our framework over exist-
+ing approaches.
+
+There are still some challenges that need to be addressed:
+1) The point clouds are encoded into data matrices to feed
+into the network. Direct processing of 3D point clouds
+could be more practical for 3D visual tasks. 2) Our cur-
+rent network is trained with ground truth data. This limits
+the application scenarios of the network. In our future work,
+we will investigate in more detail the geometry feature rep-
+resentation learned by the network. We also plan to incor-
+porate recurrent units into this network to build temporal-
+related features. This may lead to an end-to-end framework
+without the need of costly collections of ground truth data.
+
+Acknowledgment
+
+This work is supported by National Natural Science
+Foundation of China (No. U1605254, 61728206), and the
+National Science Foundation of USA under Grants EAR-
+1760582.
+
+8480
+
+PCA(r=0.5)Holzer et al.Ours-YZY-XReferences
+
+[1] Mart´ın Abadi, Paul Barham, Jianmin Chen, Zhifeng Chen,
+Andy Davis, Jeffrey Dean, Matthieu Devin, Sanjay Ghe-
+mawat, Geoffrey Irving, Michael Isard, et al. Tensorﬂow:
+a system for large-scale machine learning.
+In OSDI, vol-
+ume 16, pages 265–283, 2016.
+
+[2] Noha Radwan Abhinav Valada and Wolfram Burgard. Deep
+auxiliary learning for visual localization and odometry.
+In
+Proceedings Of The IEEE International Conference On
+Robotics And Automation (ICRA), May 2018.
+
+[3] PJ Besl and ND McKay. A method for rgistration of 3-d
+shapes. IEEE Transaction on Pattern Analisys and Machine
+Intelligence, 14:239–256, 1992.
+
+[4] Samarth Brahmbhatt, Jinwei Gu, Kihwan Kim, James Hays,
+and Jan Kautz. Mapnet: Geometry-aware learning of maps
+for camera localization. arXiv preprint arXiv:1712.03342,
+2017.
+
+[5] Cesar Cadena, Luca Carlone, Henry Carrillo, Yasir Latif,
+Davide Scaramuzza, Jos´e Neira, Ian Reid, and John J
+Leonard. Past, present, and future of simultaneous localiza-
+tion and mapping: Toward the robust-perception age. IEEE
+Transactions on Robotics, 32(6):1309–1332, 2016.
+
+[6] Xiaozhi Chen, Huimin Ma, Ji Wan, Bo Li, and Tian Xia.
+Multi-view 3d object detection network for autonomous
+driving. In IEEE CVPR, volume 1, page 3, 2017.
+
+[7] Jean-Emmanuel Deschaud.
+
+Imls-slam:
+
+scan-to-
+arXiv preprint
+
+model matching based on 3d data.
+arXiv:1802.08633, 2018.
+
+[8] Bertrand Douillard, A Quadros, Peter Morton, James Patrick
+Underwood, Mark De Deuge, S Hugosson, M Hallstr¨om, and
+Tim Bailey. Scan segments matching for pairwise 3d align-
+ment. In 2012 IEEE International Conference on Robotics
+and Automation, pages 3033–3040. IEEE, 2012.
+
+[9] David F Fouhey, Abhinav Gupta, and Martial Hebert. Data-
+driven 3d primitives for single image understanding. In Pro-
+ceedings of the IEEE International Conference on Computer
+Vision, pages 3392–3399, 2013.
+
+[10] Andreas Geiger, Philip Lenz, Christoph Stiller, and Raquel
+Urtasun. Vision meets robotics: The kitti dataset. The Inter-
+national Journal of Robotics Research, 32(11):1231–1237,
+2013.
+
+[11] Andreas Geiger, Philip Lenz, and Raquel Urtasun. Are we
+ready for autonomous driving? the kitti vision benchmark
+suite. In Computer Vision and Pattern Recognition (CVPR),
+2012 IEEE Conference on, pages 3354–3361. IEEE, 2012.
+
+[12] W Shane Grant, Randolph C Voorhies, and Laurent Itti.
+Finding planes in lidar point clouds for real-time registration.
+In Intelligent Robots and Systems (IROS), 2013 IEEE/RSJ In-
+ternational Conference on, pages 4347–4354. IEEE, 2013.
+
+[13] Wolfgang Hess, Damon Kohler, Holger Rapp, and Daniel
+Andor. Real-time loop closure in 2d lidar slam. In Robotics
+and Automation (ICRA), 2016 IEEE International Confer-
+ence on, pages 1271–1278. IEEE, 2016.
+
+[14] Stefan Holzer, Radu Bogdan Rusu, Michael Dixon, Suat
+Gedikli, and Nassir Navab. Adaptive neighborhood selec-
+tion for real-time surface normal estimation from organized
+point cloud data using integral images. In Intelligent Robots
+
+and Systems (IROS), 2012 IEEE/RSJ International Confer-
+ence on, pages 2684–2689. IEEE, 2012.
+
+[15] Forrest N Iandola, Song Han, Matthew W Moskewicz,
+Khalid Ashraf, William J Dally,
+and Kurt Keutzer.
+Squeezenet: Alexnet-level accuracy with 50x fewer pa-
+rameters and¡ 0.5 mb model size.
+arXiv preprint
+arXiv:1602.07360, 2016.
+
+[16] Alex Kendall, Roberto Cipolla, et al. Geometric loss func-
+tions for camera pose regression with deep learning. In Proc.
+CVPR, volume 3, page 8, 2017.
+
+[17] Alex Kendall, Matthew Grimes, and Roberto Cipolla.
+Posenet: A convolutional network for real-time 6-dof cam-
+era relocalization. In Proceedings of the IEEE international
+conference on computer vision, pages 2938–2946, 2015.
+
+[18] Diederik P Kingma and Jimmy Ba. Adam: A method for
+arXiv preprint arXiv:1412.6980,
+
+stochastic optimization.
+2014.
+
+[19] Yangyan Li, Rui Bu, Mingchao Sun, and Baoquan Chen.
+
+Pointcnn. arXiv preprint arXiv:1801.07791, 2018.
+
+[20] Frank Moosmann. Interlacing self-localization, moving ob-
+ject tracking and mapping for 3d range sensors, volume 24.
+KIT Scientiﬁc Publishing, 2013.
+
+[21] Frank Moosmann and Christoph Stiller. Velodyne slam. In
+Intelligent Vehicles Symposium (IV), 2011 IEEE, pages 393–
+398. IEEE, 2011.
+
+[22] Gaurav Pandey, James R McBride, and Ryan M Eustice.
+Ford campus vision and lidar data set. The International
+Journal of Robotics Research, 30(13):1543–1552, 2011.
+
+[23] Kaustubh Pathak, Andreas Birk, Narunas Vaskevicius, and
+Jann Poppinga. Fast registration based on noisy planes with
+unknown correspondences for 3-d mapping. IEEE Transac-
+tions on Robotics, 26(3):424–441, 2010.
+
+[24] Franc¸ois Pomerleau, Francis Colas, Roland Siegwart, and
+St´ephane Magnenat. Comparing icp variants on real-world
+data sets. Autonomous Robots, 34(3):133–148, 2013.
+
+[25] Charles R Qi, Hao Su, Kaichun Mo, and Leonidas J Guibas.
+Pointnet: Deep learning on point sets for 3d classiﬁca-
+tion and segmentation. Proc. Computer Vision and Pattern
+Recognition (CVPR), IEEE, 1(2):4, 2017.
+
+[26] Radu Bogdan Rusu, Nico Blodow, and Michael Beetz.
+In
+Fast point feature histograms (fpfh) for 3d registration.
+Robotics and Automation, 2009. ICRA’09. IEEE Interna-
+tional Conference on, pages 3212–3217. Citeseer, 2009.
+
+[27] Radu Bogdan Rusu and Steve Cousins. 3d is here: Point
+cloud library (pcl). In Robotics and automation (ICRA), 2011
+IEEE International Conference on, pages 1–4. IEEE, 2011.
+[28] Aleksandr Segal, Dirk Haehnel, and Sebastian Thrun.
+In Robotics: science and systems, vol-
+
+Generalized-icp.
+ume 2, page 435, 2009.
+
+[29] Jacopo Seraﬁn and Giorgio Grisetti. Nicp: Dense normal
+based point cloud registration. In Intelligent Robots and Sys-
+tems (IROS), 2015 IEEE/RSJ International Conference on,
+pages 742–749. IEEE, 2015.
+
+[30] Jacopo Seraﬁn, Edwin Olson, and Giorgio Grisetti. Fast and
+robust 3d feature extraction from sparse point clouds. In In-
+telligent Robots and Systems (IROS), 2016 IEEE/RSJ Inter-
+national Conference on, pages 4105–4112. IEEE, 2016.
+
+8481
+
+[31] Bastian Steder, Radu Bogdan Rusu, Kurt Konolige, and Wol-
+fram Burgard. Point feature extraction on 3d range scans tak-
+ing into account object boundaries. In Robotics and automa-
+tion (icra), 2011 ieee international conference on, pages
+2601–2608. IEEE, 2011.
+
+[32] Martin Velas, Michal Spanel, and Adam Herout. Collar line
+segments for fast odometry estimation from velodyne point
+clouds. In ICRA, pages 4486–4495, 2016.
+
+[33] Martin Velas, Michal Spanel, Michal Hradis, and Adam Her-
+out. Cnn for imu assisted odometry estimation using velo-
+dyne lidar. In Autonomous Robot Systems and Competitions
+(ICARSC), 2018 IEEE International Conference on, pages
+71–77. IEEE, 2018.
+
+[34] Sen Wang, Ronald Clark, Hongkai Wen, and Niki Trigoni.
+Deepvo: Towards end-to-end visual odometry with deep re-
+current convolutional neural networks. In Robotics and Au-
+tomation (ICRA), 2017 IEEE International Conference on,
+pages 2043–2050. IEEE, 2017.
+
+[35] Bichen Wu, Alvin Wan, Xiangyu Yue, and Kurt Keutzer.
+Squeezeseg: Convolutional neural nets with recurrent crf for
+real-time road-object segmentation from 3d lidar point cloud.
+In 2018 IEEE International Conference on Robotics and Au-
+tomation (ICRA), pages 1887–1893. IEEE, 2018.
+
+[36] N. Yang, R. Wang, J. Stueckler, and D. Cremers. Deep vir-
+tual stereo odometry: Leveraging deep depth prediction for
+monocular direct sparse odometry. In European Conference
+on Computer Vision (ECCV), Sept. 2018. accepted as oral
+presentation, to appear, arXiv 1807.02570.
+
+[37] Zhenheng Yang, Peng Wang, Yang Wang, Wei Xu, and Ram
+Nevatia. Lego: Learning edge with geometry all at once by
+watching videos. In Proceedings of the IEEE Conference on
+Computer Vision and Pattern Recognition, pages 225–234,
+2018.
+
+[38] Zhenheng Yang, Peng Wang, Wei Xu, Liang Zhao, and
+Ramakant Nevatia. Unsupervised learning of geometry
+with edge-aware depth-normal consistency. arXiv preprint
+arXiv:1711.03665, 2017.
+
+[39] Zhichao Yin and Jianping Shi. Geonet: Unsupervised learn-
+ing of dense depth, optical ﬂow and camera pose. In Pro-
+ceedings of the IEEE Conference on Computer Vision and
+Pattern Recognition (CVPR), volume 2, 2018.
+
+[40] Huangying Zhan, Ravi Garg, Chamara Saroj Weerasekera,
+Kejie Li, Harsh Agarwal, and Ian Reid. Unsupervised learn-
+ing of monocular depth estimation and visual odometry with
+deep feature reconstruction.
+In Proceedings of the IEEE
+Conference on Computer Vision and Pattern Recognition,
+pages 340–349, 2018.
+
+[41] Ji Zhang and Sanjiv Singh. Loam: Lidar odometry and map-
+In Robotics: Science and Systems, vol-
+
+ping in real-time.
+ume 2, page 9, 2014.
+
+[42] Ji Zhang and Sanjiv Singh. Low-drift and real-time lidar
+odometry and mapping. Autonomous Robots, 41(2):401–
+416, 2017.
+
+[43] Tinghui Zhou, Matthew Brown, Noah Snavely, and David G
+Lowe. Unsupervised learning of depth and ego-motion from
+video. In CVPR, volume 2, page 7, 2017.
+
+8482
+
+

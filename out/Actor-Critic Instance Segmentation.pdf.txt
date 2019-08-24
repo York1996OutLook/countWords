@@ -1,0 +1,1327 @@
+Actor-Critic Instance Segmentation
+
+Nikita Araslanov∗
+
+Constantin A. Rothkopf †,§
+
+Stefan Roth∗,§
+
+∗Dept. of Computer Science
+
+†Institute of Psychology
+
+§Centre for Cognitive Science
+
+TU Darmstadt
+
+Abstract
+
+ambiguities in spatial context etc.; [20]).
+
+Most approaches to visual scene analysis have empha-
+sised parallel processing of the image elements. However,
+one area in which the sequential nature of vision is appar-
+ent, is that of segmenting multiple, potentially similar and
+partially occluded objects in a scene. In this work, we re-
+visit the recurrent formulation of this challenging problem
+in the context of reinforcement learning. Motivated by the
+limitations of the global max-matching assignment of the
+ground-truth segments to the recurrent states, we develop
+an actor-critic approach in which the actor recurrently pre-
+dicts one instance mask at a time and utilises the gradient
+from a concurrently trained critic network. We formulate
+the state, action, and the reward such as to let the critic
+model long-term effects of the current prediction and in-
+corporate this information into the gradient signal. Fur-
+thermore, to enable effective exploration in the inherently
+high-dimensional action space of instance masks, we learn
+a compact representation using a conditional variational
+auto-encoder. We show that our actor-critic model consis-
+tently provides accuracy beneﬁts over the recurrent baseline
+on standard instance segmentation benchmarks.
+
+1. Introduction
+
+Methods for instance segmentation have for the most
+part relied on the idea of parallel processing of the im-
+age elements and features within images [13]. However,
+previous work [31, 32] suggests that instance segmenta-
+tion can be formulated as a sequential visual task, akin
+to human vision, for which substantial evidence has re-
+vealed that many vision tasks beyond eye movements are
+solved sequentially [36]. While the segmentation accuracy
+of feed-forward pipelines hinges on a large number of ob-
+ject proposals, proposal-free recurrent models have a par-
+ticular appeal for instance segmentation where the number
+of instances is unknown. Also, the temporal context can
+facilitate a certain order of prediction: segmenting “hard”
+instances can be improved by conditioning on the masks
+of “easy” instances segmented ﬁrst (e.g., due to occlusions,
+
+A pivotal question of a recurrent formulation for instance
+segmentation is the assignment of the ground-truth seg-
+ments to timesteps, since the order in which they have to
+be predicted is unknown. Previously this was addressed us-
+ing the Kuhn-Munkres algorithm [18], computing the max-
+matching assignment. We provide some insight, however,
+that the ﬁnal prediction ordering depends on the initial as-
+signment. Furthermore, the loss for every timestep is not
+informative in terms of its effect on future predictions. Intu-
+itively, considering the future loss for the predictions early
+on should improve the segmentation accuracy at the later
+timesteps. Although this can be achieved by unrolling the
+recurrent states for gradient backpropagation, such an ap-
+proach quickly becomes infeasible for segmentation net-
+works due to high memory demands.
+
+In the past years, reinforcement learning (RL) has been
+showing promise in solving increasingly complex tasks [23,
+26, 27]. However, relatively little work has explored appli-
+cations of RL outside its conventional domain, which we
+attribute to two main factors: (1) computer vision prob-
+lems often lack the notion of the environment, which pro-
+vides the interacting agent with the reward feedback; (2)
+actions in the space of images are often prohibitively high-
+dimensional, leading to tough computational challenges.
+
+Here, we use an actor-critic (AC) model [5] to make
+progress regarding both technical issues of a recurrent ap-
+proach to instance segmentation. We use exploration noise
+to reduce the inﬂuence of the initial assignments on the
+segmentation ordering. Furthermore, we design a reward
+function that accounts for the future reward in the objec-
+tive function for every timestep. Our model does not use
+bounding boxes – often criticised due to their coarse rep-
+resentation of the objects’ shape. Instead, we built on an
+encoder-decoder baseline that makes pixelwise predictions
+directly at the scale of the input image. To enable the use
+of RL for instance segmentation with its associated high-
+dimensional output space, we propose to learn a compact
+action-space representation through the latent variables of
+a conditional variational auto-encoder [16], which we inte-
+grate into a recurrent prediction pipeline.
+
+8237
+
+Our experiments demonstrate that our actor-critic model
+improves the prediction quality over its baseline trained
+with the max-matching assignment loss, especially at the
+later timesteps, and performs well on standard instance seg-
+mentation benchmarks.
+
+2. Related Work
+
+Instance segmentation has received growing attention in
+the recent literature. One family of approaches focuses
+on learning explicit instance encodings [4, 9, 17, 24, 35],
+which are then clustered into individual instance masks us-
+ing post-processing. Another common end-to-end approach
+is to ﬁrst predict a bounding box for each instance using dy-
+namic pooling and then to produce a mask of the dominant
+object within the box using a separate segmentation net-
+work [13, 22]. These methods are currently best-practice,
+which can be attributed to the maturity of deep network-
+based object detection pipelines. However, this strategy is
+ultimately limited by the detection performance, proposal
+set, and the need of additional processing to account for
+pixel-level context [2, 8].
+
+Making the predictions sequentially points at an alter-
+native line of work. Romera-Paredes & Torr [32] used a
+convolutional LSTM [39] with a spatial softmax, which
+works well for isotropic object shapes and moderate scale
+variation. At each timestep, the recurrent model of Ren &
+Zemel [31] predicts a box location and scale for one in-
+stance. However, the extent of the available context for sub-
+sequent segmentations is limited by the box. Some bene-
+ﬁts of the temporal and spatial context have been also re-
+asserted on the task of object detection [7, 21] and, much
+earlier, on image generation [12] and recognition [19]. In
+contrast to these works, our method obviates the need for
+the intermediate bounding box representation and predicts
+masks directly at the image resolution.
+
+We cast the problem as a sequential decision process,
+as is studied by reinforcement learning (RL; [34]). Using
+the actor-critic framework [5], we deﬁne the actor as the
+model that sequentially produces instance masks, whereas
+the critic learns to provide a score characterising the ac-
+tor’s performance. Leveraging this score, the actor can be
+trained to improve the quality of its predictions. This is
+reminiscent of the more recent Generative Adversarial Net-
+works (GANs; [11]), in which a generator relies on a dis-
+criminator to improve. In particular, our model is similar
+to Wasserstein GANs [1] in that the discriminator is trained
+on a regression-like loss, and to SeqGAN [40] in that the
+generator’s predictions are sequential.
+
+One obstacle is the action dimensionality, since the sam-
+pling complexity required for exploration grows exponen-
+tially with the size of the actions. A naive action repre-
+sentation for dense pixelwise predictions would lead to an
+action space of dimension in the order of O(2H×W ) for im-
+
+Figure 1. Illustration of the max-matching assignment for instance
+segmentation. Consider an image with ground-truth instances a
+and b, and a recurrent model making predictions 1 and 2. In the
+constructed bipartite graph, each edge is assigned a weight corre-
+sponding to the IoU of the prediction with the connected ground
+truth. From the set of possible assignments, depicted by the or-
+ange and grey edges, max-matching ﬁnds the one that maximizes
+the sum of the IoUs. The loss is then computed independently for
+each timestep w.r.t. to this assignment to the ground truth.
+
+ages with resolution H × W . This is signiﬁcantly higher
+than the action spaces of standard problems studied by re-
+inforcement learning (usually, between 1 and 20), or even
+its applications to natural language processing [3, 30]. To
+address this, we suggest learning a compact representation
+using variational auto-encoders [16] to enable the crucial
+reduction of the problem from a high-dimensional discrete
+to a lower-dimensional continuous action space.
+
+3. Motivation
+
+As discussed above, we follow previous work in mod-
+elling instance segmentation as a sequential decision prob-
+lem [31, 32], yielding one instance per timestep t.
+
+To motivate our work, we revisit the standard prac-
+tice of using the Kuhn-Munkres algorithm [18] to assign
+the ground-truth instances to the predictions of a recurrent
+model. Let θ parametrise the model and Uθ ∈ Rn×n de-
+note a matrix of elements uij measuring the score of the
+ith prediction w.r.t. the jth ground truth (e.g., the IoU). The
+Kuhn-Munkres algorithm ﬁnds a permutation matrix as a
+solution to the max-matching problem
+
+arg max
+
+tr(UθP ),
+
+P ∈P
+
+(1)
+
+where P is the set of n-dimensional permutation matrices,
+
+1, Pij ∈ {0, 1}. Given a differentiable loss function lθ(i, j)
+(e.g., the binary cross-entropy), the model parameters θ are
+
+i.e. such that for all P ∈ P, we havePj Pij = 1,Pi Pij =
+then updated to minimisePij,Pij =1 lθ(i, j).
+
+Consider a simple case of two ground-truth segments,
+a and b, illustrated in Fig. 1. Without loss of generality,
+assume that the initial (random) model parameters yield
+u1a +u2b < u1b +u2a, i.e. the sum of scores for segmenting
+instance a ﬁrst and b second is lower than in the opposite or-
+der. This implies that max-matching will perform a gradient
+update step maximising the second sum, i.e. u1b + u2a, but
+not the ﬁrst. As a consequence, for the updated parameters,
+the score for the ordering b → a is likely to dominate also
+
+8238
+
+at the later iterations of training.1
+
+Previous work [20, 37] suggests that sequential mod-
+els are not invariant to the order of predictions, including
+object segments (c.f . supplemental material). The impli-
+cation from the example above is that sup u1a + u2b 6=
+sup u1b + u2a (the sup is w.r.t. θ). One conceivable rem-
+edy to alleviate the effect of the initial assignment is to in-
+troduce noise ǫ to the score matrix U (e.g., i. i. d. Gaussian),
+such that Eq. (1) becomes
+
+arg max
+
+P ∈P
+
+tr(cid:0)(Uθ + ǫ)P(cid:1).
+
+(2)
+
+However, the noise in the loss function will not account for
+the inherent causality of the temporal context in recurrent
+models: perturbation of one prediction affects the consecu-
+tive ones.
+
+In this work, we consider a more principled approach to
+encourage exploration of different orderings. We inject ex-
+ploration noise at the level of individual predictions made
+by an actor network, while a jointly trained critic network
+keeps track of the long-term outcome of the early predic-
+tions. This allows to include in the gradient to the actor
+not only the immediate loss, but also the contribution of the
+current prediction to the future loss. We achieve this by re-
+formulating the instance segmentation problem in the RL
+framework, which we brieﬂy introduce next.
+
+4. Notation and Deﬁnitions
+
+In the following, we deﬁne the key concepts of Markov
+decision processes (MDPs) in the context of instance seg-
+mentation. For a more general introduction, we refer to
+[34].
+
+We consider ﬁnite-horizon MDPs deﬁned by the tuple
+(S, A, T, r), where the state space S, the action space A,
+the state transition T : S × A → S, and the reward
+r : S × A → R are deﬁned as follows.
+
+State. The state st ∈ S of the recurrent system is a tuple
+of the input image (and its task-speciﬁc representations) and
+an aggregated mask, i.e. st = (I, Mt). The mask Mt simply
+accumulates previous instance predictions, which encour-
+ages the model to focus on yet unassigned pixels. Including
+I enables access to the original input at every timestep.
+
+Action. To limit the dimensionality of the action space, we
+deﬁne the action at ∈ A in terms of a compact mask repre-
+sentation. To achieve this, we pre-train a conditional varia-
+tional auto-encoder (cVAE; [16]) to reproduce segmentation
+masks. As a result, the action at ∈ A = Rl is a continuous
+latent representation of a binary mask and has dimension-
+ality l ≪ H · W , while the decoder D : Rl → RH×W
+“expands” the latent code to a full-resolution mask.
+
+1Note that a formal proof is likely non-trivial due to the stochastic na-
+
+ture of training.
+
+State transition. As implied by the state and action deﬁni-
+tions above, the state transition
+
+T(cid:0)(I, Mt), at(cid:1) =(cid:0)I, max(Mt, D(at))(cid:1)
+
+uses a pixelwise max of the previous mask and the decoded
+action, i.e. integrating the currently predicted instance mask
+into the previously accumulated predictions.
+
+(3)
+
+Reward. We design the reward function to measure the
+progress of the state transition towards optimising a certain
+segmentation criterion. The building block of the reward is
+the state potential [28], which we base on the max-matching
+assignment of the current predictions to the ground-truth
+segments, i.e.
+
+t
+
+φt := max
+
+k∈P(N )
+
+Xi=1
+
+F(Si, Tki ),
+
+(4)
+
+where Ti and S1≤i≤t are the N ground-truth masks and t
+predicted masks; P(N ) is a collection of all permutations
+of the set {1, 2, ..., N }. F(·, ·) denotes a distance between
+the prediction and a ground-truth mask and can be chosen
+with regard to the performance metric used by the speciﬁc
+benchmark (e.g., IoU, Dice, etc.). We elaborate on these
+choices in the experimental section.
+
+The state potential in Eq. (4) allows us to deﬁne the re-
+ward as the difference between the potentials of subsequent
+states
+
+rt := φ(st+1) − φ(st).
+
+(5)
+
+Note that since the (t + 1)st prediction might re-order the
+optimal assignment (computed with the Kuhn-Munkres al-
+gorithm), our deﬁnition of the reward is less restrictive w.r.t.
+the prediction order compared to previous work [31, 32],
+which enforces a certain assignment to compute the gradi-
+ent. Instead, our immediate reward allows to reason about
+the relative improvement of one set of predictions over an-
+other.
+
+5. Actor-Critic Approach
+
+5.1. Overview
+
+The core block of the actor model, shown in Fig. 2, is
+a conditional variational auto-encoder (cVAE; [16]). The
+encoder computes a compact vector of latent variables, en-
+coding a full-resolution instance mask. The decoder recov-
+ers such a mask from the latent code. Using the transition
+function deﬁned by Eq. (3), the latest prediction updates the
+state, and the procedure repeats until termination.
+
+The actor relies on two types of context with comple-
+mentary properties. As discussed above, the mask Mt is
+a component of the state st, which accumulates the masks
+produced in the previous steps.
+It provides permutation-
+invariant temporal context of high-resolution cues, encour-
+aging the network to focus on yet unlabelled pixels. The
+
+8239
+
+Time
+
+State st
+
+ht+1
+
+Encoder
+
+LSTM
+
+at ∼ N (µ, σ)
+
+Decoder
+
+Action
+
+State Pyramid
+
+Critic
+
+Q(st, at)
+
+st
+
+max(Mt−1, mt−1)
+
+Concatenate
+
+Actor
+
+Mask mt
+
+Figure 2. Actor-critic model for instance segmentation. The model relies on two types of context: a spatial permutation-invariant state
+st accumulates the masks, whereas the hidden LSTM state ht models a temporal context sensitive to the prediction ordering. The State
+Pyramid propagates the high-res information at multiple scales to the decoder to compensate the loss of resolution at the bottleneck section.
+
+hidden state of actor ht is implemented by the LSTM [14]
+at the bottleneck section and is unknown to the critic. In
+contrast to state st, the representation of the hidden state is
+learned and can be sensitive to the prediction ordering due
+to the non-commutative updates of the LSTM state. The
+hidden state, therefore, contributes to the temporal context
+and is shown to be particularly helpful for counting in the
+ablation study.
+
+We train our model in two stages as described next.
+
+5.2. Pre training
+
+We pre-train the actor cVAE to reconstruct the mask of
+the target segment. The input to the network consists of the
+image and the binary mask of a randomly chosen ground-
+truth instance. To account for the loss of high-resolution in-
+formation at the latent level, the decoder is conditioned on
+the input image and auxiliary channels of instance-relevant
+representations supplied at multiple scales, which we term
+State Pyramid. One channel contains the foreground predic-
+tion, while the other 8 channels encode the instance angle
+quantisation of [35], thereby binning the pixels of the object
+segment into quantised angles relative to the object’s cen-
+troid. These features assist in instance detection and disam-
+biguation, since a neighbourhood of orthogonal quantisa-
+tion vectors indicates occlusion boundaries and object cen-
+troids. Following Ren & Zemel [31], we predict the angles
+with a pre-processing network [25] trained in a standalone
+fashion.
+
+The auto-encoder uses the binary cross-entropy (BCE)
+as the reconstruction loss. For the latent representation, we
+use a Gaussian prior with zero mean and unit variance. The
+corresponding loss function is taken as the Kullback-Leibler
+divergence [16].
+
+5.3. Training
+
+During training, we learn a new encoder to sequentially
+predict segmentation masks. In addition to the image, the
+encoder also receives the auxiliary channels used during
+pre-training. In contrast, however, the encoder is encour-
+aged to learn instance-sensitive features, since the decoder
+expects the latent code of ground-truth masks.
+
+Algorithm 1 provides an outline of the training proce-
+dure. The actor is trained jointly with the critic from a buffer
+of experience accumulated in the episode execution step.
+In the policy evaluation, the critic is updated to minimise
+the error of approximating the expected reward, while in
+the policy iteration the actor receives the gradient from the
+critic to maximise the Q-value.
+
+Episode execution. For an image with N instances, we
+deﬁne the episode as the sequence of N predictions. The
+algorithm randomly selects a mini-batch of images without
+replacement and provides it as inputs to the actor. Using
+the reparametrisation trick [16], the actor samples an action
+corresponding to the next prediction of the instance mask.
+The results of the predictions and corresponding rewards
+are saved in a buffer. At the end of each episode, the target
+Q-value can be computed for each timestep t as a sum of
+immediate rewards.
+
+Policy evaluation. The critic network parametrised by φ,
+maintains an estimate of the Q-value deﬁned as a function
+of the state and action guided by the policy µ:
+
+Qφ(st, at) = E
+
+aj ∼µ(sj ),j>t" N
+Xi=t
+
+γi−tri(si, ai)#.
+
+(6)
+
+Note the ﬁnite sum in the expectation due to the ﬁnite num-
+ber of instances in the image. The critic’s loss LCritic,t for
+
+8240
+
+timestep t is deﬁned as the squared L2-distance with a dis-
+counted sum of rewards
+
+LCritic,t =(cid:13)(cid:13)(cid:13)(cid:13)(cid:13)
+
+Qφ(st, at) −
+
+N
+
+Xi=t
+
+2
+
+2
+
+,
+
+(7)
+
+γi−tri(cid:13)(cid:13)(cid:13)(cid:13)(cid:13)
+
+where γ ∈ (0, 1) is a discount factor that controls the time
+horizon, i.e. the degree to which future rewards should be
+accounted for. The hyperparameter γ allows to trade off the
+time horizon for the difﬁculty of the reward approximation:
+as γ → 1, the time horizon extends to all states, but the
+critic has to approximate a distant future reward based only
+on the current state and action. We update the parameters
+of the critic to minimise Eq. (7) using the samples of the
+state-actions and rewards in the buffer, and set γ = 0.9
+throughout our experiments.
+
+Policy iteration. The actor samples an action at ∈ A from
+a distribution provided by the current policy µθ : S → A,
+parametrised by θ and observes a reward rt computed by
+Eq. (5). Given the initial state s1,
+the actor’s goal is
+to ﬁnd the policy maximising the expected total reward,
+θ∗ = arg maxθ
+mated by the critic. To achieve this, the state st = (I, Mt)
+and the actor’s mask prediction mt are passed to the critic,
+which produces the corresponding Q-value. The gradient
+maximising the Q-value is computed via backpropagation
+and returned to the actor for its parameter update.
+
+i=1 γiri(si, ai)(cid:3), approxi-
+
+aj ∼µθ(sj )(cid:2)PN
+
+E
+
+Algorithm 1: Actor-critic training
+
+Initialise actor µθ(s) from pre-training and critic Qφ(s, a)
+for epoch = 1, NumEpochs do
+
+foreach minibatch do
+
+// accumulate buffer for replay
+buffer ← [ ]
+foreach (Image, {T }1,...,N ) in minibatch do
+
+Initialise mask M1 ← Empty
+Initialise state s1 ← (Image, M1)
+episode ← [ ]
+for t = 1, N do
+
+Sample action at ∼ µθ(st)
+Obtain next state st+1 = T (st, at) with Eq. (3)
+Add (st, at, st+1) to episode
+
+end
+Compute rewards for episode with Eq. (5)
+Add episode with rewards to buffer
+
+end
+// Batch-update critic from buffer
+foreach (st, at, rt, st+1) in buffer do
+
+φ ← φ − αcritic∇φ(cid:0)Qφ(st, at) − PN
+
+i=t γi−tri(cid:1)2
+
+end
+// Batch-update actor using critic
+Initialise states s1 from buffer
+for t = 1, N do
+
+Sample action at ∼ µθ(st)
+θ ← θ + αact∇at Qφ(st, at)∇θµθ(st) − βact∇θLKL
+Obtain next state st+1 = T (st, at) using Eq. (3)
+
+end
+
+end
+
+end
+
+We found that ﬁxing the decoder during training led to
+faster convergence. Since the critic only approximates the
+true loss, its gradient is biased, which in practice can break
+the assumption we maintain during training – that an opti-
+mal mask can be reconstructed from a normally-distributed
+latent space. We ﬁx the decoder and maintain the KL-
+divergence loss LKL while sampling new actions, thus en-
+couraging exploration of the action space. In our ablation
+study, we verify that such exploration improves the segmen-
+tation quality. Note that we do not pre-deﬁne the layout of
+the actions, but only maintain the Gaussian prior.
+
+To further improve the stability of the joint actor-critic
+training, we use a warm-up phase for the critic: episode
+execution and update of the critic happen without updating
+the actor for a number of epochs. This gives the critic the
+opportunity to adapt to the current action and state space of
+the actor. We could conﬁrm in our experiments that pre-
+training the decoder was crucial; omitting this step resulted
+in near-zero rewards from which it proved to be difﬁcult to
+train the critic even with the warm-up phase.
+
+Termination. We connect the hidden state ht and the last
+layer preceding it (via a skip connection) to a single unit
+predicting “1” to continue prediction, and “0” to indicate the
+terminal state. Using the ground-truth number of instances,
+we train this unit with the BCE loss.
+
+Inference. We recurrently run the actor network until the
+termination prediction. To obtain the masks, we discard the
+deviation part and only take the mean component of the ac-
+tion predicted by the encoder and pass it through the de-
+coder. We do not use the critic network at inference time.
+
+Implementation details.2 We use a simple architecture
+similar to [32] for both the critic and the actor networks
+trained with Adam [15] until the training loss on validation
+data does not improve (c.f . supplemental material).
+
+5.4. Discussion
+
+In the actor-critic model the critic plays the role of mod-
+elling the subsequent rewards for states si>t given state st.
+Hence, if the critic’s approximation is exact, the backprop-
+agation through time (BPTT; [38]) until the ﬁrst state is not
+needed: to train the actor, we need to compute the gradient
+w.r.t. the future rewards already predicted by the critic. The
+implication of this property is that memory-demanding net-
+works, such as those for dense prediction, can be effectively
+trained with truncated BPTT and the critic, even in case of
+long sequences. Moreover, using the critic’s approximation
+allows the reward be a non-differentiable, or even a discon-
+tinuous function tailored speciﬁcally to the task.
+
+2Code is available at https://github.com/visinf/acis/.
+
+8241
+
+6. Experiments
+
+In our experiments, we ﬁrst quantitatively verify the im-
+portance of the different components in our model and in-
+vestigate the sources of the accuracy beneﬁts of the actor-
+critic over the baseline. Then, we use two standard datasets
+of natural images for the challenging task of instance seg-
+mentation, and compare to the state of the art.
+
+6.1. Ablation study
+
+We design a set of experiments to investigate the effect of
+various aspects of the model using the A1 benchmark of the
+Computer Vision Problems in Plant Phenotyping (CVPPP)
+dataset [33].
+It comprises a collection of 128 images of
+plants taken from a top view with leaf annotation as ground-
+truth instance masks. We downsized the original 128 im-
+ages in the training set by a factor of two and used a cen-
+tre crop of size 224 × 224 for training. For the purpose of
+the ablation study, we randomly select 103 images from the
+CVPPP A1 benchmark for training and report the results on
+the remaining 25 images.
+
+Model
+
+BL
+BL-Trunc
+AC-Dice
+AC-Dice-NoKL
+AC-Dice-NoSP
+
+SBD ↑
+
+|DiC| ↓
+
+80.0
+79.4
+80.5
+75.4
+61.3
+
+1.08
+1.32
+0.88
+1.36
+1.52
+
+Table 1. Evaluation on CVPPP val. We compare our baseline
+with fully-unrolled (BL) and truncated BPTT (BL-Trunc) to the
+actor-critic with Dice-based reward, with (AC-Dice) and without
+(AC-Dice-NoKL) exploration, and without the State Pyramid (AC-
+Dice-NoSP).
+
+Model
+
+BL
+BL-Trunc
+AC-Dice
+
+LSTM + Mask
+
+Mask only
+
+LSTM only
+
+Dice∗ ↑ |DiC| ↓
+
+Dice∗ ↑ |DiC| ↓
+
+Dice∗ ↑ |DiC| ↓
+
+78.6
+77.9
+78.4
+
+1.04
+1.72
+0.88
+
+76.6
+77.5
+78.5
+
+4.36
+6.24
+1.92
+
+6.5
+6.0
+5.8
+
+3.96
+4.8
+4.36
+
+∗ computed by max-matching and ground-truth stopping
+
+Table 2. Contribution of recurrent states to mask quality measured
+by Dice and absolute Difference in Counting |DiC| on CVPPP val.
+
+To compute the reward for our actor-critic model
+(Eq. 4), we use the Dice score computed as F(S, T ) =
+. The dimensionality of the latent action space
+
+2 Pi SiTi
+
+Pi Si+Pi Ti
+is ﬁxed to 16.
+
+In the ﬁrst part of the experiment, we look into how dif-
+ferent terms in the loss inﬂuence the segmentation quality,
+measured in Symmetric Best Dice (SBD), and the absolute
+Difference in Counting (|DiC|). Speciﬁcally, we train ﬁve
+models: BL is an actor-only recurrent model trained with
+BPTT through all states. We use the BCE loss and Dice-
+based max-matching as a heuristic for assigning the ground
+truth to predictions, similar to [31, 32]. BL-Trunc is similar
+to BL, but is trained with a truncated, one-step BPTT. We
+train our actor-critic model AC-Dice with the gradient from
+the critic approximating the Dice score. AC-Dice-NoKL
+is similar to the AC-Dice model, i.e. the actor is trained
+jointly with the critic, but we remove the KL-divergence
+term, which encourages exploration, from the loss of the
+actor. Lastly, we verify the beneﬁt of the State Pyramid,
+the multi-res spatial information provided to the decoder,
+by comparing to a baseline without it (AC-Dice-NoSP).
+
+The side-by-side comparison of these models sum-
+marised in Table 1 reveals that AC-Dice exhibits a superior
+accuracy compared to the baselines, both in terms of Dice
+and counting. Using the KL-divergence term in the loss
+improves the actor, which shows the value of action explo-
+ration in a consistent action space. We also observed that
+training AC-Dice-NoKL would sometimes diverge and re-
+quire a restart with the critic warm-up. Furthermore, the
+State Pyramid aids the decoder, as removing it leads to a
+signiﬁcant drop in mask quality. Surprisingly, BL-Trunc
+is only slightly worse than BL, which however has by far
+
+Figure 3. Dice score of our actor-critic model (AC-Dice) vs. our
+baseline with truncated BPTT (BL-Trunc) on CVPPP val, aver-
+aged for each timestep. We observe the advantage of our actor-
+critic model at later timesteps, which is an expected beneﬁt of in-
+cluding the estimate of the expected reward in the loss at the ear-
+lier timesteps. Note that few images contain 20 instances, hence a
+large variance for this timestep.
+
+higher memory demands than both AC-Dice and BL-Trunc
+in the setting of long sequences and high resolutions.
+
+To further investigate the accuracy gains of the actor-
+critic model, we report the average Dice score w.r.t. the cor-
+responding timestep of the prediction in Fig. 3. The his-
+togram conﬁrms our intuition that incorporating the future
+reward into the loss function for every timestep, as mod-
+elled by the critic, should improve the segmentation quality
+at later stages of prediction:
+the Dice score of the actor-
+
+8242
+
+SBD ↑
+
+|DiC| ↓
+
+Model
+
+MWCov ↑ MUCov ↑ AvgFP ↓ AvgFN ↓
+
+Model
+
+RIS [32]
+MSU [33]
+Nottingham [33]
+IPK [29]
+DLoss [9]
+E2E [31]
+
+Ours (AC-Dice)
+
+66.6
+66.7
+68.3
+74.4
+84.2
+84.9
+
+79.1
+
+1.1
+2.3
+3.8
+2.6
+1.0
+0.8
+
+1.12
+
+Table 3. Segmentation quality of our actor-critic model on CVPPP
+test with Dice-based reward (AC-Dice) in terms of Symmetric Best
+Dice (SBD) and absolute Difference in Counting (|DiC|).
+
+critic model tends to be tangibly higher especially at the
+later timesteps. Note that the contribution of this beneﬁt to
+the average score across the dataset is moderated by not all
+images in the dataset having many instances.
+
+In the next part of the experiment, we are interested in the
+reliance of the model on the recurrent state. Recall that our
+model maintains the mask accumulating the previous pre-
+dictions as well as the hidden LSTM state. We alternately
+“block” either of the states by providing a zero tensor at
+every timestep. We consider only the ﬁrst n predictions to
+compute the Dice score, where n is the number of ground-
+truth masks. We stop the iterations if no termination was
+predicted after 21 timesteps, since the largest number of in-
+stances in our validation set is 20. The results in Table 2
+show that the LSTM plays an important role for counting
+(or, termination prediction), while having almost no effect
+on the mask quality. The networks have learned a sequen-
+tial prediction strategy given only the binary mask of previ-
+ously predicted pixels. Note that in contrast to the baseline
+models, actor-critic training reduced the dependence on the
+LSTM state for counting (AC-Dice), which suggests that
+the actor makes a better use of the state mask to make the
+next prediction.
+
+6.2. Instance segmentation
+
+We compare our method to other approaches on two
+standard instance segmentation benchmarks, each contain-
+ing a rich variety of small segments as well as occlusions.
+
+CVPPP dataset. For the CVPPP dataset used in our ab-
+lation study, this time we evaluate on the ofﬁcial 33 test
+images and train only our actor-critic model (AC-Dice) on
+the total 128 images in the training set.
+
+The results on the test set in Table 3 show that our
+method is on par with the state of the art in terms of count-
+ing while maintaining competitive segmentation accuracy.
+From a qualitative analysis, see examples in Fig. 4a, we ob-
+serve that the order of prediction follows a consistent, inter-
+pretable pattern: large leaves are segmented ﬁrst, whereas
+small and occluded leaves are segmented later. This follows
+our intuition for an optimal processing sequence: “easy”,
+
+DepthOrder [42]
+DenseCRF [41]
+AngleFCN+D [35]
+E2E [31]
+
+Ours (BL-Trunc)
+Ours (AC-IoU)
+
+Model
+
+E2E (Iter-1)
+E2E (Iter-3)
+E2E (Iter-5)
+
+Ours (BL-Trunc)
+Ours (AC-IoU)
+
+70.9
+74.1
+79.7
+80.0
+
+72.2
+75.6
+
+52.2
+55.2
+75.8
+66.9
+
+50.7
+57.3
+
+0.597
+0.417
+0.201
+0.764
+
+0.393
+0.338
+
+0.736
+0.833
+0.159
+0.201
+
+0.432
+0.309
+
+(a) KITTI test set
+
+MWCov ↑ MUCov ↑ AvgFP ↓ AvgFN ↓
+
+64.1
+71.3
+75.1
+
+70.4
+71.9
+
+54.8
+63.4
+64.6
+
+55.8
+59.5
+
+0.200
+0.417
+0.375
+
+0.313
+0.262
+
+0.375
+0.308
+0.283
+
+0.339
+0.253
+
+(b) KITTI validation set
+
+Table 4. Segmentation quality on KITTI. We evaluate our baseline
+with truncated BPTT (BL-Trunc) and the actor-critic with IoU-
+based reward (AC-IoU) in terms of mean weighted (MWCov) and
+unweighted (MUWCov) coverage, average false positive (AvgFP),
+and false negative (AvgFN) rates.
+
+more salient instances should be predicted ﬁrst to alleviate
+consecutive predictions of the “harder” ones. We also note,
+however, that the masks miss some ﬁne details, such as the
+stalk of the leaves, which limits the beneﬁts of the context
+for occluded instances. We believe this stems from the lim-
+ited capacity of the critic network to approximate a rather
+complex reward function.
+
+KITTI benchmark. We use the instance-level annotation
+of cars in the KITTI dataset [10] to test the scalability of
+our method to trafﬁc scenes. We used the same data split
+as in previous work [31, 35], which provides 3712 images
+for training, 144 images for validation, and 120 images for
+testing. While the validation and test sets have high-quality
+annotations [6, 41], the ground-truth masks in the training
+set are largely (> 95%) coarse or incomplete [6]. Hence,
+good generalisation from the training data would indicate
+that the algorithm can cope well with inaccurate ground-
+truth annotation.
+
+The evaluation criteria for this dataset are:
+
+the mean
+weighted coverage loss (MWCov), the mean unweighted
+coverage loss (MUCov),
+the average false positive rate
+(AvgFP), and the average false negative rate (AvgFN).
+MUCov is the maximum IoU of the ground truth with a pre-
+dicted mask, averaged over all ground-truth segments in the
+image. MWCov additionally weighs the IoUs by the area of
+the ground-truth mask. AvgFP is the fraction of mask pre-
+dictions that do not overlap with the ground-truth segments.
+Conversely, AvgFN measures the fraction of the ground-
+truth segments that do not overlap with the predictions.
+
+We use an IoU-based score function to compute the re-
+
+wards, i.e. F(S, T ) =
+
+Pi SiTi
+
+Pi Si+Pi Ti−Pi SiTi
+
+. To show the
+
+8243
+
+Input
+
+Ground truth
+
+Ours
+
+Last
+
+r
+e
+d
+r
+o
+n
+o
+i
+t
+c
+i
+d
+e
+r
+P
+
+(a) CVPPP validation set
+
+First
+
+(b) Predictions of our model on the KITTI validation set
+
+Figure 4. Predictions from our AC model on the CVPPP (a) and KITTI datasets (b). The colourmap (middle) encodes the prediction order
+and ranges from blue (ﬁrst prediction) to red (last prediction). Note how the prediction order follows a consistent pattern: large unoccluded
+segments tend to be segmented ﬁrst, whereas small and occluded segments are usually predicted last.
+
+beneﬁts of our Actor-Critic model (AC-IoU) for structured
+prediction at higher resolutions, we also train and report re-
+sults for a baseline, the actor-only model trained with one
+step BPTT (BL-Trunc). Considering the increased variabil-
+ity of the dataset compared to CVPPP, we used 64 latent
+dimensions for the action space.
+
+The results on the test are shown in Table 4a. Given the
+relatively small size of the test set, we also report the re-
+sults on the validation set in Table 4b, and use the available
+results from the equivalent evaluation of a state-of-the-art
+method [31] for reference.
+
+The results indicate that our method scales well to larger
+resolutions and action spaces and shows competitive accu-
+racy despite not using bounding box representations. Sim-
+ilar to our results on CVPPP, our model does not quite
+reach the accuracy of a recurrent model using bounding
+boxes [31] and a non-recurrent pipeline. We believe the seg-
+mentation accuracy is currently limited by the degree of the
+reward approximation by the critic and the representational
+power of the network architecture used by the actor model.
+As can be seen in some examples in Fig. 4b, without post-
+processing the masks are not always well aligned with the
+object and occlusion boundaries. However, we note that the
+prediction order also follows a consistent, interpretable pat-
+tern: nearby instances are segmented ﬁrst, while far-away
+instances are segmented last. Without hard-coding such
+constraints, the network appears to have learned a strategy
+that agrees with human intuition to segment larger, close-
+by objects ﬁrst and exploits the resulting context to make
+predictions in the order of increasing difﬁculty.
+
+7. Conclusions
+
+In the current study, we formalised the task of instance
+segmentation in the framework of reinforcement learning.
+Our proposed actor-critic model utilises exploration noise
+to alleviate the initialisation bias on the prediction ordering.
+Considering the high dimensionality of pixel-level actions,
+we enabled exploration in the action space by learning a
+low-dimensional representation through a conditional vari-
+ational auto-encoder. Furthermore, the critic approximates
+a reward signal that also accounts for future predictions at
+any given timestep.
+In our experiments, it attained com-
+petitive results on established instance segmentation bench-
+marks and showed improved segmentation performance at
+the later timesteps. Our model predicts instance masks di-
+rectly at the full resolution of the input image and does
+not require intermediate bounding box predictions, which
+stands in contrast to proposal-based architectures [13] or
+models delivering only a preliminary representation for fur-
+ther post-processing, e.g. [9, 35].
+
+These encouraging results suggest that actor-critic mod-
+els have potentially a wider application spectrum, since the
+critic network was able to learn a rather complex loss func-
+tion to a fair degree of approximation. In future work, we
+aim to improve our baseline model of the actor network,
+which currently limits the attainable accuracy.
+
+Acknowledgements. The authors would like to thank Stephan
+R. Richter for helpful discussions.
+
+8244
+
+References
+
+[1] Martin Arjovsky, Soumith Chintala, and L´eon Bottou.
+Wasserstein generative adversarial networks. In ICML, pages
+214–223, 2017. 2
+
+[2] Anurag Arnab and Philip H. S. Torr. Bottom-up instance seg-
+mentation using deep higher-order CRFs. In BMVC, 2016.
+2
+
+[3] Dzmitry Bahdanau, Philemon Brakel, Kelvin Xu, Anirudh
+Goyal, Ryan Lowe, Joelle Pineau, Aaron C. Courville, and
+Yoshua Bengio. An actor-critic algorithm for sequence pre-
+diction. In ICLR, 2017. 2
+
+[4] Min Bai and Raquel Urtasun. Deep watershed transform for
+instance segmentation. In CVPR, pages 2858–2866, 2017. 2
+[5] Andrew G. Barto, Richard S. Sutton, and Charles W. Ander-
+son. Neuronlike adaptive elements that can solve difﬁcult
+learning control problems. IEEE Trans. Systems, Man, and
+Cybernetics, SMC-13(5):834–846, 1983. 1, 2
+
+[6] Liang-Chieh Chen, Sanja Fidler, Alan L. Yuille, and Raquel
+Urtasun. Beat the MTurkers: Automatic image labeling from
+weak 3D supervision. In CVPR, pages 3198–3205, 2014. 7
+[7] Xinlei Chen and Abhinav Gupta. Spatial memory for context
+reasoning in object detection. In ICCV, pages 4106–4116,
+2017. 2
+
+[8] Jifeng Dai, Kaiming He, and Jian Sun. Instance-aware se-
+In
+
+mantic segmentation via multi-task network cascades.
+CVPR, pages 3150–3158, 2016. 2
+
+[9] Bert De Brabandere, Davy Neven, and Luc Van Gool.
+Semantic instance segmentation with a discriminative loss
+function. In CVPR Workshop on Deep Learning for Robotic
+Vision, 2017. 2, 7, 8
+
+[10] Andreas Geiger, Philip Lenz, and Raquel Urtasun. Are we
+ready for autonomous driving? The KITTI Vision Bench-
+mark Suite. In CVPR, pages 3354–3361, 2012. 7
+
+[11] Ian Goodfellow, Jean Pouget-Abadie, Mehdi Mirza, Bing
+Xu, David Warde-Farley, Sherjil Ozair, Aaron Courville, and
+Yoshua Bengio. Generative adversarial nets. In NIPS*2014,
+pages 2672–2680. 2
+
+[12] Karol Gregor, Ivo Danihelka, Alex Graves, Danilo Jimenez
+Rezende, and Daan Wierstra. DRAW: A recurrent neural
+network for image generation. In ICML, pages 1462–1471,
+2015. 2
+
+[13] Kaiming He, Georgia Gkioxari, Piotr Doll´ar, and Ross Gir-
+shick. Mask R-CNN. In ICCV, pages 2980–2988, 2017. 1,
+2, 8
+
+[14] Sepp Hochreiter and J¨urgen Schmidhuber. Long short-term
+
+memory. Neural computation, 9(8):1735–1780, 1997. 4
+
+[15] Diederik P. Kingma and Jimmy Ba. Adam: A method for
+
+stochastic optimization. In ICLR, 2015. 5
+
+[16] Diederik P. Kingma and Max Welling. Auto-encoding vari-
+
+ational bayes. In ICLR, 2014. 1, 2, 3, 4
+
+[17] Alexander Kirillov, Evgeny Levinkov, Bjoern Andres, Bog-
+dan Savchynskyy, and Carsten Rother. InstanceCut: From
+edges to instances with MultiCut.
+In CVPR, pages 7322–
+7331, 2017. 2
+
+[18] Harold W. Kuhn. The Hungarian method for the assignment
+
+problem. Naval Research Logistics, 2(1):83–98, 1955. 1, 2
+
+[19] Hugo Larochelle and Geoffrey E. Hinton. Learning to com-
+bine foveal glimpses with a third-order Boltzmann machine.
+In NIPS*2010, pages 1243–1251. 2
+
+[20] Xiaoxiao Li, Ziwei Liu, Ping Luo, Chen Change Loy, and
+Xiaoou Tang. Not all pixels are equal: Difﬁculty-aware se-
+mantic segmentation via deep layer cascade. In CVPR, pages
+6459–6468, 2017. 1, 3
+
+[21] Yao Li, Guosheng Lin, Bohan Zhuang, Lingqiao Liu, Chun-
+hua Shen, and Anton van den Hengel. Sequential person
+recognition in photo albums with a recurrent network.
+In
+CVPR, pages 5660–5668, 2017. 2
+
+[22] Yi Li, Haozhi Qi, Jifeng Dai, Xiangyang Ji, and Yichen Wei.
+Fully convolutional instance-aware semantic segmentation.
+In CVPR, pages 4438–4446, 2017. 2
+
+[23] Timothy P. Lillicrap, Jonathan J. Hunt, Alexander Pritzel,
+Nicolas Heess, Tom Erez, Yuval Tassa, David Silver, and
+Daan Wierstra. Continuous control with deep reinforcement
+learning. In ICLR, 2016. 1
+
+[24] Shu Liu, Jiaya Jia, Sanja Fidler, and Raquel Urtasun. SGN:
+Sequential grouping networks for instance segmentation. In
+ICCV, pages 3516–3524, 2017. 2
+
+[25] Jonathan Long, Evan Shelhamer, and Trevor Darrell. Fully
+In
+
+convolutional networks for semantic segmentation.
+CVPR, pages 3431–3440, 2015. 4
+
+[26] Volodymyr Mnih, Koray Kavukcuoglu, David Silver, Alex
+Graves, Ioannis Antonoglou, Daan Wierstra, and Martin
+Riedmiller. Playing Atari with deep reinforcement learning.
+In NIPS Deep Learning Workshop, 2013. 1
+
+[27] Volodymyr Mnih, Adri`a Puigdomen`ech Badia, Mehdi Mirza,
+Alex Graves, Timothy Lillicrap, Tim Harley, David Silver,
+and Koray Kavukcuoglu. Asynchronous methods for deep
+reinforcement learning. In ICML, pages 1928–1937, 2016. 1
+[28] Andrew Y. Ng, Daishi Harada, and Stuart Russell. Policy
+invariance under reward transformations: Theory and appli-
+cation to reward shaping. In ICML, pages 278–287, 1999.
+3
+
+[29] Jean-Michel Pape and Christian Klukas. 3-D histogram-
+based segmentation and leaf detection for rosette plants. In
+ECCV Workshops, pages 61–74, 2014. 7
+
+[30] Marc’Aurelio Ranzato, Sumit Chopra, Michael Auli, and
+Wojciech Zaremba. Sequence level training with recurrent
+neural networks. In ICLR, 2016. 2
+
+[31] Mengye Ren and Richard S. Zemel. End-to-end instance seg-
+mentation and counting with recurrent attention. In CVPR,
+pages 293–301, 2017. 1, 2, 3, 4, 6, 7, 8
+
+[32] Bernardino Romera-Paredes and Philip H. S. Torr. Recurrent
+instance segmentation. In ECCV, volume 6, pages 312–329,
+2016. 1, 2, 3, 5, 6, 7
+
+[33] Hanno Scharr, Massimo Minervini, Andrew P. French,
+Christian Klukas, David M. Kramer, Xiaoming Liu, Imanol
+Luengo, Jean-Michel Pape, Gerrit Polder, Danijela Vukadi-
+novic, Xi Yin, and Sotirios A. Tsaftaris. Leaf segmentation
+in plant phenotyping: A collation study. Mach. Vis. Appl.,
+27(4):585–606, 2016. 6, 7
+
+[34] Richard S. Sutton and Andrew G. Barto. Reinforcement
+learning: An Introduction. Adaptive computation and ma-
+chine learning. MIT Press, 1998. 2, 3
+
+8245
+
+[35] Jonas Uhrig, Marius Cordts, Uwe Franke, and Thomas Brox.
+Pixel-level encoding and depth layering for instance-level se-
+mantic labeling. In GCPR, pages 14–25, 2016. 2, 4, 7, 8
+
+[36] Shimon Ullman. Visual routines. In Readings in Computer
+
+Vision, pages 298–328. Elsevier, 1987. 1
+
+[37] Oriol Vinyals, Samy Bengio, and Manjunath Kudlur. Order
+
+matters: Sequence to sequence for sets. In ICLR, 2016. 3
+
+[38] Paul J. Werbos. Generalization of backpropagation with ap-
+plication to a recurrent gas market model. Neural networks,
+1:339–356, 1988. 5
+
+[39] Shi Xingjian, Zhourong Chen, Hao Wang, Dit-Yan Yeung,
+Wai-Kin Wong, and Wang-Chun Woo. Convolutional LSTM
+network: A machine learning approach for precipitation
+
+nowcasting. In NIPS*2015, pages 802–810. 2
+
+[40] Lantao Yu, Weinan Zhang, Jun Wang, and Yong Yu. Seq-
+GAN: Sequence generative adversarial nets with policy gra-
+dient. In AAAI, pages 2852–2858, 2017. 2
+
+[41] Ziyu Zhang, Sanja Fidler, and Raquel Urtasun.
+
+Instance-
+level segmentation for autonomous driving with deep
+densely connected MRFs. In CVPR, pages 669–677, 2016.
+7
+
+[42] Ziyu Zhang, Alexander G. Schwing, Sanja Fidler, and
+Raquel Urtasun. Monocular object instance segmentation
+and depth ordering with CNNs. In ICCV, pages 2614–2622,
+2015. 7
+
+8246
+
+

@@ -1,0 +1,1389 @@
+Segmentation-driven 6D Object Pose Estimation
+
+Yinlin Hu,
+
+Joachim Hugonot,
+
+Pascal Fua, Mathieu Salzmann
+
+{yinlin.hu, joachim.hugonot, pascal.fua, mathieu.salzmann}@epfl.ch
+
+CVLab, EPFL, Switzerland
+
+Abstract
+
+The most recent trend in estimating the 6D pose of rigid
+objects has been to train deep networks to either directly
+regress the pose from the image or to predict the 2D loca-
+tions of 3D keypoints, from which the pose can be obtained
+using a PnP algorithm. In both cases, the object is treated
+as a global entity, and a single pose estimate is computed.
+As a consequence, the resulting techniques can be vulnera-
+ble to large occlusions.
+
+In this paper, we introduce a segmentation-driven 6D
+pose estimation framework where each visible part of the
+objects contributes a local pose prediction in the form of
+2D keypoint locations. We then use a predicted measure of
+conﬁdence to combine these pose candidates into a robust
+set of 3D-to-2D correspondences, from which a reliable
+pose estimate can be obtained. We outperform the state-of-
+the-art on the challenging Occluded-LINEMOD and YCB-
+Video datasets, which is evidence that our approach deals
+well with multiple poorly-textured objects occluding each
+other. Furthermore, it relies on a simple enough architec-
+ture to achieve real-time performance.
+
+1. Introduction
+
+Image-based 6D object pose estimation is crucial in
+many real-world applications, such as augmented reality or
+robot manipulation. Traditionally, it has been handled by
+establishing correspondences between the object’s known
+3D model and 2D pixel locations, followed by using the
+Perspective-n-Point (PnP) algorithm to compute the 6 pose
+parameters [19, 38, 43]. While very robust when the object
+is well textured, this approach can fail when it is featureless
+or when the scene is cluttered with multiple objects occlud-
+ing each other.
+
+Recent work has therefore focused on overcoming these
+difﬁculties, typically using deep networks to either regress
+directly from image to 6D pose [17, 45] or to detect key-
+points associated to the object [35, 39], which can then be
+used to perform PnP. In both cases, however, the object is
+
+(a)
+
+(c)
+
+(b)
+
+(d)
+
+Figure 1: Global pose estimation vs our segmentation-driven
+approach. (a) The drill’s bounding box overlaps another occlud-
+ing it. (b) As a result, the globally-estimated pose [45] is wrong.
+(c) In our approach, only image patches labeled as corresponding
+to the drill contribute to the pose estimate. (d) It is now correct.
+
+still treated as a global entity, which makes the algorithm
+vulnerable to large occlusions. Fig. 1 depicts a such a case:
+The bounding box of an occluded drill overlaps other ob-
+jects that provide irrelevant information to the pose esti-
+mator and thereby degrade its performance. Because this
+happens often, many of these recent methods require an ad-
+ditional post-processing step to reﬁne the pose [23].
+
+In this paper, we show that more robust pose estimates
+can be obtained by combining multiple local predictions in-
+stead of a single global one. To this end, we introduce a
+segmentation-driven 6D pose estimation network in which
+each visible object patch contributes a pose estimate for the
+object it belongs to in the form of the predicted 2D projec-
+tions of predeﬁned 3D keypoints. Using conﬁdence values
+also predicted by our network, we then combine the most
+reliable 2D projections for each 3D keypoint, which yields
+a robust set of 3D-to-2D correspondences. We then use a
+RANSAC-based PnP strategy to infer a single reliable pose
+per object.
+
+Reasoning in terms of local patches not only makes our
+
+3385
+
+approach robust to occlusions, but also yields a rough seg-
+mentation of each object in the scene. In other words, un-
+like other methods that divorce object detection from pose
+estimation [35, 17, 45], we perform both jointly while still
+relying on a simple enough architecture for real-time per-
+formance.
+
+In short, our contribution is a simple but effective
+segmentation-driven network that produces accurate 6D ob-
+ject pose estimates without the need for post-processing,
+even when there are multiple poorly-textured objects oc-
+cluding each other. It combines segmentation and ensem-
+ble learning in an effective and efﬁcient architecture. We
+will show that it outperforms the state-of-the-art methods
+on standard benchmarks, such as the OccludedLINEMOD
+and YCB-Video datasets.
+
+2. Related Work
+
+In this paper, we focus on 6D object pose estimation
+from RGB images, without access to a depth map, unlike
+in RGBD-based methods [12, 2, 3, 28]. The classical ap-
+proach to performing this task involves extracting local fea-
+tures from the input image, matching them with those of the
+model, and then running a PnP algorithm on the resulting
+3D-to-2D correspondences. Over the years, much effort has
+been invested in designing local feature descriptors that are
+invariant to various transformations [27, 40, 41, 42, 34, 32],
+so that they can be matched more robustly [29, 30, 14].
+In parallel, increasingly effective PnP methods have been
+developed to handle noise and mismatches [20, 46, 22, 8].
+As a consequence, when dealing with well-textured objects,
+feature-based pose estimation is now fast and robust, even in
+the presence of mild occlusions. However, it typically strug-
+gles with heavily-occluded and poorly-textured objects.
+
+In the past, textureless objects have often been handled
+by template-matching [11, 12]. Image edges then become
+the dominant information source [21, 26], and researchers
+have developed strategies based on different distances, such
+as the Hausdorff [15] and the Chamfer [25, 13] ones, to
+match the 3D model against the input image. While ef-
+fective for poorly-textured objects, these techniques often
+fail in the presence of mild occlusions and cluttered back-
+ground.
+
+As in many computer vision areas, the modern take on
+6D object pose estimation involves deep neural networks.
+Two main trends have emerged: Either regressing from the
+image directly to the 6D pose [17, 45] or predicting 2D key-
+point locations in the image [35, 39], from which the pose
+can be obtained via PnP. Both approaches treat the object
+as a global entity and produce a single pose estimate. This
+makes them vulnerable to occlusions because, when consid-
+ering object bounding boxes as they all do, signal coming
+from other objects or from the background will contaminate
+the prediction. While, in [35, 45], this is addressed by seg-
+
+menting the object of interest, the resulting algorithms still
+provide a single, global pose estimate, that can be unreli-
+able, as illustrated in Fig. 1 and demonstrated in the results
+section. As a consequence, these methods typically invoke
+an additional pose reﬁnement step [23].
+
+To the best of our knowledge, the work of [16] and [31]
+constitute the only recent attempts at going beyond a global
+prediction. While the method in [16] also relies on segmen-
+tation via a state-of-the-art semantic segmentation network,
+its use of regression to 3D object coordinates, which reside
+in a very large space, yields disappointing performance. By
+contrast, the technique in [31] predicts multiple keypoint lo-
+cation heatmaps from local patches and assembles them to
+form an input to a PnP algorithm. The employed patches,
+however, remain relatively large, thus still potentially con-
+taining irrelevant information. Furthermore, at runtime,
+this approach relies on a computationally-expensive sliding-
+window strategy that is ill-adapted to real-time processing.
+Here, we propose to achieve robustness by combining mul-
+tiple local pose predictions in an ensemble manner and in
+real time, without post-processing. In the results section,
+we will show that this outperforms the state-of-the-art ap-
+proaches [17, 45, 35, 39, 16, 31].
+
+Note that human pose estimation [10, 44, 33] is also re-
+lated to global 6D object pose prediction techniques. By
+targeting non-rigid objects, however, these methods require
+the more global information extracted from larger recep-
+tive ﬁelds and are inevitably more sensitive to occlusions.
+By contrast, dealing with rigid objects allows us to rely on
+local predictions that can be robustly combined, and local
+visible object parts can provide reliable predictions for all
+keypoints. We show that assembling these local predictions
+yields robust pose estimates, even when observing multiple
+objects that occlude each other.
+
+3. Approach
+
+Given an input RGB image, our goal is to simultane-
+ously detect objects and estimate their 6D pose, in terms
+of 3 rotations and 3 translations. We assume the objects to
+be rigid and their 3D model to be available. As in [35, 39],
+we design a CNN architecture to regress the 2D projections
+of some predeﬁned 3D points, such as the 8 corners of the
+objects’ bounding boxes. However, unlike these methods
+whose predictions are global for each object and therefore
+affected by occlusions, we make individual image patches
+predict both to which object they belong and where the 2D
+projections are. We then combine the predictions of all
+patches assigned to the same object for robust PnP-based
+pose estimation.
+
+Fig. 2 depicts the corresponding workﬂow.
+
+In the re-
+mainder of this section, we ﬁrst introduce our two-stream
+network architecture. We then describe each stream indi-
+vidually and ﬁnally our inference strategy.
+
+3386
+
+Input
+
+CNN
+
+Result
+
+Figure 2: Overall workﬂow of our method. Our architecture has two streams: One for object segmentation and the other to regress 2D
+keypoint locations. These two streams share a common encoder, but the decoders are separate. Each one produces a tensor of a spatial
+resolution that deﬁnes an S × S grid over the image. The segmentation stream predicts the label of the object observed at each grid location.
+The regression stream predicts the 2D keypoint locations for that object.
+
+3.1. Network Architecture
+
+3.2. Segmentation Stream
+
+In essence, we aim to jointly perform segmentation by
+assigning image patches to objects and 2D coordinate re-
+gression of keypoints belonging to these objects, as shown
+in Fig. 3. To this end, we design the two-stream architecture
+depicted by Fig. 2, with one stream for each task. It has an
+encoder-decoder structure, with a common encoder for both
+streams and two separate decoders.
+
+For the encoder, we use the Darknet-53 architecture of
+YOLOv3 [37] that has proven highly effective and efﬁcient
+for objection detection. For the decoders, we designed net-
+works that output 3D tensors of spatial resolution S × S
+and feature dimensions Dseg and Dreg, respectively. This
+amounts to superposing an S × S grid on the image and
+computing a feature vector of dimension Dseg or Dreg per
+grid element. The spatial resolution of that grid controls the
+size of the image patches that vote for the object label and
+speciﬁc keypoint projections. A high resolution yields ﬁne
+segmentation masks and many votes. However, it comes at
+a higher computational cost, which may be unnecessary for
+our purposes. Therefore, instead of matching the 5 down-
+sampling layers of the Darknet-53 encoder with 5 upsam-
+pling layers, we only use 2 such layers, with a standard
+stride of 2. The same architecture, albeit with a different
+output feature size, is used for both decoder streams.
+
+To train our model end-to-end, we deﬁne a loss function
+
+L = Lseg + Lreg ,
+
+(1)
+
+which combines a segmentation and a regression term that
+we use to score the output of each stream. We now turn to
+their individual descriptions.
+
+The role of the segmentation stream is to assign a label
+to each cell of the virtual S × S grid superposed on the im-
+age, as shown in Fig. 3(a). More precisely, given K object
+classes, this translates into outputting a vector of dimension
+Dseg = K + 1 at each spatial location, with an additional
+dimension to account for the background.
+
+During training, we have access to both the 3D object
+models and their ground-truth pose. We can therefore gen-
+erate the ground-truth semantic labels by projecting the 3D
+models in the images while taking into account the depth
+of each object to handle occlusions. In practice, the images
+typically contain many more background regions than ob-
+ject ones. Therefore, we take the loss Lseg of Eq. 1 to be
+the Focal Loss of [24], a dynamically weighted version of
+the cross-entropy. Furthermore, we rely on the median fre-
+quency balancing technique of [6, 1] to weigh the different
+samples. We do this according to the pixel-wise class fre-
+quencies rather than the global class frequencies to account
+for the fact that objects have different sizes.
+
+3.3. Regression Stream
+
+The purpose of the regression stream is to predict the
+2D projections of predeﬁned 3D keypoints associated to the
+3D object models. Following standard practice [35, 9, 36],
+we typically take these keypoints to be the 8 corners of the
+model bounding boxes.
+
+Recall that the output of the regression stream is a 3D
+tensor of size S × S × Dreg. Let N be the number of 3D
+keypoints per object whose projection we want to predict.
+When using bounding box corners, N = 8. We take Dreg
+
+3387
+
+(a) Object segmentation.
+
+(b) Keypoint 2D locations.
+
+Figure 3: Outputs of our two-stream network.
+(a) The seg-
+mentation stream assigns a label to each cell of the virtual grid
+superposed on the image. (b) In the regression stream, each grid
+cell predicts the 2D keypoint locations of the object it belongs to.
+Here, we take the 8 bounding box corners to be our keypoints.
+
+to be 3N to represent at each spatial location the N pairs
+of 2D projection values along with a conﬁdence value for
+each.
+
+In practice, we do not predict directly the keypoints’ 2D
+coordinates. Instead, for each one, we predict an offset vec-
+tor with respect to the center of the corresponding grid cell,
+as illustrated by Fig. 3(b). That is, let c be the 2D location
+of a grid cell center. For the ith keypoint, we seek to predict
+an offset hi(c), such that the resulting location c + hi(c) is
+close to the ground-truth 2D location gi. During training,
+this is expressed by the residual
+
+∆i(c) = c + hi(c) − gi ,
+
+and by deﬁning the loss function
+
+N
+
+Lpos = X
+
+X
+
+k∆i(c)k1 ,
+
+c∈M
+
+i=1
+
+(2)
+
+(3)
+
+where M is the foreground segmentation mask, and k · k1
+denotes the L1 loss function, which is less sensitive to out-
+liers than the L2 loss. Only accounting for the keypoints
+that fall within the segmentation mask M focuses the com-
+putation on image regions that truly belong to objects.
+
+As mentioned above, the regression stream also outputs
+a conﬁdence value si(c) for each predicted keypoint, which
+is obtained via a sigmoid function on the network output.
+These conﬁdence values should reﬂect the proximity of the
+predicted 2D projections to the ground truth. To encourage
+this, we deﬁne a second loss term
+
+N
+
+Lconf = X
+
+X
+
+c∈M
+
+i=1
+
+(cid:13)(cid:13)si(c) − exp(−τ k∆i(c)k2)(cid:13)(cid:13)1 ,
+
+(4)
+
+where τ is a modulating factor. We then take the regression
+loss term of Eq. 1 to be
+
+Lreg = βLpos + γLconf ,
+
+(5)
+
+(a)
+
+(b)
+
+(c)
+
+(d)
+
+Figure 4: Combining pose candidates. (a) Grid cells predicted to
+belong to the cup are overlaid on the image. (b) Each one predicts
+2D locations for the corresponding keypoints, shown as green dots.
+(c) For each 3D keypoint, the n = 10 2D locations about which the
+network is most conﬁdent are selected. (d) Running a RANSAC-
+based PnP on these yields an accurate pose estimate, as evidenced
+by the correctly drawn outline.
+
+where β and γ modulate the inﬂuence of the two terms.
+
+Note that because the two terms in Eq. 5 focus on the
+regions that are within the segmentation mask M , their gra-
+dients are also backpropagated to these regions only. As
+in the segmentation stream, to account for pixel-wise class
+imbalance, we weigh the regression loss term for different
+objects according to the pixel-wise class frequencies in the
+training set.
+
+3.4. Inference Strategy
+
+At test time, given a query image, our network returns,
+for each foreground cell in the S × S grid of Section 3.1, an
+object class and a set of predicted 2D locations for the pro-
+jection of the N 3D keypoints. As we perform class-based
+segmentation instead of instance-based segmentation, there
+might be ambiguities if two objects of the same class are
+present in the scene. To avoid that, we leverage the fact that
+the predicted 2D keypoint locations tend to cluster accord-
+ing to the objects they correspond and use a simple pixel
+distance threshold to identify such clusters.
+
+For each cluster, that is, for each object, we then exploit
+the conﬁdence scores predicted by the network to estab-
+lish 2D-to-3D correspondences between the image and the
+object’s 3D model. The simplest way of doing so would
+
+3388
+
+ADD-0.1d
+
+REP-5px
+
+PoseCNN Heatmaps Ours
+
+PoseCNN BB8 Tekin
+
+iPose Heatmaps Ours
+
+Ape
+Can
+Cat
+Driller
+Duck
+Eggbox∗
+Glue∗
+Holepun.
+
+Average
+
+9.6
+45.2
+0.9
+41.4
+19.6
+22.0
+38.5
+22.1
+
+24.9
+
+16.5
+42.5
+2.8
+47.1
+11.0
+24.7
+39.5
+21.9
+
+25.8
+
+12.1
+39.9
+8.2
+45.2
+17.2
+22.1
+35.8
+36.0
+
+27.0
+
+34.6
+15.1
+10.4
+7.4
+31.8
+1.9
+13.8
+23.1
+
+17.2
+
+28.5
+1.2
+9.6
+0
+6.8
+-
+4.7
+2.4
+
+7.6
+
+7.0
+11.2
+3.6
+1.4
+5.1
+-
+6.5
+8.3
+
+6.2
+
+24.2
+30.2
+12.3
+-
+12.1
+-
+25.9
+20.6
+
+20.8
+
+64.7
+53.0
+47.9
+35.1
+36.1
+10.3
+44.9
+52.9
+
+43.1
+
+59.1
+59.8
+46.9
+59.0
+42.6
+11.9
+16.5
+63.6
+
+44.9
+
+Table 1: Comparison with the state of the art on Occluded-LINEMOD. We compare our results with those of PoseCNN [45], BB8 [35],
+Tekin [39], iPose [16], and Heatmaps [31]. The results missing from the original papers are denoted as “-”.
+
+PoseCNN BB8 Tekin Heatmaps
+
+iPose Ours
+
+4. Experiments
+
+FPS
+
+4
+
+3
+
+50
+
+4
+
+-
+
+22
+
+Table 2: Runtime comparisons on Occluded-LINEMOD. All
+methods run on a modern Nvidia GPU.
+
+NF
+
+HC
+
+B-2 B-10 Oracle
+
+Ape
+Can
+Cat
+Driller
+Duck
+Eggbox∗
+Glue∗
+Holepun.
+
+37.8
+53.4
+42.6
+52.5
+40.4
+12.8
+14.7
+58.4
+
+58.2
+58.7
+46.1
+56.8
+42.8
+11.2
+15.8
+62.2
+
+58.2
+58.5
+47.4
+59.4
+42.4
+12.1
+15.1
+63.1
+
+59.1
+59.8
+46.9
+59.0
+42.6
+11.9
+16.5
+63.6
+
+Average
+
+39.1
+
+44.0
+
+44.5
+
+44.9
+
+FPS
+
+26
+
+26
+
+25
+
+22
+
+84.0
+89.0
+60.6
+90.3
+55.6
+10.9
+41.0
+89.3
+
+65.1
+
+-
+
+Table 3: Accuracy (REP-5px) of different fusion strategies on
+Occluded-LINEMOD. We compare a No-Fusion (NF) scheme
+with one that relies on the Highest-Conﬁdence predictions, and
+with strategies relying on performing RANSAC on the n most
+conﬁdent predictions (B-n). Oracle consists of choosing the best
+2D location using the ground-truth one, and is reported to indicate
+the potential for improvement of our approach. In the bottom row,
+we also report the average runtime of these different strategies.
+
+be to use RANSAC on all the predictions. This, however,
+would signiﬁcantly slow down our approach. Instead, we
+rely on the n most conﬁdent 2D predictions for each 3D
+In practice, we found n = 10 to yield a good
+keypoint.
+balance between speed and accuracy. Given these ﬁltered
+2D-to-3D correspondences, we obtain the 6D pose of each
+object using the RANSAC-based version of the EPnP algo-
+rithm of [20]. Fig. 4 illustrates this procedure.
+
+We now evaluate our segmentation-driven multi-object
+6D pose estimation method on the challenging Occluded-
+LINEMOD [18] and YCB-Video [45] datasets, which, un-
+like LINEMOD [12], contain 6D pose annotations for each
+object appearing in all images.
+
+Metrics. We report the commonly-used 2D reprojection
+(REP) error [3]. It encodes the average distance between
+the 2D reprojection of the 3D model points obtained us-
+ing the predicted pose and those obtained with the ground-
+truth one. Furthermore, we also report the pose error in
+3D space [12], which corresponds to the average distance
+between the 3D points transformed using the predicted
+pose and those obtained with the ground-truth one. As
+in [23, 45], we will refer to it as ADD. Since many ob-
+jects in the datasets are symmetric, we use the symmetric
+version of these two metrics and report their REP-5px and
+ADD-0.1d values. They assume the predicted pose to be
+correct if the REP is below a 5 pixel threshold and the ADD
+below 10% of the model diameter, respectively. Below, we
+denote the objects that are considered to be symmetric by a
+∗ superscript.
+
+Implementation Details. As in [37], we scale the input
+image to a 608 × 608 resolution for both training and test-
+ing. Furthermore, when regressing the 2D reprojections, we
+normalize the horizontal and vertical positions to the range
+[0, 10]. We use the same normalization procedure when es-
+timating the conﬁdences.
+
+We train the network for 300 epochs on Occluded-
+LINEMOD and 30 epochs on YCB-Video. In both cases,
+the initial learning rate is set to 1e-3, and is divided by 10
+after 50%, 75%, and 90% of the total number of epochs.
+We use SGD as our optimizer with a momentum of 0.9
+and a weight decay of 5e-4. Each training batch con-
+tains 8 images, and we have employed the usual data aug-
+mentation techniques, such as random luminance, Gaus-
+
+3389
+
+ADD-0.1d
+
+REP-5px
+
+Mask R-CNN CPM [45] Ours Mask R-CNN CPM [45]
+
+[35]
+
+[39] Ours
+
+Average
+
+11.8
+
+12.7
+
+24.9
+
+27.0
+
+22.4
+
+22.9
+
+17.2
+
+7.6
+
+6.2
+
+44.9
+
+Table 4: Comparison with human pose estimation methods on Occluded-LINEMOD. We modiﬁed two state-of-the-art human pose
+estimation methods, Mask R-CNN [10] and CPM [44], to output bounding box corner locations. While both Mask R-CNN and CPM
+perform slightly better than other global-inference methods, our local approach yields much more accurate predictions.
+
+sian noise, translation and scaling. We have also used
+the random erasing technique of [47] for better occlu-
+sion handling. Our source code is publicly available at
+https://github.com/cvlab-epﬂ/segmentation-driven-pose.
+
+4.1. Evaluation on Occluded LINEMOD
+
+The Occluded-LINEMOD dataset [18] was compiled by
+annotating the pose of all the objects in a subset of the raw
+LINEMOD dataset [12]. This subset depicts 8 different ob-
+jects in 1214 images. Although depth information is also
+provided, we only exploit the RGB images. The Occluded-
+LINEMOD images, as the LINEMOD ones, depict a central
+object surrounded by non-central ones. The standard proto-
+col consists of only evaluating on the non-central objects.
+
+To create training data for our model, we follow the same
+procedure as in [23, 39]. We use the mask inferred from the
+ground-truth pose to segment the central object in each im-
+age, since, as mentioned above, it will not be used for eval-
+uation. We then generate synthetic images by inpainting be-
+tween 3 and 8 objects on random PASCAL VOC images [7].
+These objects are placed at random locations, orientations,
+and scales. This procedure still enables us to recover the oc-
+clusion state of each object and generate the corresponding
+segmentation mask. By using the central objects from any
+of the raw LINEMOD images, provided that it is one of the
+8 objects used in Occluded-LINEMOD, we generated 20k
+training samples.
+
+4.1.1 Comparing against the State of the Art
+
+We compare our method with the state-of-the-art ones
+of [45] (PoseCNN), [35] (BB8), and [39] (Tekin), which all
+produce a single global pose estimate. Furthermore, we also
+report the results of the recent work of [16] (iPose), and [31]
+(Heatmaps), which combines the predictions of multiple,
+relatively large patches, but relies on an expensive sliding-
+window strategy. Note that [31] also provides results ob-
+tained with the Feature Mapping technique [36]. However,
+most methods, including ours, do not use this technique,
+and for a fair comparison, we therefore report the results of
+all methods, including that of [31], without it.
+
+We report our results in Table 1 and provide the runtimes
+of the methods in Table 2. Our method outperforms the
+global inference ones [45, 35, 39] by a large margin. It also
+outperforms Heatmaps, albeit by a smaller one. Further-
+
+more, thanks to our simple architecture and one-shot infer-
+ence strategy, our method runs more than 5 times faster than
+Heatmaps. Our approach takes 30ms per-image for segmen-
+tation and 2D reprojection estimation, and 3-4ms per object
+for fusion. With 5 objects per image on average, this yields
+a runtime of about 50ms. Fig. 5 depicts some of our results.
+Note their accuracy even in the presence of large occlusions.
+
+4.1.2 Comparison of Different Fusion Strategies
+
+As shown in Fig. 4, not all local predictions of the 2D key-
+point locations are accurate. Therefore, the fusion strategy
+based on the predicted conﬁdence values that we described
+in Section 3.4 is important to select the right ones. Here, we
+evaluate its impact on the ﬁnal pose estimate. To this end,
+we report the results obtained by taking the 2D location with
+highest conﬁdence (HC) for each 3D keypoint and those ob-
+tained with different values n in our n most-conﬁdent selec-
+tion strategy. We refer to this as B-n for a particular value n.
+Note that we then use RANSAC on the selected 2D-to-3D
+correspondences.
+
+In Table 3, we compare the results of these different
+strategies with a fusion-free method that always uses the 2D
+reprojections predicted by the center grid, which we refer
+to as No-Fusion (NF). These results evidence that all fusion
+schemes outperform the No-Fusion one. We also report the
+Oracle results obtained by selecting the best predicted 2D
+location for each 3D keypoint using the ground truth 2D
+reprojections. This indicates that our approach could fur-
+ther beneﬁt from improving the conﬁdence predictions or
+designing a better fusion scheme.
+
+4.1.3 Comparison with Human Pose Methods
+
+Our method enables us to infer keypoints’ locations of rigid
+objects from local visible object regions and does not re-
+quire the more global information extracted from larger re-
+ceptive ﬁelds that are more sensitive to occlusions. To fur-
+ther back up this claim, we compare our approach to two
+state-of-the-art human pose estimation methods, Mask R-
+CNN [10] and Convolutional Pose Machines (CPM) [44],
+which target non-rigid objects, i.e. human bodies. By con-
+trast, dealing with rigid objects allows us to rely on local
+predictions that can be robustly combined. Speciﬁcally,
+we modiﬁed the publicly available code of Mask R-CNN
+
+3390
+
+Figure 5: Occluded-LINEMOD results.
+In each column, we show, from top to bottom: the foreground segmentation mask, all 2D
+reprojection candidates, the selected 2D reprojections, and the ﬁnal pose results. Our method generates accurate pose estimates, even in
+the presence of large occlusions. Furthermore, it can process multiple objects in real time.
+
+Figure 6: Comparison to PoseCNN [45] on YCB-Video. (Top) PoseCNN and (Bottom) Our method. This demonstrates the beneﬁts of
+reasoning about local object parts instead of globally, particularly in the presence of large occlusions.
+
+3391
+
+ADD-0.1d
+
+REP-5px
+
+4.2.1 Comparing against the State of the Art
+
+[45]
+
+[31] Ours
+
+[45]
+
+[31] Ours
+
+master chef can
+cracker box
+sugar box
+tomato soup can
+mustard bottle
+tuna ﬁsh can
+pudding box
+gelatin box
+potted meat can
+banana
+pitcher base
+bleach cleanser
+bowl∗
+mug
+power drill
+wood block∗
+scissors
+large marker
+large clamp∗
+extra large clamp∗
+foam brick∗
+
+3.6
+25.1
+40.3
+25.5
+61.9
+11.4
+14.5
+12.1
+18.9
+30.3
+15.6
+21.2
+12.1
+5.2
+29.9
+10.7
+2.2
+3.4
+28.5
+19.6
+54.5
+
+32.9
+62.6
+44.5
+31.1
+42.0
+6.8
+58.4
+42.5
+37.6
+16.8
+57.2
+65.3
+25.6
+11.6
+46.1
+34.3
+0
+3.2
+10.8
+29.6
+51.7
+
+Average
+
+21.3
+
+33.6
+
+33.0
+44.6
+75.6
+40.8
+70.6
+18.1
+12.2
+59.4
+33.3
+16.6
+90.0
+70.9
+30.5
+40.7
+63.5
+27.7
+17.1
+4.8
+25.6
+8.8
+34.7
+
+39.0
+
+0.1
+0.1
+7.1
+5.2
+6.4
+3.0
+5.1
+15.8
+23.1
+0.3
+0
+1.2
+4.4
+0.8
+3.3
+0
+0
+1.4
+0.3
+0.6
+0
+
+9.9
+24.5
+47.0
+41.5
+42.3
+7.1
+43.9
+62.1
+38.5
+8.2
+15.9
+12.1
+16.0
+20.3
+40.9
+2.5
+0
+0
+0
+0
+52.4
+
+3.7
+
+23.1
+
+21.0
+12.0
+56.3
+46.2
+70.3
+39.3
+17.3
+83.6
+60.7
+22.4
+33.5
+43.3
+13.3
+38.1
+43.3
+2.5
+8.8
+13.6
+7.6
+0.6
+13.5
+
+30.8
+
+Table 5: Comparison with the state of the art on YCB-
+Video. We compare our results with those of PoseCNN [45] and
+Heatmaps [31].
+
+and CPM to output 8 bounding box 2D corners instead of
+human keypoints and trained these methods on Occluded-
+LINEMOD. As shown in Table 4, while both Mask R-
+CNN and CPM perform slightly better than other global-
+inference methods, our local approach yields much more
+accurate predictions.
+
+4.2. Evaluation on YCB Video
+
+We also evaluate our method on the recent and more
+challenging YCB-Video dataset [45]. It comprises 21 ob-
+jects taken from the YCB dataset [5, 4], which are of diverse
+sizes and with different degrees of texture. This dataset con-
+tains about 130K real images from 92 video sequences, with
+an additional 80K synthetically rendered images that only
+contain foreground objects. It provides the pose annotations
+of all the objects, as well as the corresponding segmentation
+masks. The test images depict a great diversity in illumina-
+tion, noise, and occlusions, which makes this dataset ex-
+tremely challenging. As before, while depth information is
+available, we only use the color images. Here, we gener-
+ate complete synthetic images from the 80K synthetic fore-
+ground ones by using the same random background proce-
+dure as in Section 4.1. As before, we report results with-
+out feature mapping, because neither PoseCNN nor our ap-
+proach use them.
+
+Fewer methods have reported results on this newer dataset.
+In Table 5, we contrast our method with the two base-
+lines that have. Our method clearly outperforms both
+PoseCNN [45] and Heatmaps [31]. Furthermore, recall that
+our approach runs more than 5 times faster than either of
+them.
+
+In Fig. 6, we compare qualitative results of PoseCNN
+and ours. While our pose estimates are not as accurate on
+this dataset as on Occluded-LINEMOD, they are still much
+better than those of PoseCNN. Again, this demonstrates
+the beneﬁts of reasoning about local object parts instead of
+globally, particularly in the presence of large occlusions.
+
+4.3. Discussion
+
+Although our method performs well in most cases, it still
+can handle neither the most extreme occlusions nor tiny ob-
+jects. In such cases, the grid we rely on becomes to rough
+a representation. This, however, could be addressed by us-
+ing a ﬁner grid, or, to limit the computational burden, a grid
+that is adaptively subdivided to better handle each image
+region. Furthermore, as shown in Table 3, we do not yet
+match the performance of an oracle that chooses the best
+predicted 2D location for each 3D keypoint. This suggests
+that there is room to improve the quality of the predicted
+conﬁdence score, as well as the fusion procedure itself. This
+will be the topic of our future research.
+
+5. Conclusion
+
+We have introduced a segmentation-driven approach to
+6D object pose estimation, which jointly detects multiple
+objects and estimates their pose. By combining multiple
+local pose estimates in a robust fashion, our approach pro-
+duces accurate results without the need for a reﬁnement
+step, even in the presence of large occlusions. Our experi-
+ments on two challenging datasets have shown that our ap-
+proach outperforms the state of the art, and, as opposed to
+the best competitors, predicts the pose of multiple objects
+in real time. In the future, we will investigate the use of
+other backbone architectures for the encoder and devise a
+better fusion strategy to select the best predictions before
+performing PnP. We will also seek to incorporate the PnP
+step of our approach into the network, so as to have a com-
+plete, end-to-end learning framework.
+
+Acknowledgments This work was supported in part by
+the Swiss Innovation Agency Innosuisse. We would like
+to thank Markus Oberweger and Yi Li for clarifying details
+about their papers, and Zheng Dang for helpful discussions.
+
+3392
+
+References
+
+[1] Vijay Badrinarayanan, Alex Kendall, and Roberto Cipolla.
+SegNet: A Deep Convolutional Encoder-Decoder Architec-
+ture for Image Segmentation. arXiv Preprint, 2015. 3
+
+[2] Eric Brachmann, Alexander Krull, Frank Michel, Stefan
+Gumhold, Jamie Shotton, and Carsten Rother. Learning 6D
+Object Pose Estimation Using 3D Object Coordinates.
+In
+European Conference on Computer Vision, 2014. 2
+
+[3] Eric Brachmann,
+
+Frank Michel, Alexander Krull,
+Michael Ying Yang, Stefan Gumhold, and Carsten Rother.
+Uncertainty-Driven 6D Pose Estimation of Objects and
+Scenes from a Single RGB Image.
+In Conference on
+Computer Vision and Pattern Recognition, 2016. 2, 5
+
+[4] Berk Calli, Arjun Singh, James Bruce, Aaron Walsman, Kurt
+Konolige, Siddhartha Srinivasa, Pieter Abbeel, and Aaron M
+Dollar. Yale-CMU-Berkeley dataset for robotic manipula-
+tion research. In International Journal of Robotics Research,
+2017. 8
+
+[5] Berk Calli, Arjun Singh, Aaron Walsman, Siddhartha Srini-
+vasa, Pieter Abbeel, and Aaron Dollar. The YCB Object
+and Model Set: Towards Common Benchmarks for Manip-
+ulation Research. In International Conference on Advanced
+Robotics, 2015. 8
+
+[6] David Eigen and Rob Fergus. Predicting Depth, Surface
+Normals and Semantic Labels with a Common Multi-Scale
+Convolutional Architecture. In International Conference on
+Computer Vision, 2015. 3
+
+[7] Mark Everingham, Luc Van Gool, Christopher K.
+
+I.
+Williams, John M. Winn, and Andrew Zisserman. The Pas-
+cal Visual Object Classes (VOC) Challenge.
+International
+Journal of Computer Vision, 88(2):303–338, 2010. 6
+
+[8] Luis Ferraz, Xavier Binefa, and Francesc Moreno-Noguer.
+Very Fast Solution to the PnP Problem with Algebraic Out-
+lier Rejection. In Conference on Computer Vision and Pat-
+tern Recognition, pages 501–508, 2014. 2
+
+[9] Alexander Grabner, Peter M. Roth, and Vincent Lepetit. 3D
+Pose Estimation and 3D Model Retrieval for Objects in the
+Wild. In Conference on Computer Vision and Pattern Recog-
+nition, 2018. 3
+
+[10] Kaiming He, Georgia Gkioxari, Piotr Doll´ar, and Ross B.
+In International Conference on
+
+Girshick. Mask R-CNN.
+Computer Vision, 2017. 2, 6
+
+[11] Stefan Hinterstoißer, Cedric Cagniart, Slobodan Ilic, Peter F.
+Sturm, Nassir Navab, Pascal Fua, and Vincent Lepetit. Gra-
+dient Response Maps for Real-Time Detection of Textureless
+Objects.
+IEEE Transactions on Pattern Analysis and Ma-
+chine Intelligence, 34, May 2012. 2
+
+[12] Stefan Hinterstoißer, Vincent Lepetit, Slobodan Ilic, Stefan
+Holzer, Gary R. Bradski, Kurt Konolige, and Nassir Navab.
+Model Based Training, Detection and Pose Estimation of
+Texture-Less 3D Objects in Heavily Cluttered Scenes.
+In
+Asian Conference on Computer Vision, 2012. 2, 5, 6
+
+[13] Edward Hsiao, Sudipta N. Sinha, Krishnan Ramnath, Si-
+mon Baker, C. Lawrence Zitnick, and Richard Szeliski. Car
+Make and Model Recognition Using 3D Curve Alignment.
+In IEEE Winter Conference on Applications of Computer Vi-
+sion, 2014. 2
+
+[14] Yinlin Hu, Rui Song, and Yunsong Li. Efﬁcient Coarse-
+to-Fine Patch Match for Large Displacement Optical Flow.
+In Conference on Computer Vision and Pattern Recognition,
+2016. 2
+
+[15] Daniel P. Huttenlocher, Gregory A. Klanderman, and
+William Rucklidge. Comparing Images Using the Hausdorff
+Distance. IEEE Transactions on Pattern Analysis and Ma-
+chine Intelligence, pages 850–863, 1993. 2
+
+[16] Omid Hosseini Jafari, Siva Karthik Mustikovela, Karl
+iPose:
+Pertsch, Eric Brachmann, and Carsten Rother.
+Instance-Aware 6D Pose Estimation of Partly Occluded Ob-
+jects. In Asian Conference on Computer Vision, 2018. 2, 5,
+6
+
+[17] Wadim Kehl, Fabian Manhardt, Federico Tombari, Slobo-
+dan Ilic, and Nassir Navab. SSD-6D: Making Rgb-Based 3D
+Detection and 6D Pose Estimation Great Again. In Interna-
+tional Conference on Computer Vision, 2017. 1, 2
+
+[18] Alexander Krull,
+
+Eric Brachmann,
+
+Frank Michel,
+Michael Ying Yang, Stefan Gumhold, and Carsten Rother.
+Learning Analysis-By-Synthesis for 6D Pose Estimation in
+RGB-D Images. In International Conference on Computer
+Vision, 2015. 5, 6
+
+[19] Vincent Lepetit and Pascal Fua. Monocular Model-Based
+3D Tracking of Rigid Objects: A Survey. Now Publishers,
+September 2005. 1
+
+[20] Vincent Lepetit, Francesc Moreno-Noguer, and Pascal Fua.
+EPnP: An Accurate O(n) Solution to the PnP Problem. In-
+ternational Journal of Computer Vision, 2009. 2, 5
+
+[21] Dengwang Li, Haiguang Wang, Yong Yin, and Xiuying
+Wang. Deformable Registration Using Edge-preserving
+Scale Space for Adaptive Image-guided Radiation Therapy.
+In Journal of Applied Clinical Medical Physics, 2011. 2
+
+[22] Shiqi Li, Chi Xu, and Ming Xie. A Robust O(n) Solution to
+the Perspective-N-Point Problem. IEEE Transactions on Pat-
+tern Analysis and Machine Intelligence, pages 1444–1450,
+2012. 2
+
+[23] Yi Li, Gu Wang, Xiangyang Ji, Yu Xiang, and Dieter Fox.
+DeepIM: Deep Iterative Matching for 6D Poseestimation. In
+European Conference on Computer Vision, 2018. 1, 2, 5, 6
+
+[24] Tsung-Yi Lin, Priya Goyal, Ross B. Girshick, Kaiming He,
+and Piotr Doll´ar. Focal Loss for Dense Object Detection. In
+International Conference on Computer Vision, 2017. 3
+
+[25] Ming-Yu Liu, Oncel Tuzel, Ashok Veeraraghavan, and Rama
+Chellappa. Fast Directional Chamfer Matching. In Confer-
+ence on Computer Vision and Pattern Recognition, 2010. 2
+
+[26] David G. Lowe. Fitting Parameterized Three-Dimensional
+Models to Images. IEEE Transactions on Pattern Analysis
+and Machine Intelligence, 13(5):441–450, June 1991. 2
+
+[27] David G. Lowe. Distinctive Image Features from Scale-
+Invariant Keypoints. International Journal of Computer Vi-
+sion, 20(2):91–110, Nov 2004. 2
+
+[28] Frank Michel, Alexander Kirillov, Eric Brachmann, Alexan-
+der Krull, Stefan Gumhold, Bogdan Savchynskyy, and
+Carsten Rother. Global Hypothesis Generation for 6D Ob-
+ject Pose Estimation. In Conference on Computer Vision and
+Pattern Recognition, 2017. 2
+
+3393
+
+[29] Marius Muja and David G. Lowe. Fast Approximate Near-
+est Neighbors with Automatic Algorithm Conﬁguration. In
+International Conference on Computer Vision, 2009. 2
+
+[44] Shih-En Wei, Varun Ramakrishna, Takeo Kanade, and Yaser
+In Conference on
+
+Sheikh. Convolutional Pose Machines.
+Computer Vision and Pattern Recognition, 2016. 2, 6
+
+[45] Yu Xiang, Tanner Schmidt, Venkatraman Narayanan, and
+Dieter Fox. PoseCNN: A Convolutional Neural Network for
+6D Object Pose Estimation in Cluttered Scenes. In Robotics:
+Science and Systems, 2018. 1, 2, 5, 6, 7, 8
+
+[46] Yinqiang Zheng, Yubin Kuang, Shigeki Sugimoto, Kalle
+˚Astr¨om, and Masatoshi Okutomi. Revisiting the PnP Prob-
+lem: A Fast, General and Optimal Solution. In International
+Conference on Computer Vision, 2013. 2
+
+[47] Zhun Zhong, Liang Zheng, Guoliang Kang, Shaozi Li, and
+In arXiv
+
+Yi Yang. Random Erasing Data Augmentation.
+Preprint, 2017. 6
+
+[30] Marius Muja and David G. Lowe. Scalable Nearest Neighbor
+Algorithms for High Dimensional Data. IEEE Transactions
+on Pattern Analysis and Machine Intelligence, 2014. 2
+
+[31] Markus Oberweger, Mahdi Rad, and Vincent Lepetit. Mak-
+ing Deep Heatmaps Robust to Partial Occlusions for 3D Ob-
+ject Pose Estimation. In European Conference on Computer
+Vision, 2018. 2, 5, 6, 8
+
+[32] Yuki Ono, Eduard Trulls, Pascal Fua, and Kwang Moo Yi.
+LF-Net: Learning Local Features from Images. In Advances
+in Neural Information Processing Systems, 2018. 2
+
+[33] George Papandreou, Tyler Zhu, Liang-Chieh Chen, Spyros
+Gidaris, Jonathan Tompson, and Kevin Murphy. PersonLab:
+Person Pose Estimation and Instance Segmentation with a
+Bottom-Up, Part-Based, Geometric Embedding Model.
+In
+European Conference on Computer Vision, 2018. 2
+
+[34] Georgios Pavlakos, Xiaowei Zhou, Aaron Chan, Konstanti-
+nos G. Derpanis, and Kostas Daniilidis. 6-DoF Object Pose
+from Semantic Keypoints.
+In International Conference on
+Robotics and Automation, 2017. 2
+
+[35] Mahdi Rad and Vincent Lepetit. BB8: A Scalable, Accu-
+rate, Robust to Partial Occlusion Method for Predicting the
+3D Poses of Challenging Objects Without Using Depth. In
+International Conference on Computer Vision, 2017. 1, 2, 3,
+5, 6
+
+[36] Mahdi Rad, Markus Oberweger, and Vincent Lepetit. Fea-
+ture Mapping for Learning Fast and Accurate 3D Pose In-
+ference from Synthetic Images. In Conference on Computer
+Vision and Pattern Recognition, 2018. 3, 6
+
+[37] Joseph Redmon and Ali Farhadi. YOLOv3: An Incremental
+
+Improvement. In arXiv Preprint, 2018. 3, 5
+
+[38] Fred Rothganger, Svetlana Lazebnik, Cordelia Schmid, and
+Jean Ponce. 3D Object Modeling and Recognition Using Lo-
+cal Afﬁne-Invariant Image Descriptors and Multi-View Spa-
+tial Constraints. International Journal of Computer Vision,
+66(3), 2006. 1
+
+[39] Bugra Tekin, Sudipta N. Sinha, and Pascal Fua. Real-Time
+Seamless Single Shot 6D Object Pose Prediction. In Confer-
+ence on Computer Vision and Pattern Recognition, 2018. 1,
+2, 5, 6
+
+[40] Engin Tola, Vincent Lepetit, and Pascal Fua. DAISY: An
+Efﬁcient Dense Descriptor Applied to Wide Baseline Stereo.
+IEEE Transactions on Pattern Analysis and Machine Intelli-
+gence, 32(5):815–830, 2010. 2
+
+[41] Tomasz Trzcinski, C. Mario Christoudias, Vincent Lep-
+etit, and Pascal Fua. Learning Image Descriptors with the
+Boosting-Trick. In Advances in Neural Information Process-
+ing Systems, December 2012. 2
+
+[42] Shubham Tulsiani and Jitendra Malik. Viewpoints and Key-
+In Conference on Computer Vision and Pattern
+
+points.
+Recognition, 2015. 2
+
+[43] Daniel Wagner, Gerhard Reitmayr, Alessandro Mulloni, Tom
+Drummond, and Dieter Schmalstieg. Pose Tracking from
+Natural Features on Mobile Phones. In International Sym-
+posium on Mixed and Augmented Reality, September 2008.
+1
+
+3394
+
+

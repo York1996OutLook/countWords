@@ -1,0 +1,1670 @@
+Fast Neural Architecture Search of Compact Semantic Segmentation Models
+
+via Auxiliary Cells
+
+Vladimir Nekrasov∗ Hao Chen∗ Chunhua Shen
+The University of Adelaide, Australia
+
+Ian Reid
+
+E-mail: {vladimir.nekrasov, hao.chen01, chunhua.shen, ian.reid}@adelaide.edu.au
+
+Abstract
+
+Automated design of neural network architectures tai-
+lored for a speciﬁc task is an extremely promising, albeit
+inherently difﬁcult, avenue to explore. While most results
+in this domain have been achieved on image classiﬁcation
+and language modelling problems, here we concentrate on
+dense per-pixel tasks, in particular, semantic image seg-
+mentation using fully convolutional networks. In contrast to
+the aforementioned areas, the design choices of a fully con-
+volutional network require several changes, ranging from
+the sort of operations that need to be used—e.g., dilated
+convolutions—to a solving of a more difﬁcult optimisation
+problem.
+In this work, we are particularly interested in
+searching for high-performance compact segmentation ar-
+chitectures, able to run in real-time using limited resources.
+To achieve that, we intentionally over-parameterise the ar-
+chitecture during the training time via a set of auxiliary
+cells that provide an intermediate supervisory signal and
+can be omitted during the evaluation phase. The design of
+the auxiliary cell is emitted by a controller, a neural net-
+work with the ﬁxed structure trained using reinforcement
+learning. More crucially, we demonstrate how to efﬁciently
+search for these architectures within limited time and com-
+putational budgets.
+In particular, we rely on a progres-
+sive strategy that terminates non-promising architectures
+from being further trained, and on Polyak averaging cou-
+pled with knowledge distillation to speed-up the conver-
+gence. Quantitatively, in 8 GPU-days our approach dis-
+covers a set of architectures performing on-par with state-
+of-the-art among compact models on the semantic segmen-
+tation, pose estimation and depth prediction tasks. Code
+will be made available here: https://github.com/
+drsleep/nas-segm-pytorch
+
+1. Introduction
+
+For years, the design of neural network architectures was
+thought to be solely a duty of a human expert - it was
+
+∗Equal contribution.
+
+her responsibility to specify which type of architecture to
+use, how many layers should there be, how many channels
+should convolutional layers have and etc. This is no longer
+the case as the automated neural architecture search - a way
+of predicting the neural network structure via a non-human
+expert (an algorithm) - is fast-growing. Potentially, this may
+well mean that instead of manually adapting a single state-
+of-the-art architecture for a new task at hand, the algorithm
+would discover a set of best-suited and high-performing ar-
+chitectures on given data.
+
+Few decades ago, such an algorithm was based on evo-
+lutionary programming strategies where best seen so far ar-
+chitectures underwent mutations and their most promising
+off-springs were bound to continue evolving [2]. Now, we
+have reached the stage where a secondary neural network,
+oftentimes called controller, replaces a human in the loop,
+by iteratively searching among possible architecture candi-
+dates and maximising the expected score on the held-out
+set [47]. While there is a lack of theoretical work behind this
+latter approach, several promising empirical breakthroughs
+have already been achieved [3, 48].
+
+At this point, it is important to emphasise the fact that
+such accomplishments required an excessive amount of
+computational resources—more than 20, 000 GPU-days for
+the work of Zoph and Le [47] and 2, 000 for Zoph et al. [48].
+Although a few works have reduced those to single digit
+numbers on image classiﬁcation and language processing
+tasks [21, 28], we consider more challenging dense per-
+pixel tasks that produce an output for each pixel in the input
+image and for which no efﬁcient training regimes have been
+previously presented. Although here we concentrate only
+on semantic image segmentation, our proposed methodol-
+ogy can immediately be applied to other per-pixel predic-
+tion tasks, such as depth estimation and pose estimation. In
+our experiments, we demonstrate the transferability of the
+discovered segmentation architecture to the latter problems.
+Notably, all of them play an important role in computer vi-
+sion and robotic applications and so far have been relying
+on manually designed accurate low-latency models for real-
+world scenarios.
+
+19126
+
+The focus of our work is to automatically discover com-
+pact high-performing fully convolutional architectures, able
+to run in real-time on a low-computational budget, for ex-
+ample, on the Jetson platform. To this end, we are explic-
+itly looking for structures that not only improve the perfor-
+mance on the held-out set, but also facilitate the optimisa-
+tion during the training stage. Concretely, we consider the
+encoder-decoder type of a fully-convolutional network [23],
+where encoder is represented by a pre-trained image classi-
+ﬁer, and the decoder structure is emitted by the controller
+network. The controller generates the connectivity struc-
+ture between encoder and decoder, as well as the sequence
+of operations (that form the so-called cell) to be applied on
+each connected path. The same cell structure is used to form
+an auxiliary classiﬁer, the goal of which is to provide inter-
+mediate supervision and to implicitly over-parameterise the
+model. Over-parameterisation is believed to be the primary
+reason behind the successes of deep learning models, and a
+few theoretical works have already addressed it in simpli-
+ﬁed cases [8, 37]. Along with empirical results, this is the
+primary motivation behind the described approach.
+
+Last, but not least, we devise a search strategy that per-
+mits to ﬁnd high-performing architectures within a small
+number of days using only few GPUs. Concretely, we pur-
+sue two goals here:
+
+i.) To prevent ‘bad’ architectures from being trained for
+
+long; and
+
+ii.) To achieve a solid performance estimate as soon as
+
+possible.
+
+To tackle the ﬁrst goal, we divide the training process during
+the search into two stages. During the ﬁrst stage, we ﬁx the
+encoder’s weights and pre-compute its outputs, while only
+training the decoder part. For the second stage, we train the
+whole model end-to-end. We validate the performance after
+the ﬁrst stage and terminate the training of non-promising
+architectures. For the second goal, we employ Polyak aver-
+aging [29] and knowledge distillation [12] to speed-up con-
+vergence.
+
+To summarise, our contributions in this work are to
+propose an efﬁcient neural architecture search strategy for
+dense-per-pixel tasks that (i.) allows to sample compact
+high-performing architectures, and (ii.) can be used in real-
+time on low-computing platforms, such as JetsonTX2. In
+particular, the above points are made possible by:
+
+• Devising a progressive strategy able to eliminate poor
+
+candidates early in the training;
+
+• Developing a training schedule for semantic segmenta-
+tion able to provide solid results quickly via the means
+of knowledge distillation and Polyak averaging;
+
+• Searching for an over-parameterised auxiliary cell that
+provides better training and is obsolete during infer-
+ence.
+
+2. Related Work
+
+Traditionally, architecture search methods have been
+relying upon evolutionary strategies [2, 39, 40], where
+a population of networks (oftentimes together with their
+weights) is continuously mutated, and less promising net-
+works are being discarded. Modern neuro-evolutionary ap-
+proaches [22, 30] rely on the same principles and beneﬁt
+from available computational resources, that allow them to
+achieve impressive results. Bayesian optimisation methods
+estimating the probability density of objective function have
+long been used for hyper-parameter search [4, 36]. Scaling
+up Bayesian methods for architecture search is an ongoing
+work, and few kernel-based approaches have already shown
+solid performance [14, 41].
+
+Most recently, neural architecture search (NAS) strate-
+gies based on reinforcement learning (RL) have attained
+state-of-the-art results on the tasks of image classiﬁcation
+and natural language processing [3, 47, 48]. Relying on
+enormous computational resources, these algorithms com-
+prise a separate neural network, the so-called ‘controller’,
+that emits an architecture design and receives a scalar re-
+ward after the emitted architecture is trained on the task
+of interest. Notably, thousand of iterations and GPU-days
+are needed for convergence. Rather than searching for the
+whole network structure from scratch, these methods tend to
+look for cells—repeatable motifs that can be stacked multi-
+ple times in a feedforward fashion.
+
+Several solutions for making NAS methods more efﬁ-
+cient have been recently proposed. In particular, Pham et
+al. [28] unroll the computational graph of all possible ar-
+chitectures and allow sharing the weights among different
+architectures. This dramatically reduces the number of re-
+sources needed for convergence.
+In a similar vein of re-
+search, Liu et al. [21] exploit a progressive strategy where
+the network complexity is gradually increased, while the
+ranking network is trained in parallel to predict the perfor-
+mance of a new architecture. A few methods have been
+built around continuous relaxation of the search problem.
+Particularly Luo et al. [24] use an encoder to embed the ar-
+chitecture description into a latent space, and estimator to
+predict the performance of an architecture given its embed-
+ding. While these methods make the search process more
+efﬁcient, they achieve so by sacriﬁcing the expressiveness
+of the search space, and hence, may arrive to a sub-optimal
+solution.
+
+In semantic segmentation [17, 18, 19], up to now all the
+architectures have been manually designed, closely follow-
+ing the winner entries of image classiﬁcation challenges.
+Two prominent directions have emerged over the last few
+years:
+the encoder-decoder type [17, 23, 27], where bet-
+ter features are learned at the expense of having a spa-
+tially coarse output mask; whereas other popular approach
+discards several down-sampling layers and relies on di-
+
+29127
+
+lated convolutions for keeping the receptive ﬁeld size in-
+tact [6, 44, 46]. Chen et al. [7] have also shown that the
+combination of those two paradigms lead to even better re-
+sults across different benchmarks. In terms of NAS in se-
+mantic segmentation, independently of us and in parallel to
+our work, a straightforward adaptation of image classiﬁca-
+tion NAS methods was proposed by Chen et al. [5]. In it
+they randomly search for a single segmentation cell design
+and achieve expressive results by using almost 400 GPUs
+over the range of 7 days. In contrast to that, our method ﬁrst
+and foremost is able to ﬁnd compact segmentation models
+only in a fraction of that time. Secondly, it differs signiﬁ-
+cantly in terms of the search design and search methodol-
+ogy.
+
+For the purposes of a clearer presentation of our ideas,
+we brieﬂy review knowledge distillation, an approach pro-
+posed by Hinton et al. [12] to successfully train a compact
+model using the outputs of a single (or an ensemble of) large
+network(s) pre-trained on the current task. In it, the logits
+of the pre-trained network are being used as an additional
+regulariser for the small network. In other words, the lat-
+ter has to mimic the outputs of the former. Such a method
+was shown to provide a better learning signal for the small
+network. As a result of that, it has already found its way
+across multiple domains: computer vision [45], reinforce-
+ment learning [31], continuous learning [16] – to name a
+few.
+
+3. Methodology
+
+We start with the problem formulation, proceed with the
+deﬁnitions of an auxiliary cell and knowledge distillation
+loss, and conclude with the overall search strategy.
+
+We primarily focus on two research questions: (i.) how
+to acquire a reliable estimate of the segmentation model
+performance as quickly as possible; and (ii.) how to im-
+prove the training process of the segmentation architecture
+through over-parameterisation, obsolete during inference.
+
+3.1. Problem Formulation
+
+We consider dense prediction task T , for which we have
+multiple training tuples {(Xi, yi)}, where both Xi and yi
+are 3-dimensional tensors with equal spatial and arbitrary
+third dimensions. In this work, Xi is a 3-channel RGB im-
+age, while yi is a C-channel one-hot segmentation mask
+with C being equal to the number of classes, which corre-
+sponds to semantic image segmentation. Furthermore, we
+rely on a mapping f : X → y with parameters θ, that is
+represented by a fully convolutional neural network. We
+assume that the network f can further be decomposed into
+two parts: e - representing encoder, and d - for decoder. We
+initialise encoder e with weights from a pre-trained classiﬁ-
+cation network consisting of multiple down-sampling oper-
+ations that reduce the spatial dimensions of the input. The
+
+decoder part, on the other hand, has access to several out-
+puts of encoder with varying spatial and channel dimen-
+sions. The search goal is to choose which feature maps to
+use and what operations to apply on them. We next describe
+the decoder search space in full detail.
+
+3.1.1 Search Space
+
+We restrict our attention to the decoder part, as it is currently
+infeasible to perform a full segmentation network search
+from scratch.
+
+As mentioned above, the decoder has access to multi-
+ple layers from the pre-trained encoder with varying di-
+mensions. To keep sampled architectures compact and of
+approximately equal size, each encoder output undergoes
+a single 1×1 convolution with the same number of out-
+put channels. We rely on a recurrent neural network, the
+controller, to sequentially produce pairs of indices of which
+layers to use, and what operations to apply on them. In par-
+ticular, this sequence of operations is combined to form a
+cell (see example in Fig. 1). The same cell but with dif-
+ferent weights is applied to each layer inside the sampled
+pair, and the outputs of two cells are summed up. The re-
+sultant layer is added to the sampling pool. The number of
+times pairs of layers are sampled is controlled by a hyper-
+parameter, which we set to 3 in our experiments, allowing
+the controller to recover such encoder-decoder architectures
+as FCN [23], or ReﬁneNet [17]. All non-sampled summa-
+tion outputs are concatenated, before being fed into a single
+1×1 convolution to reduce the number of channels followed
+by the ﬁnal classiﬁcation layer.
+
+Each cell takes a single input with the controller ﬁrst de-
+ciding which operation to use on that input. The controller
+then proceeds by sampling with replacement two locations
+out of two, i.e., of input and the result of the ﬁrst operation,
+and two corresponding operations. The outputs of each op-
+eration are summed up, and all three layers (from each op-
+eration and the result of their summation) together with the
+initial two can be sampled on the next step. The number of
+times the locations are sampled inside the cell is controlled
+by another hyper-parameter, which we also set to 3 in our
+experiments in order to keep the number of all possible ar-
+chitectures to a feasible amount1. All existing non-sampled
+summation outputs inside the cell are summed up, and used
+as the cell output. In this case, we resort to sum as concate-
+nation may lead to variable-sized outputs between different
+architectures.
+
+Based on existing research in semantic segmentation, we
+
+consider 11 operations:
+
+1Taking into account symmetrical – thus, identical – architectures, we
+estimate the number of unique connections in the decoder part to be 120,
+and the number of unique cells ∼1010, leading to ∼1012, which is on-par
+with concurrent works.
+
+39128
+
+0
+ 
+k
+c
+o
+b
+
+l
+
+1
+ 
+k
+c
+o
+b
+
+l
+
+2
+ 
+k
+c
+o
+b
+
+l
+
+3
+ 
+k
+c
+o
+b
+
+l
+
+conv1x1
+
+conv1x1
+
+conv1x1
+
+Decoder Structure
+
+input 0
+
+aux cell
+
+aux clf
+
+block 4
+
+block 5
+
+concat
+
+conv1x1
+
+clf
+
+output
+
+cell
+
+cell
+
+cell
+
+cell
+
+forward pass
+select index
+select op
+
+cell
+op0
+
+y
+
+op1
+
+op2
+
+index 1
+0 1 2 3
+
+index 3
+0 1 2 3
+
+index 2
+3 4
+0 1
+
+2
+
+index 3
+0 1 2 3 4
+
+op1
+0 1 2
+
+index 0
+0 1
+
+index 1
+0 1
+
+op2
+0 1 2
+
+op0
+0 1 2
+
+select 
+index 
+
+select 
+index 
+
+select 
+index 
+
+select 
+index 
+
+select 
+op 
+
+select 
+index 
+
+select 
+index 
+
+select 
+op 
+
+select 
+op 
+
+ 
+t
+
+u
+p
+u
+o
+
+t
+
+ 
+r
+e
+d
+o
+c
+n
+e
+
+ 
+r
+e
+d
+o
+c
+e
+d
+
+N
+N
+R
+
+ 
+r
+e
+
+l
+l
+
+o
+r
+t
+
+n
+o
+c
+
+block 4
+
+block 5
+
+branch 1
+
+branch 2
+
+sample decoder connections
+
+sample cell structure
+
+Figure 1 – Example of the encoder-decoder auxiliary search layout. Controller RNN (bottom) ﬁrst generates connections between encoder and decoder
+(top left), and then samples locations and operations to use inside the cell (top right). All the cells (including auxiliary cell) share the emitted design.
+In this example, the controller ﬁrst samples two indices (block1 and block3), both of which pass through the corresponding cells, before being summed up
+to create block4. The controller then samples block2 and block3 that are merged into block5. Since block4 was not sampled, it is concatenated with block5
+and fed into 1×1 convolution followed by the ﬁnal classiﬁer. The output of block4 is also passed through an auxiliary cell for intermediate supervision.
+To emit the cell design, the controller starts by sampling the ﬁrst operation applied on the cell input (op1), followed by sampling of two indices – index0,
+corresponding to the cell input, and index1 of the output layer after the ﬁrst operation. Two operations – op2 and op0 – are applied on each index,
+respectively, and their summation serves as the cell output.
+
+• conv 1 × 1,
+• conv 3 × 3,
+• separable conv 3 × 3,
+• separable conv 5 × 5,
+• global average pooling followed by upsampling and
+
+conv 1 × 1,
+
+• conv 3 × 3 with dilation rate 3,
+• conv 3 × 3 with dilation rate 12,
+• separable conv 3 × 3 with dilation rate 3,
+• separable conv 5 × 5 with dilation rate 6,
+• skip-connection,
+• zero-operation that effectively nulliﬁes the path.
+
+3.2. Search Strategy
+
+We randomly divide the training set into two disjoint sets
+- meta-train and meta-val. The meta-train subset is used to
+train the sampled architecture on the given task (i.e., se-
+mantic segmentation), whereas meta-val, on the other hand,
+is used to evaluate the trained architecture and provide the
+controller with a scalar, oftentimes called reward in the
+reinforcement learning literature. Given the sampled se-
+quence, its logarithmic probabilities and the reward signal,
+the controller is optimised via proximal policy optimisation
+(PPO) [34]. Hence, there are two training processes present:
+inner - optimisation of the sampled architecture on the given
+task, and outer - optimisation of the controller. We next con-
+centrate on the inner loop.
+
+An example of the search layout with 2 decoder blocks and
+2 cell branches is depicted on Fig. 1.2
+
+3.2.1 Progressive Stages
+
+2Please refer to Appendix A for more details on the search space and
+
+the sampling procedure.
+
+We divide the inner training process into two stages. Dur-
+ing the ﬁrst stage, the encoder weights are ﬁxed and its out-
+
+49129
+
+puts are pre-computed, while only decoder is being trained.
+This leads to a quick adaptation of the decoder weights and
+a reasonable estimate of the performance of the sampled ar-
+chitecture. We exploit a simple heuristic to decide whether
+to continue training the sampled architecture for the second
+stage, or not. Concretely, the current reward value is being
+compared with the running mean of rewards seen so far, and
+if it is higher, we continue training. Otherwise, with prob-
+ability 1 − p we terminate the training process. The prob-
+ability p is annealed throughout our search (starting from
+0.9).
+
+The motivation behind this is straightforward: the results
+of the ﬁrst stage, while noisy, can still provide a reasonable
+estimate of the potential of the sampled architecture. At
+the very least, they would present a reliable signal that the
+sampled architecture is non-promising, while spending only
+few seconds on it. Such a simple approach encourages ex-
+ploration during early stages of search akin to the ǫ-greedy
+strategy often used in the multi-armed bandit problem [42].
+
+3.2.2 Fast Training via Knowledge Distillation and
+
+Weights’ Averaging
+
+Semantic segmentation models are notable for requiring
+many iterations to converge. Partially, this is addressed by
+initialising the encoder part from a pre-trained classiﬁcation
+network. Unfortunately, no such thing exists for decoder.
+
+Fortunately, though, we can explore several alternatives
+that provide faster convergence. Besides tailoring our op-
+timisation hyper-parameters, we rely on two more tricks:
+ﬁrstly, we keep track of the running average of the parame-
+ters during each stage and apply them before the ﬁnal val-
+idation [29]. Secondly, we append an additional l2−loss
+term between the logits of the current architecture and a
+pre-trained teacher network. We can either pre-compute the
+teacher’s outputs beforehand, or acquire them on-the-ﬂy in
+case the teacher’s computations are negligible.
+
+The combination of both of these approaches allows us
+to receive a very reliable estimate of the performance of the
+semantic segmentation model as quickly as possible without
+a signiﬁcant overhead.
+
+3.2.3
+
+Intermediate Supervision via Auxiliary Cells
+
+We further look for ways of easing optimisation during fast
+search, as well as during a longer training of semantic seg-
+mentation models. Thus, still aligning with the goal of hav-
+ing a compact but accurate model, we explicitly aim to ﬁnd
+ways of performing steps that are beneﬁcial during training
+and obsolete during evaluation.
+
+One approach that we consider here is to append an aux-
+iliary cell after each summation between pairs of main cells
+- the auxiliary cell is identical to the main cell and can either
+be conditioned to output ground truth directly, or to mimic
+
+the teacher’s network predictions (or the combination of the
+above two). At the same time, it does not inﬂuence the out-
+put of the main classiﬁer either during the training or testing
+and merely provides better gradients for the rest of the net-
+work. In the end, the reward per the sampled architecture
+will still be decided by the output of the main classiﬁer. For
+simplicity, we only apply the segmentation loss on all aux-
+iliary outputs.
+
+The notion of intermediate supervision is not novel in
+neural networks, but to the best of our knowledge, prior
+works have merely been relying on a simple auxiliary clas-
+siﬁer, and we are the ﬁrst to tie up the design of decoder with
+the design of the auxiliary cell. We demonstrate the quanti-
+tative beneﬁts of doing so in our ablation studies (Sect. 4.2).
+Furthermore, our motivation behind searching for cells
+that may also serve as intermediate supervisors stems from
+ever-growing empirical (and theoretical under certain as-
+sumptions) evidence that deep networks beneﬁt from over-
+parameterisation during training [8, 37]. While auxiliary
+cells provide an implicit notion of over-parameterisation,
+we could have explicitly increased the number of channels
+and then resorted to pruning. Nonetheless, pruning meth-
+ods tend to result in unstructured networks often carrying
+no tangible beneﬁts in terms of the runtime speed, whereas
+our solution simply permits omitting unused layers during
+inference.
+
+4. Experiments
+
+We conduct extensive experiments on PASCAL VOC
+which is an established semantic segmentation benchmark
+that comprises 20 semantic classes (and background) and
+provides 1464 training images [9]. For the search process,
+we extend those to more than 10000 by exploiting annota-
+tions from BSD [11]. As commonly done, during search,
+we keep 10% of those images for validation of the sampled
+architectures that provides the controller with the reward
+signal. For the ﬁrst stage, we pre-compute the encoder out-
+puts on 4000 images and store them for faster processing.
+
+The controller is a two-layer recurrent LSTM [13] neural
+network with 100 hidden units. All the units are randomly
+initialised from a uniform distribution. We use PPO [34] for
+optimisation with the learning rate of 0.0001.
+
+The encoder part of our network is MobileNet-v2 [32],
+pretrained on MS COCO [20] for semantic segmenta-
+tion using the Light-Weight ReﬁneNet decoder [26]. We
+omit the last layers and consider four outputs from lay-
+ers 2, 3, 6, 8 as inputs to decoder; 1×1 convolutional lay-
+ers used for adaptation of the encoder outputs have 48 out-
+put channels during search and 64 during training. De-
+coder weights are randomly initialised using the Xavier
+scheme [10]. To perform knowledge distillation, we use
+Light-Weight ReﬁneNet-152 [26], and apply ℓ2−loss with
+the coefﬁcient of 0.3 which was set using the grid search.
+
+59130
+
+RL Stage−1
+
+RL Stage−2
+
+RS Stage−1
+
+RS Stage−2
+
+(1200,1600]
+
+(800,1200]
+
+n
+o
+
+i
+t
+
+a
+r
+e
+
+t
+I
+ 
+
+h
+c
+r
+a
+e
+S
+
+(400,800]
+
+[0,400]
+
+0.3
+
+0.4
+
+0.5
+
+0.6
+
+0.7
+
+0.8
+
+Reward
+
+Figure 2 – Distribution of rewards per each training stage for reinforce-
+ment learning (RL) and random search (RS) strategies. Higher peaks
+correspond to higher density.
+
+The knowledge distillation outputs are pre-computed for the
+ﬁrst stage and omitted during the second one in the interests
+of time. Polyak averaging is applied with the decay rates of
+0.9 and 0.99, correspondingly. Batch normalisation statis-
+tics are updated during both stages.
+
+All our search experiments are being conducted on two
+1080Ti GPU cards, with the search process being termi-
+nated after 4 days. All runtime measurements are carried
+out on a single 1080Ti card, or on JetsonTX2, if mentioned
+otherwise. In particular, we perform the forward pass 100
+times and report the mean result together with standard de-
+viation.
+
+4.1. Search Results
+
+For the inner training of the sampled architectures, we
+devise a fast and stable training strategy: we exploit the
+Adam learning rule [15] for the decoder part of the net-
+work, and SGD with momentum - for encoder. In partic-
+ular, we use learning rates of 3e-3 and 1e-3, respectively.
+We pre-train each sampled architecture for 5 epochs on the
+
+Stage−1
+
+Stage−2
+
+0.70
+
+0.65
+
+0.60
+
+d
+r
+a
+w
+e
+R
+
+0.55
+
+baseline
+
++Polyak
+
++Polyak+AUX
+
++Polyak+AUX+KD
+
+Figure 3 – Distribution of rewards during each training stage of the
+search process across setups with Polyak averaging (Polyak), intermedi-
+ate supervision through auxiliary cells (AUX) and knowledge distillation
+(KD).
+
+ﬁrst stage, and for 1 on the second (in case the stopping cri-
+terion is not triggered). As the reward signal, we consider
+the geometric mean of three quantities: namely,
+
+i.) mean intersection-over-union (IoU), or Jaccard
+Index [9], primarily used across semantic segmentation
+benchmarks;
+
+ii.) frequency-weighted IoU, that scales each class IoU
+
+by the number of pixels present in that class, and
+
+iii.) mean-pixel accuracy, that averages the number of
+correct pixels per each class. When computing, we do not
+include background class as it tends to skew the results due
+to a large number of pixels belonging to background. As
+mentioned above, we keep the running mean of rewards af-
+ter the ﬁrst stage to decide whether to continue training a
+sampled architecture.
+
+We visualise the reward progress during both stages on
+Figure 2. As evident from it, the quality of the emitted ar-
+chitectures grows with time - it is even possible that more
+iterations would lead to better results, although we do not
+explore that to save the time spent. On the other hand, while
+random search has the potential of occasionally sampling
+decent architectures, it ﬁnds only a fraction of them in com-
+parison to the RL-based controller.
+
+Moreover, we evaluate the impact of the inclusion of
+Polyak averaging, auxiliary cells and knowledge distillation
+on each training stage. To this end, we randomly sample
+and train 140 architectures. We visualise the distributions
+of rewards on Fig. 3. All the tested settings signiﬁcantly
+outperform baseline on both stages, and the highest rewards
+on the second stage are attained when using all of the com-
+ponents above.
+
+4.2. Effect of Intermediate Supervision via Auxil-
+
+iary Cells
+
+After the search process is ﬁnished, we select 10 archi-
+tectures discovered by the RL controller with highest re-
+wards and proceed by carrying out additional ablation stud-
+ies aimed to estimate the beneﬁt of the proposed auxiliary
+scheme in case the architectures are allowed to train for
+longer.
+
+In particular, we train each architecture for 20 epochs on
+BSD together with PASCAL VOC and 30 epochs on PAS-
+CAL VOC only. For simplicity, we omit Polyak averaging
+and knowledge distillation. Three distinct setups are being
+tested: concretely, we estimate whether intermediate super-
+vision helps at all, and whether auxiliary cell is superior to
+a plain auxiliar classiﬁer
+
+The results of these ablation studies are given in Fig. 4.
+Auxiliary supervised architectures achieve signiﬁcantly
+higher mean IoU, and, in particular, architectures with aux-
+iliary cells attain best results in 8 out of 10 cases, reaching 3
+absolute best values across all the setups and architectures.
+
+69131
+
+cell
+
+clf
+
+none
+
+%
+
+ 
+,
+
+U
+o
+
+I
+ 
+
+n
+a
+e
+M
+
+73
+
+72
+
+71
+
+70
+
+69
+
+Architectures
+
+Figure 4 – Ablation studies on the value of intermediate supervision
+(none), and the type of supervision (cell or clf ). Each tick on the x-axis
+corresponds to a different architecture.
+
+0
+
+ 
+k
+c
+o
+b
+
+l
+
+1
+
+ 
+k
+c
+o
+b
+
+l
+
+2
+
+ 
+k
+c
+o
+b
+
+l
+
+3
+
+ 
+k
+c
+o
+b
+
+l
+
+4.3. Relation between search rewards and training
+
+performance
+
+We further measure the correlation effect between re-
+wards acquired during the search and mean IoU attained by
+same architectures trained for longer. To this end, we ran-
+domly sample 30 architectures out of those explored by the
+controller: for fair comparison, we sample 10 architectures
+with poor search performance (with rewards being less than
+0.4), 10 with medium rewards (between 0.4 and 0.6), and
+10 with high rewards (> 0.6). We train each architecture on
+BSD+VOC and VOC as in Sect. 4.2, rank each according
+to its rewards, and mean IoU, and measure the Spearman’s
+rank correlation coefﬁcient. As visible in Fig. 5, there is a
+strong correlation between rewards after each stage, as well
+as between the ﬁnal reward and mean IoU. This signals that
+our search process is able to reliably differentiate between
+poor-performing and well-performing architectures.
+
+2
+−
+e
+g
+a
+S
+
+t
+
+ 
+:
+
+h
+c
+r
+a
+e
+S
+
+0.7
+
+0.6
+
+0.5
+
+0.4
+
+0.3
+
+2
+−
+e
+g
+a
+S
+
+t
+
+ 
+:
+
+h
+c
+r
+a
+e
+S
+
+0.7
+
+0.6
+
+0.5
+
+0.4
+
+0.3
+
+0.3
+
+0.4
+
+0.5
+
+0.6
+
+0.7
+
+0.50
+
+Search: Stage−1
+
+(a) ρ = 0.9341
+
+0.55
+Train: BSD+VOC/VOC
+
+0.60
+
+0.65
+
+0.70
+
+(b) ρ = 0.9239
+
+Figure 5 – Correlation between rewards acquired during search
+stages (a) and mean IoU after full training (b) of 30 architectures on
+BSD+VOC/VOC.
+
+4.4. Full Training Results
+
+Finally, we choose 3 best performing architectures from
+Sect. 4.2 and train each on the full training set, augmented
+
+with annotations from MS COCO [20]. The training setup
+is analogous to the aforementioned one with the ﬁrst stage
+being trained for 30 epochs (on COCO+BSD+VOC), the
+second stage - for 50 (BSD+VOC), and the last one - for 100
+(VOC only). After each stage, the learning rates are halved.
+Additionally, halfway through the last stage we freeze the
+batch norm statistics and divide the learning rate in half.
+We exploit intermediate supervision via auxiliary cells with
+coefﬁcients of 0.3, 0.25, 0.2, 0.15 across the stages.
+
+Decoder Structure
+
+concat
+
+conv1x1
+
+x
+
+y
+
+cell
+
+cell
+
+cell
+
+cell
+
+cell
+
+cell
+
+conv3x3 
+
+sep5x5 
+rate 6 
+conv3x3 
+rate 3 
+
+sep3x3 
+
+Cell Structure
+
+gap 
+
+sep5x5 
+rate 6 
+
+sep5x5 
+rate 6 
+
+y
+
+conv1x1
+
+conv1x1
+
+conv1x1
+
+Figure 6 – Automatically discovered decoder architecture (arch0). We
+visualise the connectivity structure between encoder and decoder (top),
+and the cell design (bottom). L represents an element-wise summation
+operation applied to each branch scaled to the highest spatial resolution
+among them (via bilinear interpolation), while ‘gap’ stands for global
+average pooling.
+
+Quantitative results are given in Table 1.3 The archi-
+tectures discovered by our method achieve competitive per-
+formance in comparison to state-of-the-art compact models
+and even do so with a signiﬁcantly lower number of ﬂoat-
+ing point operations for same output resolution. At the same
+time, the found architectures can be run in real-time both on
+a generic GPU card and JetsonTX2.4 Qualitatively (Fig. 7),
+our model is able to better recognise similar and easily con-
+fused classes (e.g. horse – dog in row 3, and cat – dog in row
+5), better segment foreground from background and avoid
+spurious predictions (rows 1,2,4,5).
+
+We visualise5 the structure of the highest performing ar-
+chitecture (arch0) on Fig. 6. With multiple branches en-
+coding information of different scales, it resembles sev-
+eral prominent blocks in semantic segmentation, notably
+the ASPP module [7]. Importantly, the cell found by our
+method differs in the way the receptive ﬁeld size is con-
+trolled. Whereas ASPP solely relies on various dilation
+rates, here convolutions with different kernel sizes arranged
+in a cascaded manner allow more ﬂexibility. Furthermore,
+this design is more computationally efﬁcient and has higher
+expressiveness as intermediate features are easily re-used.
+
+4.5. Transferability to other Dense Output Tasks
+
+4.5.1 Pose Estimation
+
+We further apply the found architectures on the task of pose
+estimation. In particular, the MPII [1] and MS COCO Key-
+
+3Per-class measures are provided in Appendix B.
+4Please refer to Appendix C on notes regarding the Jetson’s runtime.
+5Other architectures are visualised in Appendix A.
+
+79132
+
+Model
+
+Val mIoU,%, MAdds,B Params,M Output Res Runtime,ms (JetsonTX2/1080Ti)
+
+DeepLab-v3-ASPP [32]
+
+DeepLab-v3 [32]
+ReﬁneNet-LW [26]
+
+Ours (arch0)
+Ours (arch1)
+Ours (arch2)
+
+75.7
+75.9
+76.2
+78.0
+77.1
+77.3
+
+5.8
+8.73
+9.3
+4.47
+2.95
+3.47
+
+4.5
+2.1
+3.3
+2.6
+2.8
+2.9
+
+32×32
+64×64
+128×128
+128×128
+64×64
+64×64
+
+69.67±0.53
+122.07±0.58
+144.85 ± 0.49
+109.36±0.39
+67.57±0.54
+64.60±0.33
+
+8.09±0.53
+11.35±0.43
+12.00±0.26
+14.86±0.31
+11.04±0.23
+8.86±0.26
+
+Table 1 – Results on validation set of PASCAL VOC after full training on COCO+BSD+VOC. All networks share the same backbone - MobileNet-v2.
+FLOPs and runtime are being measured on 512 × 512 inputs. For DeepLab-v3 we use ofﬁcial models provided by the authors.
+
+4.5.2 Depth Estimation
+
+Finally, we train the architectures on NYUDv2 [35] for
+depth prediction. Following previous work [25], we only
+use 25K training images with depth annotations from the
+Kinect sensor, and report validation results on 654 images
+in Table 3. Among other compact real-time networks, we
+achieve signiﬁcantly better results across all the metrics
+without any additional tricks. Note also that the work in
+[25] trained the depth model jointly with semantic segmen-
+tation, thus using extra information.
+
+Image
+
+GT
+
+Ours (arch0) RF-LW [26] DL-v3 [32]
+
+Figure 7 – Inference results of our model (arch0) on validation set
+of PASCAL VOC, together with Light-Weight-ReﬁneNet (RF-LW) and
+DeepLab-v3 (DL-v3). All the models rely on MobileNet-v2 as the en-
+coder.
+
+point [20] datasets are used as our benchmark. MPII in-
+cludes 25K images containing 40K people with 16 anno-
+tated body joints. The evaluation measure is PCKh [33]
+with thresholds of 0.5 and 0.1. The COCO dataset com-
+prises 200K images of 250K people with 17 body joints.
+Based on object keypoint similarity (OKS)6, we report av-
+erage precision (AP) and average recall (AR) over 10 dif-
+ferent OKS thresholds.
+
+Our quantitative results are in Table 2.7 We follow the
+training protocol of Xiao et al. [43] and do not tune our
+architectures. As can be seen from the results, the discov-
+ered architectures achieve competitive performance even in
+comparison to a more powerful ResNet-50-based model.
+
+MPII
+
+COCO
+
+Model
+
+Mean@0.5 Mean@0.1
+
+AP
+
+DeepLab-v3+ [7]
+ResNet-50 [43]
+
+Ours (arch0)
+Ours (arch1)
+Ours (arch2)
+
+86.6
+88.5
+86.5
+87.0
+87.1
+
+31.7
+33.9
+31.4
+32.0
+31.8
+
+0.668
+0.704
+0.658
+0.659
+0.659
+
+AR
+0.700
+0.763
+0.691
+0.694
+0.693
+
+Params,M
+
+5.8
+34.0
+2.6
+2.8
+2.9
+
+Table 2 – Comparisons on MPII validation and COCO val2017. Flip test
+is used. For COCO, the same detector as in [43] is used for all models.
+DeepLab-v3+ is our re-implementation based on the ofﬁcial code.
+
+6http://cocodataset.org/#keypoints-eval
+7Additional qualitative and quantitative results are in Appendix B.
+
+arch0
+0.523
+0.184
+0.136
+0.089
+0.830
+0.967
+0.992
+
+RMSE (lin)
+RMSE (log)
+abs rel
+sqr rel
+δ < 1.25
+δ < 1.252
+δ < 1.253
+Parameters, M 2.6
+
+Ours
+arch1
+0.526
+0.183
+0.131
+0.086
+0.832
+0.968
+0.992
+
+2.8
+
+arch2 RF-LW [25] CReaM [38]
+0.525
+0.189
+0.140
+0.093
+0.820
+0.966
+0.992
+
+0.565
+0.205
+0.149
+0.105
+0.790
+0.955
+0.990
+
+0.687
+0.251
+0.190
+
+0.704
+0.917
+0.977
+
+−
+
+2.9
+
+3.0
+
+1.5
+
+Table 3 – Quantitative results on the validation set of NYUDv2. For
+RMSE, abs rel and sqr rel lower values are better, whereas for accuracy
+(δ) higher values are better.
+5. Discussion and Conclusions
+
+There is little doubt that manual design of neural archi-
+tectures is a tedious and difﬁcult task to handle. It is even
+more complicated to come up with a design of compact and
+high-performing architecture on challenging dense predic-
+tion problems, such as semantic segmentation. In this work,
+we showcased a simple and reliable approach of search-
+ing for fully convolutional architectures within a reasonable
+amount of time and computational resources. Our method is
+based around over-parameterisation of small networks that
+allows them to converge to better solutions. We achieved
+competitive performance to manually designed state-of-the-
+art compact architectures on PASCAL VOC, while search-
+ing only for 4 days on 2 GPU cards. Moreover, best found
+architectures also attained excellent results on other dense
+per-pixel tasks — pose estimation and depth prediction.
+
+Our future goals include exploration of alternative ways
+
+of over-parameterisation and search space description.
+
+Acknowledgements
+
+VN, CS, IR’s participation in this work were in part sup-
+ported by ARC Centre of Excellence for Robotic Vision.
+CS was also supported by the GeoVision CRC Project. Cor-
+respondence should be addressed to CS.
+
+89133
+
+References
+
+[1] M. Andriluka, L. Pishchulin, P. Gehler, and B. Schiele. 2d
+human pose estimation: New benchmark and state of the
+art analysis. In Proc. IEEE Conf. Comp. Vis. Patt. Recogn.,
+2014.
+
+[2] P. J. Angeline, G. M. Saunders, and J. B. Pollack. An evolu-
+tionary algorithm that constructs recurrent neural networks.
+IEEE Trans. Neural Networks, 1994.
+
+[3] B. Baker, O. Gupta, N. Naik, and R. Raskar. Designing neu-
+ral network architectures using reinforcement learning. Proc.
+Int. Conf. Learn. Representations, 2017.
+
+[4] J. Bergstra, D. Yamins, and D. D. Cox. Making a science
+of model search: Hyperparameter optimization in hundreds
+of dimensions for vision architectures.
+In Proc. Int. Conf.
+Mach. Learn., 2013.
+
+[5] L. Chen, M. D. Collins, Y. Zhu, G. Papandreou, B. Zoph,
+F. Schroff, H. Adam, and J. Shlens. Searching for efﬁcient
+multi-scale architectures for dense image prediction. arXiv:
+Comp. Res. Repository, abs/1809.04184, 2018.
+
+[6] L. Chen, G. Papandreou, I. Kokkinos, K. Murphy, and A. L.
+Yuille. Deeplab: Semantic image segmentation with deep
+convolutional nets, atrous convolution, and fully connected
+crfs. IEEE Trans. Pattern Anal. Mach. Intell., 2018.
+
+[7] L. Chen, Y. Zhu, G. Papandreou, F. Schroff, and H. Adam.
+Encoder-decoder with atrous separable convolution for se-
+mantic image segmentation. In Proc. Eur. Conf. Comp. Vis.,
+2018.
+
+[8] S. Du and J. Lee. On the power of over-parametrization in
+neural networks with quadratic activation. In Proc. Int. Conf.
+Mach. Learn., 2018.
+
+[9] M. Everingham, L. J. V. Gool, C. K. I. Williams, J. M. Winn,
+and A. Zisserman. The pascal visual object classes (VOC)
+challenge. Int. J. Comput. Vision, 2010.
+
+[10] X. Glorot and Y. Bengio. Understanding the difﬁculty of
+In Proc. Int.
+
+training deep feedforward neural networks.
+Conf. Artiﬁcial Intell. & Stat., 2010.
+
+[11] B. Hariharan, P. Arbelaez, L. D. Bourdev, S. Maji, and J. Ma-
+lik. Semantic contours from inverse detectors. In Proc. IEEE
+Int. Conf. Comp. Vis., 2011.
+
+[12] G. E. Hinton, O. Vinyals, and J. Dean. Distilling the knowl-
+edge in a neural network. Proc. Advances in Neural Inf. Pro-
+cess. Syst., 2014.
+
+[13] S. Hochreiter and J. Schmidhuber. Long short-term memory.
+
+Neural Computation, 1997.
+
+[14] K. Kandasamy, W. Neiswanger, J. Schneider, B. P´oczos, and
+E. Xing. Neural architecture search with bayesian optimisa-
+tion and optimal transport. arXiv: Comp. Res. Repository,
+2018.
+
+[15] D. P. Kingma and J. Ba. Adam: A method for stochastic
+optimization. arXiv: Comp. Res. Repository, abs/1412.6980,
+2014.
+
+[16] Z. Li and D. Hoiem. Learning without forgetting. In Proc.
+
+Eur. Conf. Comp. Vis., 2016.
+
+[17] G. Lin, A. Milan, C. Shen, and I. D. Reid. ReﬁneNet: Multi-
+path reﬁnement networks for high-resolution semantic seg-
+mentation.
+In Proc. IEEE Conf. Comp. Vis. Patt. Recogn.,
+2017.
+
+[18] G. Lin, C. Shen, I. D. Reid, and A. van den Hengel. Efﬁcient
+piecewise training of deep structured models for semantic
+
+segmentation. Proc. IEEE Conf. Comp. Vis. Patt. Recogn.,
+pages 3194–3203, 2016.
+
+[19] G. Lin, C. Shen, A. van den Hengel, and I. Reid. Exploring
+context with deep structured models for semantic segmenta-
+tion. IEEE Trans. Pattern Anal. Mach. Intell., 2017.
+
+[20] T. Lin, M. Maire, S. J. Belongie, J. Hays, P. Perona, D. Ra-
+manan, P. Doll´ar, and C. L. Zitnick. Microsoft COCO: com-
+mon objects in context. In Proc. Eur. Conf. Comp. Vis., 2014.
+[21] C. Liu, B. Zoph, M. Neumann, J. Shlens, W. Hua, L. Li,
+L. Fei-Fei, A. L. Yuille, J. Huang, and K. Murphy. Progres-
+sive neural architecture search.
+In Proc. Eur. Conf. Comp.
+Vis., 2018.
+
+[22] H. Liu, K. Simonyan, O. Vinyals, C. Fernando, and
+K. Kavukcuoglu. Hierarchical representations for efﬁcient
+architecture search. Proc. Int. Conf. Learn. Representations,
+2018.
+
+[23] J. Long, E. Shelhamer, and T. Darrell. Fully convolutional
+In Proc. IEEE Conf.
+
+networks for semantic segmentation.
+Comp. Vis. Patt. Recogn., 2015.
+
+[24] R. Luo, F. Tian, T. Qin, and T. Liu. Neural architecture opti-
+mization. Proc. Advances in Neural Inf. Process. Syst., 2018.
+[25] V. Nekrasov, T. Dharmasiri, A. Spek, T. Drummond,
+C. Shen, and I. D. Reid. Real-time joint semantic segmen-
+tation and depth estimation using asymmetric annotations.
+arXiv: Comp. Res. Repository, abs/1809.04766, 2018.
+
+[26] V. Nekrasov, C. Shen, and I. D. Reid. Light-weight reﬁnenet
+In Proc. British Ma-
+
+for real-time semantic segmentation.
+chine Vis. Conf., 2018.
+
+[27] H. Noh, S. Hong, and B. Han. Learning deconvolution net-
+In Proc. IEEE Int. Conf.
+
+work for semantic segmentation.
+Comp. Vis., 2015.
+
+[28] H. Pham, M. Y. Guan, B. Zoph, Q. V. Le, and J. Dean. Ef-
+ﬁcient neural architecture search via parameter sharing. In
+Proc. Int. Conf. Mach. Learn., 2018.
+
+[29] B. T. Polyak and A. B. Juditsky. Acceleration of stochastic
+approximation by averaging. SIAM Journal on Control and
+Optimization, 1992.
+
+[30] E. Real, S. Moore, A. Selle, S. Saxena, Y. L. Suematsu,
+J. Tan, Q. V. Le, and A. Kurakin. Large-scale evolution of
+image classiﬁers. In Proc. Int. Conf. Mach. Learn., 2017.
+
+[31] A. A. Rusu, S. G. Colmenarejo, C¸ . G¨ulc¸ehre, G. Desjardins,
+J. Kirkpatrick, R. Pascanu, V. Mnih, K. Kavukcuoglu, and
+R. Hadsell. Policy distillation. Proc. Int. Conf. Learn. Rep-
+resentations, 2016.
+
+[32] M. Sandler, A. G. Howard, M. Zhu, A. Zhmoginov, and
+L. Chen.
+Inverted residuals and linear bottlenecks: Mo-
+bile networks for classiﬁcation, detection and segmentation.
+Proc. IEEE Conf. Comp. Vis. Patt. Recogn., 2018.
+
+[33] B. Sapp and B. Taskar. MODEC: multimodal decompos-
+able models for human pose estimation. In Proc. IEEE Conf.
+Comp. Vis. Patt. Recogn., pages 3674–3681, 2013.
+
+[34] J. Schulman, F. Wolski, P. Dhariwal, A. Radford, and
+O. Klimov. Proximal policy optimization algorithms. arXiv:
+Comp. Res. Repository, 2017.
+
+[35] N. Silberman, D. Hoiem, P. Kohli, and R. Fergus.
+
+Indoor
+segmentation and support inference from RGBD images. In
+Proc. Eur. Conf. Comp. Vis., 2012.
+
+[36] J. Snoek, H. Larochelle, and R. P. Adams. Practical bayesian
+optimization of machine learning algorithms. In Proc. Ad-
+vances in Neural Inf. Process. Syst., 2012.
+
+99134
+
+[37] M. Soltanolkotabi, A. Javanmard, and J. D. Lee. The-
+oretical insights into the optimization landscape of over-
+parameterized shallow neural networks. IEEE Transactions
+on Information Theory, 2018.
+
+[38] A. Spek, T. Dharmasiri, and T. Drummond. CReaM: Con-
+densed real-time models for depth prediction using convolu-
+tional neural networks. Proc. IEEE/RSJ Int. Conf. Intelligent
+Robots & Systems, 2018.
+
+[39] K. O. Stanley, D. B. D’Ambrosio, and J. Gauci.
+
+A
+hypercube-based encoding for evolving large-scale neural
+networks. Artiﬁcial Life, 2009.
+
+[40] K. O. Stanley and R. Miikkulainen. Evolving neural network
+through augmenting topologies. Evolutionary Computation,
+2002.
+
+[41] K. Swersky, D. Duvenaud, J. Snoek, F. Hutter, and M. A. Os-
+borne. Raiders of the lost architecture: Kernels for bayesian
+optimization in conditional parameter spaces. arXiv: Comp.
+Res. Repository, 2014.
+
+[42] C. J. C. H. Watkins. Learning from delayed rewards. PhD
+
+thesis, King’s College, Cambridge, 1989.
+
+[43] B. Xiao, H. Wu, and Y. Wei. Simple baselines for human
+pose estimation and tracking. In Proc. Eur. Conf. Comp. Vis.,
+2018.
+
+[44] F. Yu, V. Koltun, and T. A. Funkhouser. Dilated residual
+In Proc. IEEE Conf. Comp. Vis. Patt. Recogn.,
+
+networks.
+2017.
+
+[45] A. R. Zamir, A. Sax, W. B. Shen, L. J. Guibas, J. Malik,
+and S. Savarese. Taskonomy: Disentangling task transfer
+learning. Proc. IEEE Conf. Comp. Vis. Patt. Recogn., 2018.
+[46] H. Zhao, J. Shi, X. Qi, X. Wang, and J. Jia. Pyramid
+scene parsing network. In Proc. IEEE Conf. Comp. Vis. Patt.
+Recogn., 2017.
+
+[47] B. Zoph and Q. V. Le. Neural architecture search with rein-
+forcement learning. Proc. Int. Conf. Learn. Representations,
+2017.
+
+[48] B. Zoph, V. Vasudevan, J. Shlens, and Q. V. Le. Learn-
+ing transferable architectures for scalable image recognition.
+Proc. IEEE Conf. Comp. Vis. Patt. Recogn., 2018.
+
+109135
+
+
